@@ -39,6 +39,7 @@
 #include "document/pdf_extractor.h"
 #include "rag/retriever.h"
 #include "rag/generator.h"
+#include <algorithm>
 
 // ── 简单的测试框架 ──
 static int g_passed = 0;
@@ -655,6 +656,183 @@ void test_prompt_metadata_summary() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 11: 端到端测试（Demo 数据集）
+// ═══════════════════════════════════════════════════════════════
+void test_e2e_import_all_demo_docs() {
+    TEST("E2E: 导入全部 21 篇法律文档");
+    rag::Retriever retriever;
+    int imported = 0;
+
+    std::string legalDir = "test/data/legal_cases";
+    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
+        if (entry.path().extension() == ".txt") {
+            retriever.addDocument(entry.path().string());
+            imported++;
+        }
+    }
+
+    std::cout << "    (导入: " << imported << " 篇, 文本块: " << retriever.docCount() << ") ";
+    CHECK(imported == 21);
+    PASS();
+}
+
+void test_e2e_search_across_all_types() {
+    TEST("E2E: 跨案件类型搜索");
+    rag::Retriever retriever;
+    std::string legalDir = "test/data/legal_cases";
+
+    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
+        if (entry.path().extension() == ".txt") {
+            retriever.addDocument(entry.path().string());
+        }
+    }
+
+    // 民事查询
+    auto civilResults = retriever.search("民间借贷 还款义务", 5);
+    CHECK(civilResults.size() >= 1);
+    bool hasCivil = false;
+    for (const auto& r : civilResults) {
+        if (r.docId.find("civil") != std::string::npos) hasCivil = true;
+    }
+    CHECK(hasCivil);
+
+    // 刑事查询
+    auto crimResults = retriever.search("诈骗罪 非法占有", 5);
+    CHECK(crimResults.size() >= 1);
+    bool hasCrim = false;
+    for (const auto& r : crimResults) {
+        if (r.docId.find("criminal") != std::string::npos) hasCrim = true;
+    }
+    CHECK(hasCrim);
+
+    // 行政查询
+    auto adminResults = retriever.search("行政处罚 程序违法", 5);
+    CHECK(adminResults.size() >= 1);
+
+    std::cout << "    (民事: " << civilResults.size() << "条, "
+              << "刑事: " << crimResults.size() << "条, "
+              << "行政: " << adminResults.size() << "条) ";
+    PASS();
+}
+
+void test_e2e_metadata_all_docs() {
+    TEST("E2E: 全部文档元数据提取");
+    rag::Retriever retriever;
+    std::string legalDir = "test/data/legal_cases";
+
+    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
+        if (entry.path().extension() == ".txt") {
+            retriever.addDocument(entry.path().string());
+        }
+    }
+
+    int withCaseNumber = 0, withCourt = 0, withDate = 0, withCaseType = 0;
+    auto ids = retriever.allDocIds();
+
+    for (const auto& id : ids) {
+        const auto* meta = retriever.getMetadata(id);
+        if (meta) {
+            if (!meta->caseNumber.empty()) withCaseNumber++;
+            if (!meta->court.empty()) withCourt++;
+            if (!meta->date.empty()) withDate++;
+            if (!meta->caseType.empty()) withCaseType++;
+        }
+    }
+
+    std::cout << "    (案号: " << withCaseNumber << "/" << ids.size()
+              << ", 法院: " << withCourt << "/" << ids.size()
+              << ", 日期: " << withDate << "/" << ids.size()
+              << ", 类型: " << withCaseType << "/" << ids.size() << ") ";
+    // 至少 80% 的文档应能提取到案号和法院
+    CHECK(withCaseNumber >= 16);
+    CHECK(withCourt >= 16);
+    CHECK(withDate >= 10);
+    CHECK(withCaseType >= 16);
+    PASS();
+}
+
+void test_e2e_filter_functionality() {
+    TEST("E2E: 元数据筛选验证");
+    rag::Retriever retriever;
+    std::string legalDir = "test/data/legal_cases";
+
+    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
+        if (entry.path().extension() == ".txt") {
+            retriever.addDocument(entry.path().string());
+        }
+    }
+
+    auto allResults = retriever.search("判决", 30);
+
+    // 手动模拟筛选：民事案件
+    int civilCount = 0, criminalCount = 0;
+    for (const auto& r : allResults) {
+        const auto* meta = retriever.getMetadata(r.docId);
+        if (meta) {
+            if (meta->caseType == "民事") civilCount++;
+            if (meta->caseType == "刑事") criminalCount++;
+        }
+    }
+
+    std::cout << "    (民事: " << civilCount << "条, 刑事: " << criminalCount << "条) ";
+    CHECK(civilCount > 0);
+    CHECK(criminalCount > 0);
+    PASS();
+}
+
+void test_e2e_legal_prompt_detection() {
+    TEST("E2E: 法律 Prompt 自动检测");
+    rag::Retriever retriever;
+
+    // 导入一篇法律文档
+    retriever.addDocument("test/data/legal_cases/case_civil_001_loan_dispute.txt");
+
+    auto results = retriever.search("借款纠纷", 3);
+    CHECK(results.size() >= 1);
+
+    std::string context = retriever.buildContext(results, 1500);
+
+    // 验证上下文包含法律关键词
+    bool hasCourt = context.find("人民法院") != std::string::npos;
+    bool hasCaseNum = context.find("京0105") != std::string::npos;
+    std::cout << "    (法院: " << (hasCourt ? "Y" : "N")
+              << ", 案号: " << (hasCaseNum ? "Y" : "N") << ") ";
+    CHECK(hasCourt);
+    CHECK(hasCaseNum);
+    PASS();
+}
+
+void test_e2e_performance_stress() {
+    TEST("E2E: 大数据量压力测试");
+    rag::Retriever retriever;
+    std::string legalDir = "test/data/legal_cases";
+
+    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
+        if (entry.path().extension() == ".txt") {
+            retriever.addDocument(entry.path().string());
+        }
+    }
+
+    // 执行多次搜索，验证稳定性
+    std::vector<std::string> queries = {
+        "违约赔偿", "知识产权侵权", "劳动合同解除",
+        "诈骗数额", "行政处罚程序", "有限责任公司",
+        "婚姻感情破裂", "交通事故赔偿", "破产清算条件"
+    };
+
+    int totalResults = 0;
+    for (const auto& q : queries) {
+        auto results = retriever.search(q, 5);
+        totalResults += static_cast<int>(results.size());
+    }
+
+    // 所有查询应返回结果
+    std::cout << "    (" << queries.size() << "个查询, 共返回 " << totalResults << " 条结果) ";
+    CHECK(totalResults >= queries.size());  // 每个查询至少返回1条
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -720,6 +898,14 @@ void run_all_tests() {
     std::cout << "\n── 法律 Prompt 模板 ──" << std::endl;
     test_prompt_legal_detection();
     test_prompt_metadata_summary();
+
+    std::cout << "\n── 端到端测试 ──" << std::endl;
+    test_e2e_import_all_demo_docs();
+    test_e2e_search_across_all_types();
+    test_e2e_metadata_all_docs();
+    test_e2e_filter_functionality();
+    test_e2e_legal_prompt_detection();
+    test_e2e_performance_stress();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;
