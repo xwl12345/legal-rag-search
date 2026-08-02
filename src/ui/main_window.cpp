@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <QRegularExpression>
 #include <set>
+#include <unordered_set>
 
 // ── 样式表 ──
 static const char* STYLE_SHEET = R"(
@@ -409,11 +410,66 @@ void MainWindow::onSearch() {
 
         // Step 2: AI 生成答案（使用筛选后的结果构建上下文）
         if (generator_->isReady() && !filtered.empty()) {
-            std::string context = retriever_->buildContext(filtered, 2000);
+            // ── 检测聚合型问题（跨文档查询）──
+            // 仅用明确指向「全部文档」的短语，避免误判聚焦型查询
+            static const std::vector<std::string> AGGREGATE_MARKERS = {
+                "这些案件", "所有案件", "全部案件", "各案件", "各个案件", "每个案件",
+                "这些文档", "所有文档", "全部文档", "各文档", "这些文件", "所有文件",
+                "哪些案件", "汇总", "统计", "总共", "一共"
+            };
+            bool isAggregate = false;
+            std::string qstr = query.toStdString();
+            for (const auto& marker : AGGREGATE_MARKERS) {
+                if (qstr.find(marker) != std::string::npos) {
+                    isAggregate = true;
+                    break;
+                }
+            }
 
-            // 构建元数据摘要传给 Generator（用于法律 Prompt 模板）
-            std::string metaCtx = buildMetadataSummary(filtered);
-            generator_->setMetadataContext(metaCtx);
+            if (isAggregate) {
+                // ── 聚合模式 ──
+                // 1. 用更大的 topK 重新检索，并在 UI 层做文档去重
+                auto wideResults = retriever_->search(qstr, 50);
+                std::vector<rag::SearchResult> deduped;
+                constexpr int perDocLimit = 2;
+                std::unordered_map<std::string, int> docCount;
+                for (auto& r : wideResults) {
+                    int& cnt = docCount[r.docId];
+                    if (cnt >= perDocLimit) continue;
+                    ++cnt;
+                    deduped.push_back(std::move(r));
+                }
+                if (!deduped.empty()) {
+                    filtered = deduped;
+                    displayResults(filtered);
+                }
+
+                // 2. 收集全部文档元数据注入 AI
+                auto allIds = retriever_->allDocIds();
+                std::ostringstream allMeta;
+                for (size_t i = 0; i < allIds.size(); ++i) {
+                    const auto* meta = retriever_->getMetadata(allIds[i]);
+                    if (meta && !meta->isEmpty()) {
+                        allMeta << "- " << allIds[i];
+                        if (!meta->caseNumber.empty()) allMeta << " | 案号: " << meta->caseNumber;
+                        if (!meta->court.empty()) allMeta << " | 法院: " << meta->court;
+                        if (!meta->caseType.empty()) allMeta << " | 类型: " << meta->caseType;
+                        if (!meta->date.empty()) allMeta << " | 日期: " << meta->date;
+                        if (!meta->procedure.empty()) allMeta << " | 程序: " << meta->procedure;
+                        if (!meta->litigants.empty()) allMeta << " | 当事人: " << meta->litigants;
+                        allMeta << "\n";
+                    }
+                }
+                if (allMeta.tellp() > 0) {
+                    allMeta << "\n（以上为全部 " << allIds.size() << " 个已导入文档的元数据汇总）\n";
+                }
+                generator_->setMetadataContext(allMeta.str());
+            } else {
+                // ── 聚焦模式：保持原始排序，不做去重 ──
+                generator_->setMetadataContext(buildMetadataSummary(filtered));
+            }
+
+            std::string context = retriever_->buildContext(filtered, 2000);
 
             aiAnswerArea_->clear();
             aiAnswerArea_->setHtml("<b style='color:#495057'>🤖 AI 正在生成回答...</b><br><br>");
