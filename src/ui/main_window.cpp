@@ -12,6 +12,7 @@
 #include <sstream>
 #include <iomanip>
 #include <filesystem>
+#include <QRegularExpression>
 
 // ── 样式表 ──
 static const char* STYLE_SHEET = R"(
@@ -88,6 +89,19 @@ QLabel#statusLabel {
     color: #868e96;
     font-size: 12px;
 }
+QPushButton#setApiKeyBtn {
+    background-color: #228be6;
+    color: white;
+    padding: 8px 16px;
+    font-size: 12px;
+}
+QPushButton#setApiKeyBtn:hover {
+    background-color: #1c7ed6;
+}
+QLabel#apiKeyStatus {
+    font-size: 12px;
+    font-weight: 600;
+}
 )";
 
 MainWindow::MainWindow(QWidget* parent)
@@ -132,6 +146,32 @@ void MainWindow::setupUi() {
     searchLayout->addWidget(searchInput_, 1);
     searchLayout->addWidget(searchBtn_);
     mainLayout->addLayout(searchLayout);
+
+    // ── API Key 输入行 ──
+    auto* apiKeyLayout = new QHBoxLayout();
+    auto* apiKeyLabel = new QLabel("🔑 DeepSeek API Key:");
+    apiKeyLabel->setStyleSheet("font-size: 12px; font-weight: 600; color: #495057;");
+
+    apiKeyInput_ = new QLineEdit();
+    apiKeyInput_->setPlaceholderText("sk-xxxxxxxxxxxxxxxxxxxxxxxx");
+    apiKeyInput_->setEchoMode(QLineEdit::Password);
+    apiKeyInput_->setMinimumHeight(36);
+    apiKeyInput_->setStyleSheet(
+        "QLineEdit { padding: 8px 12px; border: 2px solid #dee2e6; border-radius: 6px; font-size: 13px; }"
+    );
+
+    setApiKeyBtn_ = new QPushButton("设置");
+    setApiKeyBtn_->setObjectName("setApiKeyBtn");
+    setApiKeyBtn_->setMinimumHeight(36);
+
+    apiKeyStatus_ = new QLabel();
+    apiKeyStatus_->setObjectName("apiKeyStatus");
+
+    apiKeyLayout->addWidget(apiKeyLabel);
+    apiKeyLayout->addWidget(apiKeyInput_, 1);
+    apiKeyLayout->addWidget(setApiKeyBtn_);
+    apiKeyLayout->addWidget(apiKeyStatus_);
+    mainLayout->addLayout(apiKeyLayout);
 
     // ── 工具栏按钮 ──
     auto* toolLayout = new QHBoxLayout();
@@ -200,6 +240,8 @@ void MainWindow::setupUi() {
     connect(searchInput_, &QLineEdit::returnPressed, this, &MainWindow::onSearch);
     connect(importBtn_, &QPushButton::clicked, this, &MainWindow::onImportFiles);
     connect(clearBtn_, &QPushButton::clicked, this, &MainWindow::onClearIndex);
+    connect(setApiKeyBtn_, &QPushButton::clicked, this, &MainWindow::onSetApiKey);
+    connect(apiKeyInput_, &QLineEdit::returnPressed, this, &MainWindow::onSetApiKey);
 
     // 点击结果列表中的项 → 高亮对应内容
     connect(resultList_, &QListWidget::itemClicked, [this](QListWidgetItem* item) {
@@ -219,11 +261,65 @@ void MainWindow::setupStyle() {
 void MainWindow::loadApiKey() {
     const char* key = std::getenv("DEEPSEEK_API_KEY");
     if (key && strlen(key) > 0) {
+        QString qkey = QString::fromStdString(key);
         retriever_->setApiKey(key);
         generator_->setApiKey(key);
-        statusLabel_->setText("✅ API Key 已加载");
+        apiKeyInput_->setText(qkey);
+        updateApiKeyStatus(true, "✅ 已从环境变量加载");
     } else {
-        statusLabel_->setText("⚠️ 未设置 DEEPSEEK_API_KEY，向量检索和 AI 回答不可用");
+        updateApiKeyStatus(false, "⚠️ 未设置");
+    }
+}
+
+void MainWindow::onSetApiKey() {
+    QString key = apiKeyInput_->text().trimmed();
+    if (key.isEmpty()) {
+        // 清空 API Key
+        retriever_->setApiKey("");
+        generator_->setApiKey("");
+        updateApiKeyStatus(false, "⚠️ 未设置");
+        return;
+    }
+
+    QString errorMsg;
+    if (!validateApiKeyFormat(key, &errorMsg)) {
+        updateApiKeyStatus(false, errorMsg);
+        return;
+    }
+
+    std::string keyStr = key.toStdString();
+    retriever_->setApiKey(keyStr);
+    generator_->setApiKey(keyStr);
+    updateApiKeyStatus(true, "✅ 已设置");
+}
+
+bool MainWindow::validateApiKeyFormat(const QString& key, QString* errorMsg) {
+    // DeepSeek API Key 格式：sk- 开头，总长度 ≥ 20 字符
+    if (!key.startsWith("sk-")) {
+        if (errorMsg) *errorMsg = "❌ 格式错误：必须以 sk- 开头";
+        return false;
+    }
+    if (key.length() < 20) {
+        if (errorMsg) *errorMsg = "❌ 格式错误：Key 长度不足（至少 20 字符）";
+        return false;
+    }
+    // 检查是否只包含合法字符（字母、数字、-）
+    static QRegularExpression validChars("^[a-zA-Z0-9\\-]+$");
+    if (!validChars.match(key).hasMatch()) {
+        if (errorMsg) *errorMsg = "❌ 格式错误：包含非法字符";
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::updateApiKeyStatus(bool valid, const QString& message) {
+    if (apiKeyStatus_) {
+        apiKeyStatus_->setText(message);
+        if (valid) {
+            apiKeyStatus_->setStyleSheet("color: #2f9e44; font-size: 12px;");
+        } else {
+            apiKeyStatus_->setStyleSheet("color: #e03131; font-size: 12px;");
+        }
     }
 }
 
@@ -271,7 +367,21 @@ void MainWindow::onSearch() {
                     }
                 );
             } catch (const std::exception& e) {
-                appendAiAnswer("\n\n[错误] " + QString::fromStdString(e.what()));
+                std::string errStr = e.what();
+                // 识别常见错误类型
+                if (errStr.find("no response") != std::string::npos ||
+                    errStr.find("timeout") != std::string::npos ||
+                    errStr.find("connection") != std::string::npos) {
+                    appendAiAnswer(
+                        "\n\n❌ 无法连接到 DeepSeek API\n\n"
+                        "可能原因：\n"
+                        "• 网络连接异常，请检查是否能访问 api.deepseek.com\n"
+                        "• API Key 无效或已过期\n"
+                        "• 请求超时，请稍后重试\n\n"
+                        "技术细节：" + QString::fromStdString(errStr));
+                } else {
+                    appendAiAnswer("\n\n❌ AI 生成失败：" + QString::fromStdString(errStr));
+                }
             }
         } else if (results.empty()) {
             aiAnswerArea_->clear();
@@ -287,8 +397,10 @@ void MainWindow::onSearch() {
         } else if (!generator_->isReady()) {
             aiAnswerArea_->clear();
             aiAnswerArea_->setHtml(
-                "<p style='color:#868e96;'>[提示] 未配置 AI API，仅展示检索结果。</p>"
-                "<p style='color:#868e96;'>设置 DEEPSEEK_API_KEY 环境变量以启用 AI 回答。</p>"
+                "<p style='color:#e8590c; font-weight:600;'>🔑 未配置 API Key</p>"
+                "<p style='color:#868e96;'>请在搜索栏上方的输入框中填写 DeepSeek API Key（sk- 开头），</p>"
+                "<p style='color:#868e96;'>点击「设置」后即可启用 AI 智能回答功能。</p>"
+                "<p style='color:#adb5bd; font-size:12px;'>获取 Key：<a href='https://platform.deepseek.com'>platform.deepseek.com</a></p>"
             );
         }
 
@@ -349,14 +461,11 @@ void MainWindow::onClearIndex() {
     );
 
     if (reply == QMessageBox::Yes) {
-        // 重建 retriever
-        std::string apiKey;
+        // 重建 retriever，保留当前 API Key
+        QString currentKey = apiKeyInput_->text().trimmed();
         retriever_ = std::make_unique<rag::Retriever>();
         if (generator_->isReady()) {
-            const char* key = std::getenv("DEEPSEEK_API_KEY");
-            if (key) {
-                retriever_->setApiKey(key);
-            }
+            retriever_->setApiKey(currentKey.toStdString());
         }
 
         resultList_->clear();

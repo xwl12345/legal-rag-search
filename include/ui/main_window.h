@@ -23,6 +23,7 @@ private slots:
     void onSearch();
     void onImportFiles();
     void onClearIndex();
+    void onSetApiKey();
 
 private:
     void setupUi();
@@ -30,6 +31,12 @@ private:
     void displayResults(const std::vector<rag::SearchResult>& results);
     void appendAiAnswer(const QString& text);
     void loadApiKey();
+
+    /// 校验 API Key 格式：sk- 开头，长度 ≥ 20
+    static bool validateApiKeyFormat(const QString& key, QString* errorMsg = nullptr);
+
+    /// 更新 API Key 状态指示（图标 + 文字）
+    void updateApiKeyStatus(bool valid, const QString& message);
 
     // ── 核心引擎 ──
     std::unique_ptr<rag::Retriever> retriever_;
@@ -40,6 +47,11 @@ private:
     QPushButton* searchBtn_ = nullptr;
     QPushButton* importBtn_ = nullptr;
     QPushButton* clearBtn_ = nullptr;
+
+    // API Key 输入
+    QLineEdit* apiKeyInput_ = nullptr;
+    QPushButton* setApiKeyBtn_ = nullptr;
+    QLabel* apiKeyStatus_ = nullptr;
 
     QListWidget* resultList_ = nullptr;
 
