@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <QRegularExpression>
+#include <set>
 
 // ── 样式表 ──
 static const char* STYLE_SHEET = R"(
@@ -173,6 +174,51 @@ void MainWindow::setupUi() {
     apiKeyLayout->addWidget(apiKeyStatus_);
     mainLayout->addLayout(apiKeyLayout);
 
+    // ── 筛选栏 ──
+    auto* filterLayout = new QHBoxLayout();
+    filterLayout->setSpacing(12);
+
+    auto* filterLabel = new QLabel("🔍 筛选:");
+    filterLabel->setStyleSheet("font-size: 12px; font-weight: 600; color: #495057;");
+
+    // 案件类型
+    auto* typeLabel = new QLabel("案件类型");
+    typeLabel->setStyleSheet("font-size: 11px; color: #868e96;");
+    caseTypeFilter_ = new QComboBox();
+    caseTypeFilter_->addItems({"全部", "民事", "刑事", "行政", "知识产权", "商事"});
+    caseTypeFilter_->setMinimumHeight(30);
+    caseTypeFilter_->setStyleSheet(
+        "QComboBox { padding: 4px 8px; border: 1px solid #dee2e6; border-radius: 4px; font-size: 12px; background: white; }"
+        "QComboBox:hover { border-color: #adb5bd; }"
+        "QComboBox::drop-down { border: none; width: 20px; }"
+    );
+
+    // 法院级别
+    auto* courtLabel = new QLabel("法院级别");
+    courtLabel->setStyleSheet("font-size: 11px; color: #868e96;");
+    courtLevelFilter_ = new QComboBox();
+    courtLevelFilter_->addItems({"全部", "最高人民法院", "高级人民法院", "中级人民法院", "基层人民法院"});
+    courtLevelFilter_->setMinimumHeight(30);
+    courtLevelFilter_->setStyleSheet(caseTypeFilter_->styleSheet());
+
+    // 年份
+    auto* yearLabel = new QLabel("年份");
+    yearLabel->setStyleSheet("font-size: 11px; color: #868e96;");
+    yearFilter_ = new QComboBox();
+    yearFilter_->addItem("全部");
+    yearFilter_->setMinimumHeight(30);
+    yearFilter_->setStyleSheet(caseTypeFilter_->styleSheet());
+
+    filterLayout->addWidget(filterLabel);
+    filterLayout->addWidget(typeLabel);
+    filterLayout->addWidget(caseTypeFilter_);
+    filterLayout->addWidget(courtLabel);
+    filterLayout->addWidget(courtLevelFilter_);
+    filterLayout->addWidget(yearLabel);
+    filterLayout->addWidget(yearFilter_);
+    filterLayout->addStretch();
+    mainLayout->addLayout(filterLayout);
+
     // ── 工具栏按钮 ──
     auto* toolLayout = new QHBoxLayout();
     importBtn_ = new QPushButton("📂 导入文档");
@@ -242,6 +288,14 @@ void MainWindow::setupUi() {
     connect(clearBtn_, &QPushButton::clicked, this, &MainWindow::onClearIndex);
     connect(setApiKeyBtn_, &QPushButton::clicked, this, &MainWindow::onSetApiKey);
     connect(apiKeyInput_, &QLineEdit::returnPressed, this, &MainWindow::onSetApiKey);
+
+    // 筛选条件变化时重新过滤结果
+    connect(caseTypeFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onFilterChanged);
+    connect(courtLevelFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onFilterChanged);
+    connect(yearFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &MainWindow::onFilterChanged);
 
     // 点击结果列表中的项 → 高亮对应内容
     connect(resultList_, &QListWidget::itemClicked, [this](QListWidgetItem* item) {
@@ -342,13 +396,20 @@ void MainWindow::onSearch() {
 
     // 异步执行检索 + 生成
     QTimer::singleShot(100, this, [this, query]() {
-        // Step 1: 检索
-        auto results = retriever_->search(query.toStdString(), 5);
-        displayResults(results);
+        // Step 1: 检索（多取一些结果用于筛选）
+        auto results = retriever_->search(query.toStdString(), 20);
+        cachedResults_ = results;
+        currentQuery_ = query;
 
-        // Step 2: AI 生成答案
-        if (generator_->isReady() && !results.empty()) {
-            std::string context = retriever_->buildContext(results, 2000);
+        // 填充年份筛选器
+        populateYearFilter(results);
+
+        // 应用筛选并显示
+        auto filtered = applyFiltersAndDisplay();
+
+        // Step 2: AI 生成答案（使用筛选后的结果构建上下文）
+        if (generator_->isReady() && !filtered.empty()) {
+            std::string context = retriever_->buildContext(filtered, 2000);
 
             aiAnswerArea_->clear();
             aiAnswerArea_->setHtml("<b style='color:#495057'>🤖 AI 正在生成回答...</b><br><br>");
@@ -358,7 +419,6 @@ void MainWindow::onSearch() {
                     query.toStdString(),
                     context,
                     [this](const std::string& delta) {
-                        // 流式更新 UI（在主线程安全调用）
                         QMetaObject::invokeMethod(this, [this, text = QString::fromStdString(delta)]() {
                             aiAnswerArea_->moveCursor(QTextCursor::End);
                             aiAnswerArea_->insertPlainText(text);
@@ -368,7 +428,6 @@ void MainWindow::onSearch() {
                 );
             } catch (const std::exception& e) {
                 std::string errStr = e.what();
-                // 识别常见错误类型
                 if (errStr.find("no response") != std::string::npos ||
                     errStr.find("timeout") != std::string::npos ||
                     errStr.find("connection") != std::string::npos) {
@@ -383,7 +442,15 @@ void MainWindow::onSearch() {
                     appendAiAnswer("\n\n❌ AI 生成失败：" + QString::fromStdString(errStr));
                 }
             }
-        } else if (results.empty()) {
+        } else if (filtered.empty() && !cachedResults_.empty()) {
+            aiAnswerArea_->clear();
+            aiAnswerArea_->setHtml(
+                "<p style='color:#e8590c; font-weight:600;'>⚠️ 筛选后无结果</p>"
+                "<p style='color:#868e96;'>当前筛选条件下没有匹配的文档（原始搜索找到 "
+                + QString::number(static_cast<int>(cachedResults_.size())) + " 条结果）。"
+                "请尝试放宽筛选条件。</p>"
+            );
+        } else if (cachedResults_.empty()) {
             aiAnswerArea_->clear();
             aiAnswerArea_->setHtml(
                 "<p style='color:#e03131; font-weight:600;'>⚠️ 未找到相关文档</p>"
@@ -406,7 +473,9 @@ void MainWindow::onSearch() {
 
         progressBar_->setVisible(false);
         searchBtn_->setEnabled(true);
-        statusLabel_->setText(QString("检索完成，找到 %1 条结果").arg(results.size()));
+        statusLabel_->setText(QString("检索完成，找到 %1 条结果（筛选后 %2 条）")
+                              .arg(static_cast<int>(cachedResults_.size()))
+                              .arg(static_cast<int>(filtered.size())));
     });
 }
 
@@ -495,6 +564,104 @@ void MainWindow::displayResults(const std::vector<rag::SearchResult>& results) {
         item->setToolTip(preview);
         resultList_->addItem(item);
     }
+}
+
+// ── 筛选逻辑 ──
+std::vector<rag::SearchResult> MainWindow::getFilteredResults() {
+    if (cachedResults_.empty()) return {};
+
+    QString caseType = caseTypeFilter_->currentText();
+    QString courtLevel = courtLevelFilter_->currentText();
+    QString year = yearFilter_->currentText();
+
+    // 无筛选条件，直接返回全部
+    if (caseType == "全部" && courtLevel == "全部" && year == "全部") {
+        return cachedResults_;
+    }
+
+    std::vector<rag::SearchResult> filtered;
+    for (const auto& r : cachedResults_) {
+        const auto* meta = retriever_->getMetadata(r.docId);
+
+        // 案件类型筛选
+        if (caseType != "全部") {
+            if (!meta || meta->caseType != caseType.toStdString()) {
+                continue;
+            }
+        }
+
+        // 法院级别筛选
+        if (courtLevel != "全部") {
+            if (!meta || meta->court.empty()) {
+                continue;
+            }
+            std::string level = courtLevel.toStdString();
+            bool match = false;
+            if (level == "最高人民法院") {
+                match = (meta->court.find("最高") != std::string::npos);
+            } else if (level == "高级人民法院") {
+                match = (meta->court.find("高级") != std::string::npos);
+            } else if (level == "中级人民法院") {
+                match = (meta->court.find("中级") != std::string::npos);
+            } else if (level == "基层人民法院") {
+                // 基层法院：不含 最高/高级/中级
+                match = (meta->court.find("最高") == std::string::npos &&
+                         meta->court.find("高级") == std::string::npos &&
+                         meta->court.find("中级") == std::string::npos);
+            }
+            if (!match) continue;
+        }
+
+        // 年份筛选
+        if (year != "全部") {
+            if (!meta || meta->date.empty()) {
+                continue;
+            }
+            // 日期格式为 YYYY-MM-DD，取前 4 位
+            if (meta->date.substr(0, 4) != year.toStdString()) {
+                continue;
+            }
+        }
+
+        filtered.push_back(r);
+    }
+
+    return filtered;
+}
+
+std::vector<rag::SearchResult> MainWindow::applyFiltersAndDisplay() {
+    auto filtered = getFilteredResults();
+    displayResults(filtered);
+    return filtered;
+}
+
+void MainWindow::onFilterChanged() {
+    if (cachedResults_.empty()) return;
+    applyFiltersAndDisplay();
+}
+
+void MainWindow::populateYearFilter(const std::vector<rag::SearchResult>& results) {
+    // 收集所有结果中的年份
+    std::set<QString> years;
+    for (const auto& r : results) {
+        const auto* meta = retriever_->getMetadata(r.docId);
+        if (meta && meta->date.size() >= 4) {
+            years.insert(QString::fromStdString(meta->date.substr(0, 4)));
+        }
+    }
+
+    // 保留"全部"选项，更新年份列表
+    QString currentYear = yearFilter_->currentText();
+    yearFilter_->blockSignals(true);
+    yearFilter_->clear();
+    yearFilter_->addItem("全部");
+    for (const auto& y : years) {
+        yearFilter_->addItem(y);
+    }
+    // 恢复之前的选择
+    int idx = yearFilter_->findText(currentYear);
+    if (idx >= 0) yearFilter_->setCurrentIndex(idx);
+    yearFilter_->blockSignals(false);
 }
 
 void MainWindow::appendAiAnswer(const QString& text) {
