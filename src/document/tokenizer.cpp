@@ -15,7 +15,7 @@ static const std::unordered_set<std::string> DEFAULT_STOP_WORDS = {
     "没有", "看", "好", "自己", "这", "他", "她", "它", "们", "那", "些",
     "所", "为", "所以", "因为", "但是", "然而", "而且", "虽然", "如果",
     "可以", "还是", "只是", "之后", "然后", "已经", "这个", "那个",
-    "什么", "怎么", "哪", "吗", "啊", "吧", "呢", "哦", "嗯",
+    "什么", "怎么", "吗", "啊", "吧", "呢", "哦", "嗯",
     "the", "a", "an", "is", "are", "was", "were", "be", "been",
     "being", "have", "has", "had", "do", "does", "did", "will",
     "would", "could", "should", "may", "might", "can", "shall",

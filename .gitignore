@@ -35,3 +35,6 @@ Desktop.ini
 # run.bat contains API key, be careful not to commit it publicly
 run.bat
 *.png
+
+# ── User data ──
+*.pdf
