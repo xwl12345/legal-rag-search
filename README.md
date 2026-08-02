@@ -1,4 +1,4 @@
-# ⚖️ 法律 RAG 智能检索引擎
+# ⚖️ Legal RAG Search — 法律文档智能检索引擎
 
 基于 **BM25 + 向量语义** 混合检索的法律文档智能搜索引擎，集成 **DeepSeek 大模型** 实现 RAG（Retrieval-Augmented Generation）智能问答。支持 PDF/TXT/MD 等多格式文档导入，自动提取案号、法院、裁判日期等元数据，提供结构化法律 Prompt 模板。
 
