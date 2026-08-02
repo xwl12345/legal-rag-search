@@ -2,6 +2,8 @@
 #include "cppjieba/Jieba.hpp"
 #include <algorithm>
 #include <cctype>
+#include <fstream>
+#include <sstream>
 #include <unordered_set>
 
 namespace document {
@@ -37,6 +39,10 @@ public:
         jieba_.Cut(text, words, true);
     }
 
+    bool insertUserWord(const std::string& word, int freq, const std::string& tag) {
+        return jieba_.InsertUserWord(word, freq, tag);
+    }
+
 private:
     cppjieba::Jieba jieba_;
 };
@@ -46,6 +52,12 @@ Tokenizer::Tokenizer()
     : impl_(std::make_unique<Impl>())
     , stopWords_(DEFAULT_STOP_WORDS)
 {
+    // 自动加载法律领域词典
+    std::string legalDictPath = std::string(CPPJIEBA_DICT_PATH) + "/legal_dict.utf8";
+    int loaded = loadUserDict(legalDictPath);
+    if (loaded > 0) {
+        // 静默加载成功（避免干扰日志输出）
+    }
 }
 
 Tokenizer::~Tokenizer() = default;
@@ -112,6 +124,44 @@ void Tokenizer::loadStopWords(const std::vector<std::string>& words) {
     for (const auto& w : words) {
         stopWords_.insert(w);
     }
+}
+
+int Tokenizer::loadUserDict(const std::string& filePath) {
+    std::ifstream file(filePath);
+    if (!file.is_open()) return 0;
+
+    int count = 0;
+    std::string line;
+    while (std::getline(file, line)) {
+        // 跳过空行和注释
+        if (line.empty() || line[0] == '#') continue;
+
+        // 去除首尾空白
+        size_t start = 0;
+        while (start < line.size() && (line[start] == ' ' || line[start] == '\t')) ++start;
+        size_t end = line.size();
+        while (end > start && (line[end - 1] == ' ' || line[end - 1] == '\t')) --end;
+        if (start >= end) continue;
+
+        std::string trimmed = line.substr(start, end - start);
+
+        // 按空白分隔：word [freq] [tag]
+        std::istringstream iss(trimmed);
+        std::string word, tag = "l";  // 默认标签：法律术语
+        int freq = 10;                 // 默认频率
+
+        if (iss >> word) {
+            if (iss >> freq) {
+                if (!(iss >> tag)) {
+                    tag = "l";
+                }
+            }
+            impl_->insertUserWord(word, freq, tag);
+            ++count;
+        }
+    }
+
+    return count;
 }
 
 } // namespace document
