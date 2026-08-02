@@ -120,7 +120,7 @@ MainWindow::~MainWindow() = default;
 
 // ── UI 搭建 ──
 void MainWindow::setupUi() {
-    setWindowTitle("🚀 RAG 智能检索引擎");
+    setWindowTitle("⚖️ 法律 RAG 智能检索引擎");
     resize(1100, 700);
 
     auto* centralWidget = new QWidget(this);
@@ -131,7 +131,7 @@ void MainWindow::setupUi() {
     mainLayout->setSpacing(16);
 
     // ── 顶部标题 ──
-    auto* titleLabel = new QLabel("📚 本地智能文档检索系统");
+    auto* titleLabel = new QLabel("⚖️ 法律文档智能检索系统");
     titleLabel->setStyleSheet("font-size: 22px; font-weight: 800; color: #212529;");
     mainLayout->addWidget(titleLabel);
 
