@@ -1,5 +1,6 @@
 #include "rag/retriever.h"
 #include "document/parser.h"
+#include "document/metadata.h"
 #include "config/app_config.h"
 #include <algorithm>
 #include <sstream>
@@ -28,12 +29,26 @@ void Retriever::addDocument(const std::string& filePath) {
     std::filesystem::path path(filePath);
     std::string docId = path.filename().string();
 
+    // Extract metadata from raw text before chunking
+    auto meta = document::MetadataExtractor::extract(content);
+    if (!meta.isEmpty()) {
+        docMeta_[docId] = std::move(meta);
+    }
+
     // addText handles chunking + indexing
     addText(content, docId);
 }
 
 void Retriever::addText(const std::string& text, const std::string& docId) {
     if (text.empty() || docId.empty()) return;
+
+    // 提取元数据（如果尚未提取）
+    if (docMeta_.find(docId) == docMeta_.end()) {
+        auto meta = document::MetadataExtractor::extract(text);
+        if (!meta.isEmpty()) {
+            docMeta_[docId] = std::move(meta);
+        }
+    }
 
     // 使用已有的 parser 来分块
     document::DocumentParser parser;
@@ -219,6 +234,22 @@ std::string Retriever::buildContext(const std::vector<SearchResult>& results,
     }
 
     return oss.str();
+}
+
+const document::DocMetadata* Retriever::getMetadata(const std::string& docId) const {
+    auto it = docMeta_.find(docId);
+    if (it != docMeta_.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
+std::vector<std::string> Retriever::allDocIds() const {
+    std::vector<std::string> ids;
+    for (const auto& [docId, _] : docMeta_) {
+        ids.push_back(docId);
+    }
+    return ids;
 }
 
 } // namespace rag

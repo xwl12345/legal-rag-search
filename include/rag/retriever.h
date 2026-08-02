@@ -4,6 +4,7 @@
 #include "vector/embedding.h"
 #include "vector/similarity.h"
 #include "document/tokenizer.h"
+#include "document/metadata.h"
 #include <memory>
 #include <vector>
 
@@ -41,6 +42,12 @@ public:
     std::string buildContext(const std::vector<SearchResult>& results,
                              int maxTokens = 2000);
 
+    /// 获取文档元数据（案号、法院、日期等）
+    const document::DocMetadata* getMetadata(const std::string& docId) const;
+
+    /// 已导入的所有文档 ID
+    std::vector<std::string> allDocIds() const;
+
 private:
     document::Tokenizer tokenizer_;
     search_index::InvertedIndex index_;
@@ -53,6 +60,9 @@ private:
 
     // 向量库索引 → (docId, chunkIndex) 的映射
     std::vector<std::pair<std::string, int>> vectorIndexMap_;
+
+    // docId → 元数据
+    std::unordered_map<std::string, document::DocMetadata> docMeta_;
 };
 
 } // namespace rag

@@ -18,6 +18,7 @@ set(SOURCES
     src/document/parser.cpp
     src/document/tokenizer.cpp
     src/document/pdf_extractor.cpp
+    src/document/metadata.cpp
 
     # Index & search
     src/index/inverted_index.cpp
@@ -107,6 +108,7 @@ set(TEST_SOURCES
     src/document/parser.cpp
     src/document/tokenizer.cpp
     src/document/pdf_extractor.cpp
+    src/document/metadata.cpp
     src/index/inverted_index.cpp
     src/index/bm25_ranker.cpp
     src/vector/embedding.cpp
