@@ -83,9 +83,10 @@ endif()
 # ── Platform settings ──
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
-    # 静态链接 MinGW C++ 运行时，避免 libstdc++-6.dll 版本冲突
+    # 静态链接 MinGW 全部运行时（libstdc++/libgcc/libwinpthread），
+    # 彻底消除 DLL 版本冲突。Qt 库仍为动态链接（无静态 .a 可用）。
     if(MINGW)
-        target_link_options(${PROJECT_NAME} PRIVATE -static-libstdc++ -static-libgcc)
+        target_link_options(${PROJECT_NAME} PRIVATE -static)
     endif()
 endif()
 
@@ -134,6 +135,6 @@ endif()
 if(WIN32)
     target_link_libraries(run_tests PRIVATE ws2_32)
     if(MINGW)
-        target_link_options(run_tests PRIVATE -static-libstdc++ -static-libgcc)
+        target_link_options(run_tests PRIVATE -static)
     endif()
 endif()
