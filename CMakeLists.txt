@@ -17,6 +17,7 @@ set(SOURCES
     # Document parsing & tokenization
     src/document/parser.cpp
     src/document/tokenizer.cpp
+    src/document/pdf_extractor.cpp
 
     # Index & search
     src/index/inverted_index.cpp
@@ -82,7 +83,7 @@ endif()
 
 # ── Platform settings ──
 if(WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 z)
     # 静态链接 MinGW 全部运行时（libstdc++/libgcc/libwinpthread），
     # 彻底消除 DLL 版本冲突。Qt 库仍为动态链接（无静态 .a 可用）。
     if(MINGW)
@@ -105,6 +106,7 @@ set(TEST_SOURCES
     # Reuse core sources (without main + UI)
     src/document/parser.cpp
     src/document/tokenizer.cpp
+    src/document/pdf_extractor.cpp
     src/index/inverted_index.cpp
     src/index/bm25_ranker.cpp
     src/vector/embedding.cpp
@@ -133,7 +135,7 @@ else()
 endif()
 
 if(WIN32)
-    target_link_libraries(run_tests PRIVATE ws2_32)
+    target_link_libraries(run_tests PRIVATE ws2_32 z)
     if(MINGW)
         target_link_options(run_tests PRIVATE -static)
     endif()
