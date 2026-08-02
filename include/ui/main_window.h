@@ -8,6 +8,7 @@
 #include <QProgressBar>
 #include <QSplitter>
 #include <QVBoxLayout>
+#include <QComboBox>
 #include <memory>
 #include "rag/retriever.h"
 #include "rag/generator.h"
@@ -24,6 +25,7 @@ private slots:
     void onImportFiles();
     void onClearIndex();
     void onSetApiKey();
+    void onFilterChanged();
 
 private:
     void setupUi();
@@ -37,6 +39,13 @@ private:
 
     /// 更新 API Key 状态指示（图标 + 文字）
     void updateApiKeyStatus(bool valid, const QString& message);
+
+    /// 应用筛选条件，过滤并重新显示结果
+    std::vector<rag::SearchResult> applyFiltersAndDisplay();
+    std::vector<rag::SearchResult> getFilteredResults();
+
+    /// 从结果中收集可用年份
+    void populateYearFilter(const std::vector<rag::SearchResult>& results);
 
     // ── 核心引擎 ──
     std::unique_ptr<rag::Retriever> retriever_;
@@ -59,4 +68,13 @@ private:
 
     QLabel* statusLabel_ = nullptr;
     QProgressBar* progressBar_ = nullptr;
+
+    // ── 筛选控件 ──
+    QComboBox* caseTypeFilter_ = nullptr;
+    QComboBox* courtLevelFilter_ = nullptr;
+    QComboBox* yearFilter_ = nullptr;
+
+    // ── 缓存当前搜索结果（用于筛选）──
+    std::vector<rag::SearchResult> cachedResults_;
+    QString currentQuery_;
 };
