@@ -47,6 +47,9 @@ private:
     /// 从结果中收集可用年份
     void populateYearFilter(const std::vector<rag::SearchResult>& results);
 
+    /// 构建元数据摘要（供 AI prompt 使用）
+    std::string buildMetadataSummary(const std::vector<rag::SearchResult>& results);
+
     // ── 核心引擎 ──
     std::unique_ptr<rag::Retriever> retriever_;
     std::unique_ptr<rag::Generator> generator_;

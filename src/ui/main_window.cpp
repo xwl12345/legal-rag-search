@@ -411,6 +411,10 @@ void MainWindow::onSearch() {
         if (generator_->isReady() && !filtered.empty()) {
             std::string context = retriever_->buildContext(filtered, 2000);
 
+            // 构建元数据摘要传给 Generator（用于法律 Prompt 模板）
+            std::string metaCtx = buildMetadataSummary(filtered);
+            generator_->setMetadataContext(metaCtx);
+
             aiAnswerArea_->clear();
             aiAnswerArea_->setHtml("<b style='color:#495057'>🤖 AI 正在生成回答...</b><br><br>");
 
@@ -662,6 +666,31 @@ void MainWindow::populateYearFilter(const std::vector<rag::SearchResult>& result
     int idx = yearFilter_->findText(currentYear);
     if (idx >= 0) yearFilter_->setCurrentIndex(idx);
     yearFilter_->blockSignals(false);
+}
+
+std::string MainWindow::buildMetadataSummary(const std::vector<rag::SearchResult>& results) {
+    // 收集所有结果的元数据（去重）
+    std::set<std::string> seenIds;
+    std::ostringstream oss;
+
+    for (const auto& r : results) {
+        if (seenIds.count(r.docId)) continue;
+        seenIds.insert(r.docId);
+
+        const auto* meta = retriever_->getMetadata(r.docId);
+        if (!meta || meta->isEmpty()) continue;
+
+        oss << "- " << r.docId;
+        if (!meta->caseNumber.empty()) oss << " | 案号: " << meta->caseNumber;
+        if (!meta->court.empty()) oss << " | 法院: " << meta->court;
+        if (!meta->caseType.empty()) oss << " | 类型: " << meta->caseType;
+        if (!meta->date.empty()) oss << " | 日期: " << meta->date;
+        if (!meta->procedure.empty()) oss << " | 程序: " << meta->procedure;
+        if (!meta->litigants.empty()) oss << " | 当事人: " << meta->litigants;
+        oss << "\n";
+    }
+
+    return oss.str();
 }
 
 void MainWindow::appendAiAnswer(const QString& text) {
