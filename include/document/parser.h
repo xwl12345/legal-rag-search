@@ -13,7 +13,7 @@ struct TextChunk {
     int startPos = 0;        // 在原文档中的起始位置（字符偏移）
 };
 
-/// 文档解析器：支持 .txt / .md 文件
+/// 文档解析器：支持 .txt / .md / .pdf 文件
 class DocumentParser {
 public:
     /// 读取文件并切分成文本块

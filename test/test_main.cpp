@@ -35,6 +35,7 @@
 #include "index/inverted_index.h"
 #include "index/bm25_ranker.h"
 #include "vector/similarity.h"
+#include "document/pdf_extractor.h"
 #include "rag/retriever.h"
 
 // ── 简单的测试框架 ──
@@ -378,6 +379,62 @@ void test_diagnostic_user_query() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 7: PDF 文本提取
+// ═══════════════════════════════════════════════════════════════
+void test_pdf_extract_text() {
+    TEST("PDF 文本提取");
+    std::string text = document::PdfExtractor::extractText("test/data/test.pdf");
+    if (text.empty()) {
+        FAIL("PDF 文本提取失败，返回空文本");
+        return;
+    }
+    // 应该包含 "Hello PDF World" 和 "RAG Search Engine"
+    CHECK(text.find("Hello PDF World") != std::string::npos);
+    CHECK(text.find("RAG Search Engine") != std::string::npos);
+    std::cout << "    (提取文本: \"" << text << "\") ";
+    PASS();
+}
+
+void test_pdf_parser_routing() {
+    TEST("DocumentParser PDF 路由");
+    document::DocumentParser parser;
+    auto chunks = parser.parse("test/data/test.pdf");
+    if (chunks.empty()) {
+        FAIL("DocumentParser 未能解析 PDF 文件（.pdf 路由失败）");
+        return;
+    }
+    CHECK(chunks.size() >= 1);
+    CHECK(chunks[0].docId == "test.pdf");
+    CHECK(!chunks[0].content.empty());
+    std::cout << "    (解析出 " << chunks.size() << " 个文本块) ";
+    PASS();
+}
+
+void test_pdf_not_a_pdf() {
+    TEST("非 PDF 文件返回空");
+    // 传入一个不是 PDF 的文本文件，PdfExtractor 应返回空
+    std::string text = document::PdfExtractor::extractText("test/data/rag_intro.txt");
+    // rag_intro.txt 不是 PDF（不以 %PDF- 开头），应返回空
+    CHECK(text.empty());
+    PASS();
+}
+
+void test_pdf_retriever_integration() {
+    TEST("PDF 通过 Retriever 导入并检索");
+    rag::Retriever retriever;
+    retriever.addDocument("test/data/test.pdf");
+
+    // 应该至少有一个 chunk
+    CHECK(retriever.docCount() >= 1);
+
+    // 搜索 PDF 中的内容
+    auto results = retriever.search("Hello PDF", 3);
+    CHECK(results.size() >= 1);
+    std::cout << "    (检索到 " << results.size() << " 条结果) ";
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -418,6 +475,12 @@ void run_all_tests() {
 
     std::cout << "\n── 用户查询诊断 ──" << std::endl;
     test_diagnostic_user_query();
+
+    std::cout << "\n── PDF 文本提取 ──" << std::endl;
+    test_pdf_extract_text();
+    test_pdf_parser_routing();
+    test_pdf_not_a_pdf();
+    test_pdf_retriever_integration();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

@@ -1,4 +1,5 @@
 #include "document/parser.h"
+#include "document/pdf_extractor.h"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -9,18 +10,34 @@ namespace fs = std::filesystem;
 namespace document {
 
 std::vector<TextChunk> DocumentParser::parse(const std::string& filePath) {
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) {
-        return {};
-    }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string content = buffer.str();
-
     // 提取文件名作为 docId
     fs::path path(filePath);
     std::string docId = path.filename().string();
+    std::string ext = path.extension().string();
+
+    // 转为小写用于比较
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    std::string content;
+
+    if (ext == ".pdf") {
+        // PDF 文件：使用 PdfExtractor 提取文本
+        content = PdfExtractor::extractText(filePath);
+        if (content.empty()) {
+            return {};  // PDF 解析失败或为扫描版（无文本层）
+        }
+    } else {
+        // 普通文本文件
+        std::ifstream file(filePath, std::ios::binary);
+        if (!file.is_open()) {
+            return {};
+        }
+
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        content = buffer.str();
+    }
 
     return parseText(content, docId);
 }

@@ -416,7 +416,7 @@ void MainWindow::onImportFiles() {
         this,
         "选择文档",
         QString(),
-        "文档文件 (*.txt *.md *.csv *.json *.xml);;所有文件 (*)"
+        "文档文件 (*.txt *.md *.pdf *.csv *.json *.xml);;文本文件 (*.txt *.md *.csv *.json *.xml);;PDF 文件 (*.pdf);;所有文件 (*)"
     );
 
     if (files.isEmpty()) return;
