@@ -1,0 +1,395 @@
+#include "ui/main_window.h"
+#include <QFileDialog>
+#include <QMessageBox>
+#include <QThread>
+#include <QTimer>
+#include <QApplication>
+#include <QMenuBar>
+#include <QMenu>
+#include <QAction>
+#include <QScrollBar>
+#include <cstdlib>
+#include <sstream>
+#include <iomanip>
+#include <filesystem>
+
+// ── 样式表 ──
+static const char* STYLE_SHEET = R"(
+QMainWindow {
+    background-color: #f8f9fa;
+}
+QLineEdit {
+    padding: 10px 16px;
+    border: 2px solid #dee2e6;
+    border-radius: 8px;
+    font-size: 14px;
+    background: white;
+}
+QLineEdit:focus {
+    border-color: #4dabf7;
+}
+QPushButton {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+}
+QPushButton#searchBtn {
+    background-color: #228be6;
+    color: white;
+    padding: 10px 28px;
+    font-size: 14px;
+}
+QPushButton#searchBtn:hover {
+    background-color: #1c7ed6;
+}
+QPushButton#importBtn {
+    background-color: #f8f9fa;
+    color: #495057;
+    border: 1px solid #dee2e6;
+}
+QPushButton#importBtn:hover {
+    background-color: #e9ecef;
+}
+QPushButton#clearBtn {
+    background-color: transparent;
+    color: #e03131;
+}
+QPushButton#clearBtn:hover {
+    background-color: #fff5f5;
+}
+QListWidget {
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    background: white;
+    font-size: 13px;
+}
+QListWidget::item {
+    padding: 12px;
+    border-bottom: 1px solid #f1f3f5;
+}
+QListWidget::item:hover {
+    background-color: #f8f9fa;
+}
+QListWidget::item:selected {
+    background-color: #e7f5ff;
+    color: #1864ab;
+}
+QTextEdit {
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    background: white;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 12px;
+}
+QLabel#statusLabel {
+    color: #868e96;
+    font-size: 12px;
+}
+)";
+
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent)
+    , retriever_(std::make_unique<rag::Retriever>())
+    , generator_(std::make_unique<rag::Generator>())
+{
+    setupUi();
+    setupStyle();
+    loadApiKey();
+}
+
+MainWindow::~MainWindow() = default;
+
+// ── UI 搭建 ──
+void MainWindow::setupUi() {
+    setWindowTitle("🚀 RAG 智能检索引擎");
+    resize(1100, 700);
+
+    auto* centralWidget = new QWidget(this);
+    setCentralWidget(centralWidget);
+
+    auto* mainLayout = new QVBoxLayout(centralWidget);
+    mainLayout->setContentsMargins(24, 16, 24, 16);
+    mainLayout->setSpacing(16);
+
+    // ── 顶部标题 ──
+    auto* titleLabel = new QLabel("📚 本地智能文档检索系统");
+    titleLabel->setStyleSheet("font-size: 22px; font-weight: 800; color: #212529;");
+    mainLayout->addWidget(titleLabel);
+
+    // ── 搜索栏 ──
+    auto* searchLayout = new QHBoxLayout();
+    searchInput_ = new QLineEdit();
+    searchInput_->setPlaceholderText("输入你的问题，AI 将从已导入的文档中检索并回答...");
+    searchInput_->setMinimumHeight(44);
+
+    searchBtn_ = new QPushButton("🔍 搜索");
+    searchBtn_->setObjectName("searchBtn");
+    searchBtn_->setMinimumHeight(44);
+
+    searchLayout->addWidget(searchInput_, 1);
+    searchLayout->addWidget(searchBtn_);
+    mainLayout->addLayout(searchLayout);
+
+    // ── 工具栏按钮 ──
+    auto* toolLayout = new QHBoxLayout();
+    importBtn_ = new QPushButton("📂 导入文档");
+    importBtn_->setObjectName("importBtn");
+    clearBtn_ = new QPushButton("🗑 清空索引");
+    clearBtn_->setObjectName("clearBtn");
+
+    statusLabel_ = new QLabel("就绪，请先导入文档");
+    statusLabel_->setObjectName("statusLabel");
+
+    toolLayout->addWidget(importBtn_);
+    toolLayout->addWidget(clearBtn_);
+    toolLayout->addStretch();
+    toolLayout->addWidget(statusLabel_);
+    mainLayout->addLayout(toolLayout);
+
+    // ── 主内容区（左右分栏）──
+    auto* splitter = new QSplitter(Qt::Horizontal);
+
+    // 左侧：检索结果列表
+    auto* leftPanel = new QWidget();
+    auto* leftLayout = new QVBoxLayout(leftPanel);
+    leftLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto* resultHeader = new QLabel("📋 检索结果");
+    resultHeader->setStyleSheet("font-size: 14px; font-weight: 600; color: #495057;");
+    leftLayout->addWidget(resultHeader);
+
+    resultList_ = new QListWidget();
+    resultList_->setWordWrap(true);
+    leftLayout->addWidget(resultList_);
+
+    splitter->addWidget(leftPanel);
+
+    // 右侧：AI 回答区
+    auto* rightPanel = new QWidget();
+    auto* rightLayout = new QVBoxLayout(rightPanel);
+    rightLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto* answerHeader = new QLabel("🤖 AI 回答");
+    answerHeader->setStyleSheet("font-size: 14px; font-weight: 600; color: #495057;");
+    rightLayout->addWidget(answerHeader);
+
+    aiAnswerArea_ = new QTextEdit();
+    aiAnswerArea_->setReadOnly(true);
+    aiAnswerArea_->setPlaceholderText("AI 生成的答案将在这里实时显示...");
+    rightLayout->addWidget(aiAnswerArea_);
+
+    splitter->addWidget(rightPanel);
+    splitter->setStretchFactor(0, 4);
+    splitter->setStretchFactor(1, 6);
+
+    mainLayout->addWidget(splitter, 1);
+
+    // ── 底部进度条 ──
+    progressBar_ = new QProgressBar();
+    progressBar_->setVisible(false);
+    progressBar_->setTextVisible(false);
+    progressBar_->setMaximumHeight(3);
+    progressBar_->setStyleSheet("QProgressBar { border: none; background: #e9ecef; border-radius: 2px; } QProgressBar::chunk { background: #228be6; border-radius: 2px; }");
+    mainLayout->addWidget(progressBar_);
+
+    // ── 信号连接 ──
+    connect(searchBtn_, &QPushButton::clicked, this, &MainWindow::onSearch);
+    connect(searchInput_, &QLineEdit::returnPressed, this, &MainWindow::onSearch);
+    connect(importBtn_, &QPushButton::clicked, this, &MainWindow::onImportFiles);
+    connect(clearBtn_, &QPushButton::clicked, this, &MainWindow::onClearIndex);
+
+    // 点击结果列表中的项 → 高亮对应内容
+    connect(resultList_, &QListWidget::itemClicked, [this](QListWidgetItem* item) {
+        QString text = item->data(Qt::UserRole).toString();
+        if (!text.isEmpty()) {
+            aiAnswerArea_->clear();
+            aiAnswerArea_->setPlainText(text);
+        }
+    });
+}
+
+void MainWindow::setupStyle() {
+    setStyleSheet(STYLE_SHEET);
+}
+
+// ── API Key ──
+void MainWindow::loadApiKey() {
+    const char* key = std::getenv("DEEPSEEK_API_KEY");
+    if (key && strlen(key) > 0) {
+        retriever_->setApiKey(key);
+        generator_->setApiKey(key);
+        statusLabel_->setText("✅ API Key 已加载");
+    } else {
+        statusLabel_->setText("⚠️ 未设置 DEEPSEEK_API_KEY，向量检索和 AI 回答不可用");
+    }
+}
+
+// ── 搜索 ──
+void MainWindow::onSearch() {
+    QString query = searchInput_->text().trimmed();
+    if (query.isEmpty()) return;
+
+    if (retriever_->docCount() == 0) {
+        QMessageBox::information(this, "提示", "请先导入文档再搜索！");
+        return;
+    }
+
+    searchBtn_->setEnabled(false);
+    progressBar_->setVisible(true);
+    progressBar_->setRange(0, 0);  // 不确定模式
+
+    aiAnswerArea_->clear();
+    aiAnswerArea_->setHtml("<i style='color:#868e96'>正在检索...</i>");
+
+    // 异步执行检索 + 生成
+    QTimer::singleShot(100, this, [this, query]() {
+        // Step 1: 检索
+        auto results = retriever_->search(query.toStdString(), 5);
+        displayResults(results);
+
+        // Step 2: AI 生成答案
+        if (generator_->isReady() && !results.empty()) {
+            std::string context = retriever_->buildContext(results, 2000);
+
+            aiAnswerArea_->clear();
+            aiAnswerArea_->setHtml("<b style='color:#495057'>🤖 AI 正在生成回答...</b><br><br>");
+
+            try {
+                generator_->generate(
+                    query.toStdString(),
+                    context,
+                    [this](const std::string& delta) {
+                        // 流式更新 UI（在主线程安全调用）
+                        QMetaObject::invokeMethod(this, [this, text = QString::fromStdString(delta)]() {
+                            aiAnswerArea_->moveCursor(QTextCursor::End);
+                            aiAnswerArea_->insertPlainText(text);
+                            aiAnswerArea_->moveCursor(QTextCursor::End);
+                        }, Qt::QueuedConnection);
+                    }
+                );
+            } catch (const std::exception& e) {
+                appendAiAnswer("\n\n[错误] " + QString::fromStdString(e.what()));
+            }
+        } else if (results.empty()) {
+            aiAnswerArea_->clear();
+            aiAnswerArea_->setHtml(
+                "<p style='color:#e03131; font-weight:600;'>⚠️ 未找到相关文档</p>"
+                "<p style='color:#868e96;'>你的问题未能匹配到已导入文档中的内容。建议：</p>"
+                "<ul style='color:#868e96;'>"
+                "<li>确认已导入相关文档（点击「📂 导入文档」）</li>"
+                "<li>尝试用文档中出现过的关键词搜索</li>"
+                "<li>查看左侧状态栏确认已导入的文档数量</li>"
+                "</ul>"
+            );
+        } else if (!generator_->isReady()) {
+            aiAnswerArea_->clear();
+            aiAnswerArea_->setHtml(
+                "<p style='color:#868e96;'>[提示] 未配置 AI API，仅展示检索结果。</p>"
+                "<p style='color:#868e96;'>设置 DEEPSEEK_API_KEY 环境变量以启用 AI 回答。</p>"
+            );
+        }
+
+        progressBar_->setVisible(false);
+        searchBtn_->setEnabled(true);
+        statusLabel_->setText(QString("检索完成，找到 %1 条结果").arg(results.size()));
+    });
+}
+
+// ── 导入文档 ──
+void MainWindow::onImportFiles() {
+    QStringList files = QFileDialog::getOpenFileNames(
+        this,
+        "选择文档",
+        QString(),
+        "文档文件 (*.txt *.md *.csv *.json *.xml);;所有文件 (*)"
+    );
+
+    if (files.isEmpty()) return;
+
+    progressBar_->setVisible(true);
+    progressBar_->setRange(0, files.size());
+    statusLabel_->setText("正在导入文档...");
+
+    int imported = 0;
+    QStringList errors;
+    for (int i = 0; i < files.size(); ++i) {
+        try {
+            retriever_->addDocument(files[i].toStdString());
+            imported++;
+        } catch (const std::exception& e) {
+            errors.append(QString::fromStdString(e.what()));
+        }
+        progressBar_->setValue(i + 1);
+        QApplication::processEvents();
+    }
+
+    progressBar_->setVisible(false);
+    if (!errors.isEmpty()) {
+        statusLabel_->setText(QString("⚠️ 导入完成，%1 个成功，%2 个失败：%3")
+                              .arg(imported)
+                              .arg(errors.size())
+                              .arg(errors.first()));
+    } else {
+        statusLabel_->setText(QString("✅ 已导入 %1 个文档，共 %2 个文本块")
+                              .arg(imported)
+                              .arg(retriever_->docCount()));
+    }
+}
+
+// ── 清空索引 ──
+void MainWindow::onClearIndex() {
+    auto reply = QMessageBox::question(
+        this,
+        "确认清空",
+        "确定要清空所有已导入的文档索引吗？此操作不可恢复。",
+        QMessageBox::Yes | QMessageBox::No
+    );
+
+    if (reply == QMessageBox::Yes) {
+        // 重建 retriever
+        std::string apiKey;
+        retriever_ = std::make_unique<rag::Retriever>();
+        if (generator_->isReady()) {
+            const char* key = std::getenv("DEEPSEEK_API_KEY");
+            if (key) {
+                retriever_->setApiKey(key);
+            }
+        }
+
+        resultList_->clear();
+        aiAnswerArea_->clear();
+        statusLabel_->setText("索引已清空");
+    }
+}
+
+// ── 显示检索结果 ──
+void MainWindow::displayResults(const std::vector<rag::SearchResult>& results) {
+    resultList_->clear();
+
+    for (size_t i = 0; i < results.size(); ++i) {
+        const auto& r = results[i];
+        std::ostringstream oss;
+        oss << "【" << (i + 1) << "】" << r.docId
+            << "  相关度: " << std::fixed << std::setprecision(2) << r.finalScore
+            << "  (BM25: " << r.bm25Score << " | 向量: " << r.vectorScore << ")";
+
+        auto* item = new QListWidgetItem(QString::fromStdString(oss.str()));
+        item->setData(Qt::UserRole, QString::fromStdString(r.content));
+
+        // 截取内容预览
+        QString preview = QString::fromStdString(r.content).left(200);
+        if (r.content.size() > 200) preview += "...";
+
+        item->setToolTip(preview);
+        resultList_->addItem(item);
+    }
+}
+
+void MainWindow::appendAiAnswer(const QString& text) {
+    aiAnswerArea_->moveCursor(QTextCursor::End);
+    aiAnswerArea_->insertPlainText(text);
+    aiAnswerArea_->moveCursor(QTextCursor::End);
+}

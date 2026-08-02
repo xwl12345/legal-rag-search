@@ -1,0 +1,9 @@
+@echo off
+REM RAG Search Engine - Launcher (Example)
+REM Copy this file to run.bat and fill in your API key
+
+REM DeepSeek API Key (从 platform.deepseek.com 获取)
+set DEEPSEEK_API_KEY=请填写你的API Key
+
+cd /d "%~dp0build"
+start "" "rag_search_engine.exe"
