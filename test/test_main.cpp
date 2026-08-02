@@ -32,6 +32,7 @@
 // ── 模块头文件 ──
 #include "document/parser.h"
 #include "document/tokenizer.h"
+#include "document/metadata.h"
 #include "index/inverted_index.h"
 #include "index/bm25_ranker.h"
 #include "vector/similarity.h"
@@ -512,6 +513,89 @@ void test_legal_search_improvement() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 9: 元数据提取
+// ═══════════════════════════════════════════════════════════════
+void test_metadata_case_number() {
+    TEST("案号提取");
+    std::string text = "北京市朝阳区人民法院\n民事判决书\n（2024）京0105民初12345号\n";
+    auto meta = document::MetadataExtractor::extract(text);
+    CHECK(!meta.caseNumber.empty());
+    CHECK(meta.caseNumber.find("2024") != std::string::npos);
+    CHECK(meta.caseNumber.find("民初") != std::string::npos);
+    std::cout << "    (案号: " << meta.caseNumber << ") ";
+    PASS();
+}
+
+void test_metadata_court() {
+    TEST("法院名称提取");
+    std::string text = "北京市朝阳区人民法院\n民事判决书\n审判长：张某某";
+    auto meta = document::MetadataExtractor::extract(text);
+    CHECK(!meta.court.empty());
+    CHECK(meta.court.find("人民法院") != std::string::npos);
+    std::cout << "    (法院: " << meta.court << ") ";
+    PASS();
+}
+
+void test_metadata_date_arabic() {
+    TEST("日期提取（阿拉伯数字）");
+    std::string text = "二〇二四年三月十五日作出\n审判员签名\n2024年3月15日";
+    auto meta = document::MetadataExtractor::extract(text);
+    CHECK(!meta.date.empty());
+    // 优先匹配阿拉伯数字格式
+    CHECK(meta.date == "2024-03-15");
+    std::cout << "    (日期: " << meta.date << ") ";
+    PASS();
+}
+
+void test_metadata_date_chinese() {
+    TEST("日期提取（中文数字）");
+    std::string text = "本院于二〇二四年三月十五日作出如下判决";
+    auto meta = document::MetadataExtractor::extract(text);
+    CHECK(!meta.date.empty());
+    CHECK(meta.date == "2024-03-15");
+    std::cout << "    (日期: " << meta.date << ") ";
+    PASS();
+}
+
+void test_metadata_case_type() {
+    TEST("案件类型推导");
+    std::string text = "（2023）京73民终456号\n侵害商标权纠纷";
+    auto meta = document::MetadataExtractor::extract(text);
+    CHECK(meta.caseType == "民事");
+    std::cout << "    (类型: " << meta.caseType << ") ";
+    PASS();
+}
+
+void test_metadata_integration() {
+    TEST("Retriever 集成元数据");
+    rag::Retriever retriever;
+    retriever.addText(
+        "北京市海淀区人民法院\n民事判决书\n（2024）京0108民初23456号\n"
+        "原告阿里巴巴公司诉被告某科技有限公司侵害商标权纠纷一案，\n"
+        "本院于二〇二四年五月二十日作出判决如下：\n"
+        "一、被告立即停止侵权行为；\n二、被告赔偿原告经济损失100万元；\n"
+        "审判长：李某某\n审判员：王某\n书记员：赵某",
+        "case_beijing.txt"
+    );
+
+    const auto* meta = retriever.getMetadata("case_beijing.txt");
+    CHECK(meta != nullptr);
+    CHECK(!meta->caseNumber.empty());
+    CHECK(!meta->court.empty());
+    std::cout << "    (案号: " << meta->caseNumber
+              << ", 法院: " << meta->court << ") ";
+    PASS();
+}
+
+void test_metadata_empty() {
+    TEST("非法律文档返回空元数据");
+    std::string text = "This is a regular document about technology and AI.";
+    auto meta = document::MetadataExtractor::extract(text);
+    CHECK(meta.isEmpty());
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -564,6 +648,15 @@ void run_all_tests() {
     test_legal_term_recognition();
     test_legal_compound_terms();
     test_legal_search_improvement();
+
+    std::cout << "\n── 元数据提取 ──" << std::endl;
+    test_metadata_case_number();
+    test_metadata_court();
+    test_metadata_date_arabic();
+    test_metadata_date_chinese();
+    test_metadata_case_type();
+    test_metadata_integration();
+    test_metadata_empty();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;
