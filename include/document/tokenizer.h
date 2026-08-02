@@ -21,6 +21,10 @@ public:
     /// 加载自定义停用词表
     void loadStopWords(const std::vector<std::string>& words);
 
+    /// 从文件加载自定义词典（每行一个词，格式：word [freq] [tag]）
+    /// @return 成功加载的词数
+    int loadUserDict(const std::string& filePath);
+
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

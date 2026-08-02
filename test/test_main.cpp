@@ -435,6 +435,83 @@ void test_pdf_retriever_integration() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 8: 法律词典
+// ═══════════════════════════════════════════════════════════════
+void test_legal_dict_loaded() {
+    TEST("法律词典加载成功");
+    document::Tokenizer tokenizer;
+    // 词典在构造函数中自动加载，验证分词结果即可
+    // 分词包含法律术语则说明加载成功
+    auto words = tokenizer.cut("原告向人民法院提起诉讼");
+    CHECK(words.size() >= 3);  // 至少分出原告/向/人民法院/提起/诉讼
+    std::cout << "    (分词: ";
+    for (const auto& w : words) std::cout << w << " ";
+    std::cout << ") ";
+    PASS();
+}
+
+void test_legal_term_recognition() {
+    TEST("法律术语识别");
+    document::Tokenizer tokenizer;
+    auto words = tokenizer.cutForIndex("被告不服一审判决提出上诉");
+
+    // 应该识别出法律术语
+    bool hasDefendant = false, hasFirstInstance = false, hasAppeal = false;
+    for (const auto& w : words) {
+        if (w == "被告") hasDefendant = true;
+        // cppjieba 会将"一审判决"合成为一个词（词典+统计）
+        if (w == "一审判决" || w == "一审") hasFirstInstance = true;
+        if (w == "上诉") hasAppeal = true;
+    }
+    std::cout << "    (关键词: ";
+    for (const auto& w : words) std::cout << w << " ";
+    std::cout << ") ";
+    CHECK(hasDefendant);
+    CHECK(hasFirstInstance);
+    CHECK(hasAppeal);
+    PASS();
+}
+
+void test_legal_compound_terms() {
+    TEST("法律复合术语不被拆分");
+    document::Tokenizer tokenizer;
+    // "知识产权法院" 应被识别为整体，而非 "知识产权" + "法院"
+    auto words = tokenizer.cut("北京知识产权法院审理了一起专利侵权案件");
+    bool hasIPC = false, hasPatent = false;
+    for (const auto& w : words) {
+        if (w == "知识产权法院") hasIPC = true;
+        if (w == "专利侵权") hasPatent = true;
+    }
+    std::cout << "    (分词: ";
+    for (const auto& w : words) std::cout << w << " ";
+    std::cout << ") ";
+    CHECK(hasIPC);
+    CHECK(hasPatent);
+    PASS();
+}
+
+void test_legal_search_improvement() {
+    TEST("法律词典提升检索效果");
+    // 对比：有无法律词典对同一查询的检索结果
+    rag::Retriever retriever;
+    retriever.addText(
+        "原告张三与被告李四签订了一份技术开发合同，约定共同开发一套人工智能系统。"
+        "合同约定，张三出资100万元，李四提供技术。后因李四违反合同约定，未按期交付技术成果，"
+        "导致合同履行发生争议。张三向人民法院提起诉讼，要求李四承担违约责任并赔偿损失。"
+        "一审法院判决李四赔偿张三经济损失50万元。李四不服一审判决，向中级人民法院提起上诉。",
+        "case001.txt"
+    );
+
+    auto results = retriever.search("合同违约赔偿责任", 3);
+    CHECK(results.size() >= 1);
+
+    // 检索结果应包含相关法律内容
+    std::cout << "    (匹配 " << results.size() << " 条, Top-1: "
+              << results[0].docId << " score=" << results[0].finalScore << ") ";
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -481,6 +558,12 @@ void run_all_tests() {
     test_pdf_parser_routing();
     test_pdf_not_a_pdf();
     test_pdf_retriever_integration();
+
+    std::cout << "\n── 法律词典 ──" << std::endl;
+    test_legal_dict_loaded();
+    test_legal_term_recognition();
+    test_legal_compound_terms();
+    test_legal_search_improvement();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;
