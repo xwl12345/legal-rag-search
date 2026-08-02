@@ -26,15 +26,33 @@ public:
     /// 检查 API 是否已配置
     bool isReady() const { return !apiKey_.empty(); }
 
+    /// 设置检索到的文档元数据摘要（用于生成法律专用 prompt）
+    void setMetadataContext(const std::string& metaCtx) { metaContext_ = metaCtx; }
+
 private:
-    /// 构建 RAG prompt
-    static std::string buildPrompt(const std::string& query, const std::string& context);
+    /// 构建 RAG prompt（自动检测法律/通用场景）
+    static std::string buildPrompt(const std::string& query, const std::string& context,
+                                   const std::string& metaContext = "");
+
+    /// 构建法律专用 prompt
+    static std::string buildLegalPrompt(const std::string& query, const std::string& context,
+                                        const std::string& metaContext);
+
+    /// 构建通用 prompt
+    static std::string buildGeneralPrompt(const std::string& query, const std::string& context);
+
+    /// 检测是否为法律相关查询
+    static bool isLegalContext(const std::string& context);
+
+    /// 获取对应的 system prompt
+    static std::string getSystemPrompt(bool isLegal);
 
     /// 解析 SSE 流中的 JSON delta
     static std::string parseDelta(const std::string& jsonLine);
 
     std::string apiKey_;
     std::string apiBaseUrl_ = "https://api.deepseek.com";
+    std::string metaContext_;  // 文档元数据摘要
 };
 
 } // namespace rag

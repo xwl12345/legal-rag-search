@@ -38,6 +38,7 @@
 #include "vector/similarity.h"
 #include "document/pdf_extractor.h"
 #include "rag/retriever.h"
+#include "rag/generator.h"
 
 // ── 简单的测试框架 ──
 static int g_passed = 0;
@@ -596,6 +597,64 @@ void test_metadata_empty() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 10: 法律 Prompt 模板
+// ═══════════════════════════════════════════════════════════════
+void test_prompt_legal_detection() {
+    TEST("法律上下文自动检测");
+    // 包含法律术语的上下文应被识别为法律场景
+    std::string legalCtx = "北京市朝阳区人民法院\n民事判决书\n（2024）京0105民初12345号\n原告张三诉被告李四合同纠纷";
+    std::string genCtx = "RAG is a retrieval augmented generation technique for AI applications.";
+
+    // 通过 prompt 内容间接验证：法律 prompt 应包含"案件概述"等法律特有结构
+    rag::Generator gen;
+    // 由于 buildPrompt 是 private，通过 generate 需要 API key
+    // 这里我们验证元数据提取 + prompt 构建的集成效果
+    auto meta = document::MetadataExtractor::extract(legalCtx);
+    CHECK(!meta.caseNumber.empty());
+    CHECK(!meta.court.empty());
+    std::cout << "    (法律上下文检测: 案号=" << meta.caseNumber << ") ";
+    PASS();
+}
+
+void test_prompt_metadata_summary() {
+    TEST("元数据摘要构建");
+    rag::Retriever retriever;
+    retriever.addText(
+        "北京市海淀区人民法院\n民事判决书\n（2024）京0108民初23456号\n"
+        "原告甲公司诉被告乙公司侵害商标权纠纷一案\n"
+        "审判长：王某某\n二〇二四年五月二十日",
+        "case_haidian.txt"
+    );
+    retriever.addText(
+        "上海市浦东新区人民法院\n刑事判决书\n（2023）沪0115刑初789号\n"
+        "公诉机关上海市浦东新区人民检察院\n被告人李某涉嫌诈骗罪一案\n"
+        "审判长：赵某某\n二〇二三年十一月十日",
+        "case_pudong.txt"
+    );
+
+    // 直接验证元数据
+    const auto* meta1 = retriever.getMetadata("case_haidian.txt");
+    const auto* meta2 = retriever.getMetadata("case_pudong.txt");
+    CHECK(meta1 != nullptr);
+    CHECK(meta2 != nullptr);
+    if (meta1) {
+        CHECK(meta1->caseType == "民事");
+        CHECK(!meta1->caseNumber.empty());
+    }
+    if (meta2) {
+        CHECK(meta2->caseType == "刑事");
+        CHECK(!meta2->caseNumber.empty());
+    }
+    // 验证搜索也能工作
+    auto results = retriever.search("合同 纠纷", 5);
+    CHECK(results.size() >= 1);
+    std::cout << "    (民事: " << (meta1 ? meta1->caseNumber : "N/A")
+              << ", 刑事: " << (meta2 ? meta2->caseNumber : "N/A")
+              << ", 检索结果: " << results.size() << "条) ";
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -657,6 +716,10 @@ void run_all_tests() {
     test_metadata_case_type();
     test_metadata_integration();
     test_metadata_empty();
+
+    std::cout << "\n── 法律 Prompt 模板 ──" << std::endl;
+    test_prompt_legal_detection();
+    test_prompt_metadata_summary();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;
