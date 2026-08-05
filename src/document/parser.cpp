@@ -1,5 +1,6 @@
 #include "document/parser.h"
 #include "document/pdf_extractor.h"
+#include "document/ocr_client.h"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -22,10 +23,14 @@ std::vector<TextChunk> DocumentParser::parse(const std::string& filePath) {
     std::string content;
 
     if (ext == ".pdf") {
-        // PDF 文件：使用 PdfExtractor 提取文本
+        // PDF 文件：先尝试直接提取文本层
         content = PdfExtractor::extractText(filePath);
         if (content.empty()) {
-            return {};  // PDF 解析失败或为扫描版（无文本层）
+            // 文本层为空 → 可能是扫描件，回退到 OCR
+            content = OcrClient::extractText(filePath);
+        }
+        if (content.empty()) {
+            return {};  // 两种方式都失败
         }
     } else {
         // 普通文本文件
