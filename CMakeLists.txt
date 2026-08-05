@@ -18,6 +18,7 @@ set(SOURCES
     src/document/parser.cpp
     src/document/tokenizer.cpp
     src/document/pdf_extractor.cpp
+    src/document/ocr_client.cpp
     src/document/metadata.cpp
 
     # Index & search
@@ -40,6 +41,7 @@ set(SOURCES
 set(HEADERS
     include/document/parser.h
     include/document/tokenizer.h
+    include/document/ocr_client.h
     include/index/inverted_index.h
     include/index/bm25_ranker.h
     include/vector/embedding.h
@@ -108,6 +110,7 @@ set(TEST_SOURCES
     src/document/parser.cpp
     src/document/tokenizer.cpp
     src/document/pdf_extractor.cpp
+    src/document/ocr_client.cpp
     src/document/metadata.cpp
     src/index/inverted_index.cpp
     src/index/bm25_ranker.cpp
