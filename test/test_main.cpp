@@ -425,15 +425,31 @@ void test_pdf_not_a_pdf() {
 void test_pdf_retriever_integration() {
     TEST("PDF 通过 Retriever 导入并检索");
     rag::Retriever retriever;
-    retriever.addDocument("test/data/test.pdf");
+    const auto importResult = retriever.addDocument("test/data/test.pdf");
+
+    CHECK(importResult.imported);
+    CHECK(importResult.chunksAdded >= 1);
+    CHECK(importResult.diagnostic.empty());
 
     // 应该至少有一个 chunk
-    CHECK(retriever.docCount() >= 1);
+    CHECK(retriever.chunkCount() >= 1);
 
     // 搜索 PDF 中的内容
     auto results = retriever.search("Hello PDF", 3);
     CHECK(results.size() >= 1);
     std::cout << "    (检索到 " << results.size() << " 条结果) ";
+    PASS();
+}
+
+void test_retriever_failed_import() {
+    TEST("Retriever 失败导入不会计为成功");
+    rag::Retriever retriever;
+    const auto result = retriever.addDocument("test/data/does_not_exist.pdf");
+
+    CHECK(!result.imported);
+    CHECK(result.chunksAdded == 0);
+    CHECK(!result.diagnostic.empty());
+    CHECK(retriever.chunkCount() == 0);
     PASS();
 }
 
@@ -879,6 +895,7 @@ void run_all_tests() {
     test_pdf_parser_routing();
     test_pdf_not_a_pdf();
     test_pdf_retriever_integration();
+    test_retriever_failed_import();
 
     std::cout << "\n── 法律词典 ──" << std::endl;
     test_legal_dict_loaded();

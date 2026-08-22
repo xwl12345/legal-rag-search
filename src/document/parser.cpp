@@ -1,50 +1,87 @@
 #include "document/parser.h"
 #include "document/pdf_extractor.h"
 #include "document/ocr_client.h"
-#include <fstream>
+#include <QFile>
+#include <QFileInfo>
+#include <QString>
 #include <sstream>
 #include <algorithm>
-#include <filesystem>
 
-namespace fs = std::filesystem;
+namespace {
+
+bool isUtf8ContinuationByte(unsigned char byte) {
+    return (byte & 0xC0) == 0x80;
+}
+
+size_t previousUtf8Boundary(std::string_view text, size_t position) {
+    position = std::min(position, text.size());
+    while (position > 0 && position < text.size() &&
+           isUtf8ContinuationByte(static_cast<unsigned char>(text[position]))) {
+        --position;
+    }
+    return position;
+}
+
+} // namespace
 
 namespace document {
 
-std::vector<TextChunk> DocumentParser::parse(const std::string& filePath) {
-    // 提取文件名作为 docId
-    fs::path path(filePath);
-    std::string docId = path.filename().string();
-    std::string ext = path.extension().string();
+ParseResult DocumentParser::parseWithResult(const std::string& filePath) {
+    // 使用 QFileInfo 而非 std::filesystem::path
+    // — MinGW 的 std::filesystem::path 不能正确处理 UTF-8 中文路径
+    QFileInfo fileInfo(QString::fromStdString(filePath));
+    std::string docId = fileInfo.fileName().toStdString();
+    std::string ext = fileInfo.suffix().toStdString();
 
     // 转为小写用于比较
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     std::string content;
+    ParseSource source = ParseSource::None;
 
-    if (ext == ".pdf") {
+    if (ext == "pdf") {
+        if (!fileInfo.exists()) {
+            return {ParseStatus::FileOpenFailed, source, {}, "找不到 PDF 文件"};
+        }
+
         // PDF 文件：先尝试直接提取文本层
         content = PdfExtractor::extractText(filePath);
-        if (content.empty()) {
+        if (!QString::fromStdString(content).trimmed().isEmpty()) {
+            source = ParseSource::NativePdf;
+        } else {
             // 文本层为空 → 可能是扫描件，回退到 OCR
-            content = OcrClient::extractText(filePath);
-        }
-        if (content.empty()) {
-            return {};  // 两种方式都失败
+            const auto ocrResult = OcrClient::extractText(filePath);
+            if (!ocrResult.isSuccess()) {
+                return {ParseStatus::OcrFailed, source, {}, ocrResult.diagnostic};
+            }
+            content = ocrResult.text;
+            source = ParseSource::Ocr;
         }
     } else {
-        // 普通文本文件
-        std::ifstream file(filePath, std::ios::binary);
-        if (!file.is_open()) {
-            return {};
+        // 普通文本文件（使用 QFile 支持 Unicode 路径）
+        QFile file(QString::fromStdString(filePath));
+        if (!file.open(QIODevice::ReadOnly)) {
+            return {ParseStatus::FileOpenFailed, source, {}, "无法打开文件：" + docId};
         }
-
-        std::stringstream buffer;
-        buffer << file.rdbuf();
-        content = buffer.str();
+        content = file.readAll().toStdString();
+        source = ParseSource::TextFile;
     }
 
-    return parseText(content, docId);
+    if (QString::fromStdString(content).trimmed().isEmpty()) {
+        return {ParseStatus::NoTextExtracted, source, {}, "文件不包含可检索文本"};
+    }
+
+    auto chunks = parseText(content, docId);
+    if (chunks.empty()) {
+        return {ParseStatus::NoTextExtracted, source, {}, "文件不包含可检索文本"};
+    }
+
+    return {ParseStatus::Success, source, std::move(chunks), ""};
+}
+
+std::vector<TextChunk> DocumentParser::parse(const std::string& filePath) {
+    return parseWithResult(filePath).chunks;
 }
 
 std::vector<TextChunk> DocumentParser::parseText(std::string_view text,
@@ -80,22 +117,31 @@ std::vector<std::string> DocumentParser::splitChunks(std::string_view text,
 
     size_t pos = 0;
     while (pos < text.size()) {
-        size_t end = std::min(pos + maxSize, text.size());
+        const size_t requestedEnd = std::min(
+            pos + static_cast<size_t>(std::max(maxSize, 1)), text.size());
+        size_t end = previousUtf8Boundary(text, requestedEnd);
+        if (end <= pos) {
+            // 极小的字节预算也不能截断一个 UTF-8 字符。
+            end = requestedEnd;
+            while (end < text.size() &&
+                   isUtf8ContinuationByte(static_cast<unsigned char>(text[end]))) {
+                ++end;
+            }
+        }
 
         // 尝试在句号、换行等自然断点处切割
         if (end < text.size()) {
-            // 回退到最近的自然断点
-            size_t breakPoint = end;
-            for (size_t j = end; j > pos + maxSize / 2; --j) {
-                char c = text[j];
+            const size_t minBreak = pos + static_cast<size_t>(std::max(maxSize, 1)) / 2;
+            // 回退到最近的自然断点；只检查当前块内的字符。
+            for (size_t j = end; j > minBreak; --j) {
+                const char c = text[j - 1];
                 // Check for natural break points (sentence endings, newlines)
                 if (c == '\n' || c == '\r' ||
                     c == '.'  || c == '!'  || c == '?') {
-                    breakPoint = j + 1;
+                    end = j;
                     break;
                 }
             }
-            end = breakPoint;
         }
 
         result.emplace_back(text.substr(pos, end - pos));
@@ -103,9 +149,13 @@ std::vector<std::string> DocumentParser::splitChunks(std::string_view text,
         // 下一个块的起始位置（考虑 overlap）
         size_t nextPos = end;
         if (overlap > 0 && end < text.size()) {
-            nextPos = (pos + maxSize > overlap) ? (pos + maxSize - overlap) : end;
+            const size_t overlapSize = static_cast<size_t>(overlap);
+            if (end > overlapSize) {
+                nextPos = previousUtf8Boundary(text, end - overlapSize);
+            }
         }
-        pos = nextPos;
+        // 防止因 overlap 或边界调整而停滞。
+        pos = nextPos > pos ? nextPos : end;
     }
 
     return result;

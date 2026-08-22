@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-PDF OCR 文本提取脚本
-适用于图片型/扫描件 PDF，将每页渲染为图像后通过 OCR 识别文字。
+PDF 文本提取脚本（统一入口）
 
-引擎优先级（自动检测）：
-  1. Tesseract OCR（轻量，需手动安装 + chi_sim 中文语言包）
-  2. PaddleOCR（准确率高，需 pip install paddlepaddle paddleocr）
+提取策略（自动级联）：
+  1. PyMuPDF 文本层提取 — 支持中文 CID/CJK 字体编码，适用于文字型 PDF
+  2. Tesseract OCR — 扫描件/图片型 PDF 回退方案
+  3. PaddleOCR — 更高准确率的 OCR 回退
 
 用法：
     python pdf_ocr.py <pdf_file_path>
@@ -148,21 +148,51 @@ def _ocr_paddleocr(pdf_path: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 主入口 — 自动选择可用引擎
+# PyMuPDF 文本层提取（支持 CJK/CID 字体）
 # ═══════════════════════════════════════════════════════════════
 
-def extract_text_with_ocr(pdf_path: str) -> str:
-    """对 PDF 执行 OCR，自动选择可用引擎"""
-    if not os.path.exists(pdf_path):
-        print(f"[OCR] File not found: {pdf_path}", file=sys.stderr)
+def _extract_text_layer(pdf_path: str) -> str:
+    """使用 PyMuPDF 提取 PDF 文本层（支持中文 CID 字体编码）"""
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        print(f"[PDF] Cannot open: {e}", file=sys.stderr)
         return ""
 
-    # 优先尝试 Tesseract（更快、更轻）
+    all_text: list[str] = []
+    for page_idx in range(doc.page_count):
+        try:
+            text = doc[page_idx].get_text()
+            text = text.strip()
+            if text:
+                all_text.append(text)
+        except Exception:
+            pass
+    doc.close()
+    return "\n\n".join(all_text)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 主入口 — PDF 文本提取（PyMuPDF → OCR 回退）
+# ═══════════════════════════════════════════════════════════════
+
+def extract_text(pdf_path: str) -> str:
+    """从 PDF 提取文本：优先文本层，回退 OCR"""
+    if not os.path.exists(pdf_path):
+        print(f"[PDF] File not found: {pdf_path}", file=sys.stderr)
+        return ""
+
+    # 第一步：尝试 PyMuPDF 文本层提取（支持 CJK/CID 字体）
+    text = _extract_text_layer(pdf_path)
+    if text.strip():
+        return text
+
+    # 第二步：文本层为空 → 扫描件，回退到 OCR
     text = _ocr_tesseract(pdf_path)
     if text.strip():
         return text
 
-    # 回退到 PaddleOCR
+    # 第三步：PaddleOCR
     text = _ocr_paddleocr(pdf_path)
     if text.strip():
         return text
@@ -175,16 +205,21 @@ def main() -> None:
         print("Usage: python pdf_ocr.py <pdf_file_path>", file=sys.stderr)
         sys.exit(1)
 
+    # Windows: 强制 stdout 使用 UTF-8，避免 GBK 编码错误导致 C++ QProcess
+    # 读取到截断/乱码的文本
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     pdf_path = sys.argv[1]
-    text = extract_text_with_ocr(pdf_path)
+    text = extract_text(pdf_path)
 
     if text.strip():
         print(text)
     else:
         print(
-            "[OCR] No text extracted. Please check:\n"
-            "  - PDF contains readable images (not blank pages)\n"
-            "  - OCR engine is installed (see script header for setup)",
+            "[PDF] No text extracted. Please check:\n"
+            "  - PDF contains readable content (not blank pages)\n"
+            "  - OCR engine is installed for scanned documents (see script header for setup)",
             file=sys.stderr,
         )
         sys.exit(1)

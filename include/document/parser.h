@@ -13,10 +13,40 @@ struct TextChunk {
     int startPos = 0;        // 在原文档中的起始位置（字符偏移）
 };
 
+/// 文档内容来源。
+enum class ParseSource {
+    None,
+    TextFile,
+    NativePdf,
+    Ocr
+};
+
+/// 文档解析状态。
+enum class ParseStatus {
+    Success,
+    FileOpenFailed,
+    InvalidPdf,
+    NoTextExtracted,
+    OcrFailed
+};
+
+/// 文档解析结果，包含文本块和失败诊断。
+struct ParseResult {
+    ParseStatus status = ParseStatus::NoTextExtracted;
+    ParseSource source = ParseSource::None;
+    std::vector<TextChunk> chunks;
+    std::string diagnostic;
+
+    bool isSuccess() const { return status == ParseStatus::Success; }
+};
+
 /// 文档解析器：支持 .txt / .md / .pdf 文件
 class DocumentParser {
 public:
-    /// 读取文件并切分成文本块
+    /// 读取文件、提取文本并切分为文本块，同时返回诊断结果
+    ParseResult parseWithResult(const std::string& filePath);
+
+    /// 读取文件并切分成文本块（兼容旧调用方）
     std::vector<TextChunk> parse(const std::string& filePath);
 
     /// 从纯文本字符串解析
