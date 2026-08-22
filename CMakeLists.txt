@@ -55,6 +55,15 @@ set(HEADERS
 # ── Executable ──
 add_executable(${PROJECT_NAME} ${SOURCES} ${HEADERS})
 
+# OCR helper is deployed next to the executable so the PDF fallback works
+# outside the source-tree working directory.
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/tools"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/tools/pdf_ocr.py"
+            "$<TARGET_FILE_DIR:${PROJECT_NAME}>/tools/pdf_ocr.py"
+)
+
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${JSON_INCLUDE_DIR}
@@ -87,11 +96,10 @@ endif()
 # ── Platform settings ──
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 z)
-    # 静态链接 MinGW 全部运行时（libstdc++/libgcc/libwinpthread），
-    # 彻底消除 DLL 版本冲突。Qt 库仍为动态链接（无静态 .a 可用）。
-    if(MINGW)
-        target_link_options(${PROJECT_NAME} PRIVATE -static)
-    endif()
+    # Qt DLL 使用动态 MinGW 运行时（它们需要 libstdc++-6.dll 等），
+    # exe 也统一用动态链接，避免同一进程内出现两份 C++ 运行时导致符号冲突。
+    # windeployqt 会自动部署所需 DLL，不需要静态链接。
+    # （之前 -static 导致 "找不到程序入口点"）
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -100,6 +108,40 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     else()
         target_compile_options(${PROJECT_NAME} PRIVATE -O3)
     endif()
+endif()
+
+# Focused regression for UTF-8 chunk boundaries and legal location queries.
+add_executable(test_utf8_location_regression
+    test/test_utf8_location_regression.cpp
+    src/document/parser.cpp
+    src/document/tokenizer.cpp
+    src/document/pdf_extractor.cpp
+    src/document/ocr_client.cpp
+    src/document/metadata.cpp
+    src/index/inverted_index.cpp
+    src/index/bm25_ranker.cpp
+    src/vector/embedding.cpp
+    src/vector/similarity.cpp
+    src/rag/retriever.cpp
+)
+target_include_directories(test_utf8_location_regression PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${JSON_INCLUDE_DIR}
+    ${CPPJIEBA_INCLUDE_DIR}
+    ${LIMONP_INCLUDE_DIR}
+)
+target_compile_definitions(test_utf8_location_regression PRIVATE
+    CPPJIEBA_DICT_PATH="${CMAKE_SOURCE_DIR}/third_party/cppjieba/dict"
+)
+if(Qt6_FOUND)
+    target_link_libraries(test_utf8_location_regression PRIVATE
+        Qt6::Core Qt6::Network z)
+else()
+    target_link_libraries(test_utf8_location_regression PRIVATE
+        Qt5::Core Qt5::Network z)
+endif()
+if(WIN32)
+    target_link_libraries(test_utf8_location_regression PRIVATE ws2_32)
 endif()
 
 # ── Unit tests ──
@@ -141,7 +183,4 @@ endif()
 
 if(WIN32)
     target_link_libraries(run_tests PRIVATE ws2_32 z)
-    if(MINGW)
-        target_link_options(run_tests PRIVATE -static)
-    endif()
 endif()

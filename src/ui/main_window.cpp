@@ -1,5 +1,6 @@
 #include "ui/main_window.h"
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QThread>
 #include <QTimer>
@@ -555,28 +556,51 @@ void MainWindow::onImportFiles() {
     statusLabel_->setText("正在导入文档...");
 
     int imported = 0;
+    int chunksAdded = 0;
+    int ocrImported = 0;
     QStringList errors;
     for (int i = 0; i < files.size(); ++i) {
         try {
-            retriever_->addDocument(files[i].toStdString());
-            imported++;
+            const auto result = retriever_->addDocument(files[i].toStdString());
+            if (result.imported) {
+                ++imported;
+                chunksAdded += result.chunksAdded;
+                if (result.source == document::ParseSource::Ocr) {
+                    ++ocrImported;
+                }
+            } else {
+                const QString name = QFileInfo(files[i]).fileName();
+                const QString reason = result.diagnostic.empty()
+                    ? "未能提取可检索文本"
+                    : QString::fromStdString(result.diagnostic);
+                errors.append(name + "：" + reason);
+            }
         } catch (const std::exception& e) {
-            errors.append(QString::fromStdString(e.what()));
+            errors.append(QFileInfo(files[i]).fileName() + "：" +
+                          QString::fromStdString(e.what()));
         }
         progressBar_->setValue(i + 1);
         QApplication::processEvents();
     }
 
     progressBar_->setVisible(false);
-    if (!errors.isEmpty()) {
-        statusLabel_->setText(QString("⚠️ 导入完成，%1 个成功，%2 个失败：%3")
+    if (errors.isEmpty()) {
+        QString message = QString("✅ 已导入 %1 个文档，新增 %2 个文本块")
                               .arg(imported)
-                              .arg(errors.size())
-                              .arg(errors.first()));
+                              .arg(chunksAdded);
+        if (ocrImported > 0) {
+            message += QString("（其中 %1 个通过 OCR 识别）").arg(ocrImported);
+        }
+        statusLabel_->setText(message);
     } else {
-        statusLabel_->setText(QString("✅ 已导入 %1 个文档，共 %2 个文本块")
-                              .arg(imported)
-                              .arg(retriever_->docCount()));
+        const QString summary = imported > 0
+            ? QString("⚠️ 导入完成：%1 个成功，%2 个失败，新增 %3 个文本块")
+                  .arg(imported).arg(errors.size()).arg(chunksAdded)
+            : QString("⚠️ 未导入任何文档：%1 个文件未能提取可检索文本")
+                  .arg(errors.size());
+        statusLabel_->setText(summary);
+        QMessageBox::warning(this, "文档导入提示",
+                             summary + "\n\n失败原因：\n" + errors.join("\n"));
     }
 }
 

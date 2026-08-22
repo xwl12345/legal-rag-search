@@ -3,10 +3,40 @@
 #include "document/metadata.h"
 #include "config/app_config.h"
 #include <algorithm>
+#include <array>
 #include <sstream>
 #include <iomanip>
-#include <fstream>
-#include <filesystem>
+#include <unordered_set>
+
+namespace {
+
+bool isLocationQuestion(const std::string& query) {
+    static constexpr std::array<const char*, 4> locationWords = {
+        "哪里", "哪儿", "何处", "在哪"
+    };
+
+    return std::any_of(locationWords.begin(), locationWords.end(),
+                       [&query](const char* word) {
+                           return query.find(word) != std::string::npos;
+                       });
+}
+
+void expandLegalLocationTerms(const std::string& query,
+                              std::vector<std::string>& terms) {
+    if (!isLocationQuestion(query)) return;
+
+    std::unordered_set<std::string> seen(terms.begin(), terms.end());
+    static constexpr std::array<const char*, 5> locationTerms = {
+        "住所地", "住址", "所在地", "地址", "坐落于"
+    };
+    for (const char* term : locationTerms) {
+        if (seen.insert(term).second) {
+            terms.emplace_back(term);
+        }
+    }
+}
+
+} // namespace
 
 namespace rag {
 
@@ -16,27 +46,39 @@ void Retriever::setApiKey(const std::string& key) {
     embedding_.setApiKey(key);
 }
 
-void Retriever::addDocument(const std::string& filePath) {
-    // Read raw file content
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) return;
+ImportResult Retriever::addDocument(const std::string& filePath) {
+    // 使用 DocumentParser::parseWithResult() 统一处理所有文件类型
+    // — 文本文件：直接读取
+    // — PDF：PdfExtractor 提取文本层 → OCR 回退（扫描件）
+    document::DocumentParser parser;
+    auto parseResult = parser.parseWithResult(filePath);
 
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string content = buffer.str();
+    if (!parseResult.isSuccess()) {
+        return {false, "", 0, parseResult.source, parseResult.diagnostic};
+    }
 
-    // Extract filename as docId
-    std::filesystem::path path(filePath);
-    std::string docId = path.filename().string();
+    auto& chunks = parseResult.chunks;
+    std::string docId = chunks[0].docId;
+    std::string fullText;
+    for (const auto& chunk : chunks) {
+        fullText += chunk.content + "\n";
+    }
 
-    // Extract metadata from raw text before chunking
-    auto meta = document::MetadataExtractor::extract(content);
+    // 提取元数据
+    auto meta = document::MetadataExtractor::extract(fullText);
     if (!meta.isEmpty()) {
         docMeta_[docId] = std::move(meta);
     }
 
-    // addText handles chunking + indexing
-    addText(content, docId);
+    // 逐块分词 → 建索引 → 存储
+    for (const auto& chunk : chunks) {
+        auto terms = tokenizer_.cutForIndex(chunk.content);
+        index_.addDocument(chunk.docId, chunk.chunkIndex, terms);
+        std::string key = chunk.docId + ":" + std::to_string(chunk.chunkIndex);
+        chunkStore_[key] = chunk.content;
+    }
+
+    return {true, docId, static_cast<int>(chunks.size()), parseResult.source, ""};
 }
 
 void Retriever::addText(const std::string& text, const std::string& docId) {
@@ -70,6 +112,8 @@ void Retriever::addText(const std::string& text, const std::string& docId) {
 std::vector<SearchResult> Retriever::search(const std::string& query, int topK) {
     // ── Step 1: BM25 关键词检索 ──
     auto queryTerms = tokenizer_.cutForIndex(query);
+    // 法律文书通常用“住所地”等字段表达地点，补充自然语言位置问法。
+    expandLegalLocationTerms(query, queryTerms);
     auto bm25Results = bm25_.search(queryTerms, index_, std::max(topK * 2, 10));
 
     // ── Step 2: 向量语义检索 ──

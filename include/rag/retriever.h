@@ -4,6 +4,7 @@
 #include "vector/embedding.h"
 #include "vector/similarity.h"
 #include "document/tokenizer.h"
+#include "document/parser.h"
 #include "document/metadata.h"
 #include <memory>
 #include <vector>
@@ -20,13 +21,22 @@ struct SearchResult {
     double finalScore = 0.0;    // 加权融合后的分数
 };
 
+/// 单个文件的导入结果。
+struct ImportResult {
+    bool imported = false;
+    std::string documentId;
+    int chunksAdded = 0;
+    document::ParseSource source = document::ParseSource::None;
+    std::string diagnostic;
+};
+
 /// RAG 检索器：混合 BM25 + 向量检索
 class Retriever {
 public:
     Retriever();
 
-    /// 向检索引擎添加文档
-    void addDocument(const std::string& filePath);
+    /// 向检索引擎添加文档，返回实际索引结果
+    ImportResult addDocument(const std::string& filePath);
     void addText(const std::string& text, const std::string& docId);
 
     /// 混合检索：BM25 + 向量
@@ -37,6 +47,9 @@ public:
 
     /// 已索引文档数
     int docCount() const { return index_.totalDocs(); }
+
+    /// 文本块总数
+    int chunkCount() const { return static_cast<int>(chunkStore_.size()); }
 
     /// 获取检索上下文（用于 AI 生成答案）
     std::string buildContext(const std::vector<SearchResult>& results,

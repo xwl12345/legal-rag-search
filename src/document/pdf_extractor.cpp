@@ -1,6 +1,5 @@
 #include "document/pdf_extractor.h"
-#include <fstream>
-#include <sstream>
+#include <QFile>
 #include <algorithm>
 #include <cstring>
 #include <cctype>
@@ -11,15 +10,13 @@ namespace document {
 // ── 文件读取 ──
 
 std::vector<uint8_t> PdfExtractor::readFile(const std::string& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) return {};
+    // 使用 QFile 而非 std::ifstream — Qt 原生支持 Unicode 路径，
+    // 避免 Windows ANSI API 无法处理 UTF-8 中文文件名的问题。
+    QFile file(QString::fromStdString(path));
+    if (!file.open(QIODevice::ReadOnly)) return {};
 
-    auto size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    std::vector<uint8_t> data(static_cast<size_t>(size));
-    file.read(reinterpret_cast<char*>(data.data()), size);
-    return data;
+    QByteArray raw = file.readAll();
+    return std::vector<uint8_t>(raw.begin(), raw.end());
 }
 
 // ── zlib FlateDecode 解压 ──
