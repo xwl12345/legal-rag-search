@@ -34,7 +34,8 @@ Desktop.ini
 # ── Sensitive ──
 # run.bat contains API key, be careful not to commit it publicly
 run.bat
-*.png
 
 # ── User data ──
+# Keep test fixtures versioned while excluding locally imported documents.
 *.pdf
+!test/data/*.pdf
