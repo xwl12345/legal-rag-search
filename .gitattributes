@@ -1,0 +1,28 @@
+# Normalize line endings for source-controlled text and preserve binary assets.
+* text=auto eol=lf
+
+# Explicitly text-managed project files.
+*.c text eol=lf
+*.cc text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Do not transform binary files.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.obj binary
+*.lib binary
