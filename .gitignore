@@ -40,3 +40,4 @@ run.bat
 *.pdf
 !test/data/*.pdf
 docs/defense/pptx_render/
+.zcode/
