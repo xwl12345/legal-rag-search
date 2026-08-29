@@ -27,7 +27,8 @@
 #include <cassert>
 #include <cmath>
 #include <fstream>
-#include <filesystem>
+#include <QDirIterator>
+#include <QFile>
 
 // ── 模块头文件 ──
 #include "document/parser.h"
@@ -40,6 +41,19 @@
 #include "rag/retriever.h"
 #include "rag/generator.h"
 #include <algorithm>
+
+// ── 列出目录下 .txt 文件 ──
+// 用 Qt 实现：GCC 8 MinGW 的 std::filesystem 在 Windows 上不可用（已知缺陷），
+// 且项目约定中文路径统一由 Qt 处理（见 src/document/parser.cpp）。
+static std::vector<std::string> listTxtFiles(const std::string& dir) {
+    std::vector<std::string> files;
+    QDirIterator it(QString::fromStdString(dir), {QStringLiteral("*.txt")}, QDir::Files);
+    while (it.hasNext()) {
+        files.push_back(it.next().toStdString());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
 
 // ── 简单的测试框架 ──
 static int g_passed = 0;
@@ -680,11 +694,9 @@ void test_e2e_import_all_demo_docs() {
     int imported = 0;
 
     std::string legalDir = "test/data/legal_cases";
-    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
-        if (entry.path().extension() == ".txt") {
-            retriever.addDocument(entry.path().string());
-            imported++;
-        }
+    for (const auto& file : listTxtFiles(legalDir)) {
+        retriever.addDocument(file);
+        imported++;
     }
 
     std::cout << "    (导入: " << imported << " 篇, 文本块: " << retriever.docCount() << ") ";
@@ -696,11 +708,8 @@ void test_e2e_search_across_all_types() {
     TEST("E2E: 跨案件类型搜索");
     rag::Retriever retriever;
     std::string legalDir = "test/data/legal_cases";
-
-    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
-        if (entry.path().extension() == ".txt") {
-            retriever.addDocument(entry.path().string());
-        }
+    for (const auto& file : listTxtFiles(legalDir)) {
+        retriever.addDocument(file);
     }
 
     // 民事查询
@@ -735,11 +744,8 @@ void test_e2e_metadata_all_docs() {
     TEST("E2E: 全部文档元数据提取");
     rag::Retriever retriever;
     std::string legalDir = "test/data/legal_cases";
-
-    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
-        if (entry.path().extension() == ".txt") {
-            retriever.addDocument(entry.path().string());
-        }
+    for (const auto& file : listTxtFiles(legalDir)) {
+        retriever.addDocument(file);
     }
 
     int withCaseNumber = 0, withCourt = 0, withDate = 0, withCaseType = 0;
@@ -771,11 +777,8 @@ void test_e2e_filter_functionality() {
     TEST("E2E: 元数据筛选验证");
     rag::Retriever retriever;
     std::string legalDir = "test/data/legal_cases";
-
-    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
-        if (entry.path().extension() == ".txt") {
-            retriever.addDocument(entry.path().string());
-        }
+    for (const auto& file : listTxtFiles(legalDir)) {
+        retriever.addDocument(file);
     }
 
     auto allResults = retriever.search("判决", 30);
@@ -822,11 +825,8 @@ void test_e2e_performance_stress() {
     TEST("E2E: 大数据量压力测试");
     rag::Retriever retriever;
     std::string legalDir = "test/data/legal_cases";
-
-    for (const auto& entry : std::filesystem::directory_iterator(legalDir)) {
-        if (entry.path().extension() == ".txt") {
-            retriever.addDocument(entry.path().string());
-        }
+    for (const auto& file : listTxtFiles(legalDir)) {
+        retriever.addDocument(file);
     }
 
     // 执行多次搜索，验证稳定性
@@ -934,13 +934,13 @@ void run_all_tests() {
 
 int main() {
     // 确保从项目根目录运行，以便找到 test/data/ 和 dict/
-    if (!std::filesystem::exists("test/data/rag_intro.txt")) {
+    if (!QFile::exists(QStringLiteral("test/data/rag_intro.txt"))) {
         std::cerr << "⚠️  请从项目根目录运行测试程序！" << std::endl;
         std::cerr << "   cd rag-search-engine && ./build/test_main.exe" << std::endl;
         return 1;
     }
 
-    if (!std::filesystem::exists("third_party/cppjieba/dict/jieba.dict.utf8")) {
+    if (!QFile::exists(QStringLiteral("third_party/cppjieba/dict/jieba.dict.utf8"))) {
         std::cerr << "⚠️  找不到 cppjieba 词典文件！请检查 third_party/cppjieba/dict/" << std::endl;
         return 1;
     }

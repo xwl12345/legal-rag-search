@@ -12,7 +12,6 @@
 #include <cstdlib>
 #include <sstream>
 #include <iomanip>
-#include <filesystem>
 #include <QRegularExpression>
 #include <set>
 #include <unordered_set>
