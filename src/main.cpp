@@ -1,7 +1,16 @@
 #include <QApplication>
+#include <QtGlobal>
 #include "ui/main_window.h"
 
 int main(int argc, char* argv[]) {
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    // Qt5：跟随系统 DPI 缩放（高分屏 125%/150% 下控件与字体保持舒适大小；
+    // 100% 缩放的旧机器不受影响）。属性必须在 QApplication 构造前设置。
+    // Qt6 高分屏缩放默认开启，这两个属性已弃用，无需（也不能）再设置。
+    QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
+#endif
+
     QApplication app(argc, argv);
     app.setApplicationName("RAG Search Engine");
     app.setApplicationVersion("1.0.0");

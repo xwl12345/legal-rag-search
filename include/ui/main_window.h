@@ -20,6 +20,10 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+protected:
+    /// 全局 Ctrl+滚轮：调整界面字体缩放
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private slots:
     void onSearch();
     void onImportFiles();
@@ -50,9 +54,19 @@ private:
     /// 构建元数据摘要（供 AI prompt 使用）
     std::string buildMetadataSummary(const std::vector<rag::SearchResult>& results);
 
+    /// 按当前缩放比例应用界面字体（应用字体 + 样式表 px 字号）
+    void applyUiScale();
+    /// 生成按 uiScale_ 缩放 px 字号后的样式表
+    QString scaledStyleSheet() const;
+
     // ── 核心引擎 ──
     std::unique_ptr<rag::Retriever> retriever_;
     std::unique_ptr<rag::Generator> generator_;
+
+    // ── 界面缩放（Ctrl+滚轮调节）──
+    int uiScale_ = 100;           // 缩放百分比（60–250）
+    QFont baseAppFont_;           // 缩放前的应用字体
+    QString baseStyleSheet_;      // 缩放前的全局样式表
 
     // ── UI 组件 ──
     QLineEdit* searchInput_ = nullptr;

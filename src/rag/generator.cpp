@@ -1,4 +1,5 @@
 #include "rag/generator.h"
+#include "config/app_config.h"
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -52,6 +53,9 @@ std::string Generator::generate(const std::string& query,
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setRawHeader("Authorization", ("Bearer " + apiKey_).c_str());
     request.setRawHeader("Accept", "text/event-stream");
+    // 60 秒无数据传输视为失败（网络不通时快速报错而非无限挂起；
+    // SSE 流式期间持续有增量数据，不会误伤慢回答）
+    request.setTransferTimeout(config::HTTP_TIMEOUT * 2000);
 
     QNetworkAccessManager manager;
     QNetworkReply* reply = manager.post(request, data);

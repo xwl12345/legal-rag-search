@@ -9,6 +9,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QScrollBar>
+#include <QWheelEvent>
 #include <cstdlib>
 #include <sstream>
 #include <iomanip>
@@ -309,7 +310,56 @@ void MainWindow::setupUi() {
 }
 
 void MainWindow::setupStyle() {
-    setStyleSheet(STYLE_SHEET);
+    baseStyleSheet_ = STYLE_SHEET;
+    baseAppFont_ = QApplication::font();
+
+    // 全局监听滚轮事件，实现 Ctrl+滚轮 缩放界面字体
+    QApplication::instance()->installEventFilter(this);
+
+    applyUiScale();
+}
+
+QString MainWindow::scaledStyleSheet() const {
+    static const QRegularExpression re(QStringLiteral("(font-size\\s*:\\s*)(\\d+)(px)"));
+    QString out;
+    qsizetype last = 0;  // Qt6 下 capturedStart/End 返回 qsizetype，统一类型避免窄化
+    auto it = re.globalMatch(baseStyleSheet_);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        out += baseStyleSheet_.mid(last, m.capturedStart() - last);
+        bool ok = false;
+        const int v = m.captured(2).toInt(&ok);
+        const int scaled = ok ? qMax(8, v * uiScale_ / 100) : v;
+        out += m.captured(1) + QString::number(scaled) + QStringLiteral("px");
+        last = m.capturedEnd();
+    }
+    out += baseStyleSheet_.mid(last);
+    return out;
+}
+
+void MainWindow::applyUiScale() {
+    // 未在样式表中写死字号的控件跟随应用字体缩放
+    QFont f = baseAppFont_;
+    f.setPointSizeF(baseAppFont_.pointSizeF() * uiScale_ / 100.0);
+    QApplication::setFont(f);
+
+    setStyleSheet(scaledStyleSheet());
+    setWindowTitle(QStringLiteral("⚖️ 法律 RAG 智能检索引擎 — Ctrl+滚轮缩放字体（当前 %1%）").arg(uiScale_));
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::Wheel) {
+        auto* wheel = static_cast<QWheelEvent*>(event);
+        if (wheel->modifiers() & Qt::ControlModifier) {
+            const int dy = wheel->angleDelta().y();
+            if (dy != 0) {
+                uiScale_ = qBound(60, uiScale_ + (dy > 0 ? 10 : -10), 250);
+                applyUiScale();
+            }
+            return true;  // 已消费：只缩放，不滚动列表
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 // ── API Key ──

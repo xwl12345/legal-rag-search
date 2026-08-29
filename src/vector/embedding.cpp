@@ -1,4 +1,5 @@
 #include "vector/embedding.h"
+#include "config/app_config.h"
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -43,6 +44,8 @@ std::vector<std::vector<double>> EmbeddingService::embedBatch(
     QNetworkRequest request(QUrl("https://api.deepseek.com/v1/embeddings"));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setRawHeader("Authorization", ("Bearer " + apiKey_).c_str());
+    // 30 秒无数据传输视为失败，避免网络异常时批量嵌入无限等待
+    request.setTransferTimeout(config::HTTP_TIMEOUT * 1000);
 
     QNetworkAccessManager manager;
     QNetworkReply* reply = manager.post(request, data);
