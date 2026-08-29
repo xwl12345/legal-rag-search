@@ -184,3 +184,34 @@ endif()
 if(WIN32)
     target_link_libraries(run_tests PRIVATE ws2_32 z)
 endif()
+
+# ── 检索质量量化评测 ──
+add_executable(eval_retrieval test/eval_retrieval.cpp
+    src/document/parser.cpp
+    src/document/tokenizer.cpp
+    src/document/pdf_extractor.cpp
+    src/document/ocr_client.cpp
+    src/document/metadata.cpp
+    src/index/inverted_index.cpp
+    src/index/bm25_ranker.cpp
+    src/vector/embedding.cpp
+    src/vector/similarity.cpp
+    src/rag/retriever.cpp
+)
+target_include_directories(eval_retrieval PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${JSON_INCLUDE_DIR}
+    ${CPPJIEBA_INCLUDE_DIR}
+    ${LIMONP_INCLUDE_DIR}
+)
+target_compile_definitions(eval_retrieval PRIVATE
+    CPPJIEBA_DICT_PATH="${CMAKE_SOURCE_DIR}/third_party/cppjieba/dict"
+)
+if(Qt6_FOUND)
+    target_link_libraries(eval_retrieval PRIVATE Qt6::Core Qt6::Network z)
+else()
+    target_link_libraries(eval_retrieval PRIVATE Qt5::Core Qt5::Network z)
+endif()
+if(WIN32)
+    target_link_libraries(eval_retrieval PRIVATE ws2_32)
+endif()
