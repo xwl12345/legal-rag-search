@@ -39,3 +39,4 @@ run.bat
 # Keep test fixtures versioned while excluding locally imported documents.
 *.pdf
 !test/data/*.pdf
+docs/defense/pptx_render/

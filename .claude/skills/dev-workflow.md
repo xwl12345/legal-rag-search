@@ -109,7 +109,7 @@ commit message 规范（沿用仓库现状）：`feat:` / `fix:` / `test:` / `do
 | 97 | 界面高分屏自适应 + Ctrl+滚轮缩放 + 传输超时 | ✅ 完成（commit 4131edf） |
 | 98 | 答辩报告 defense_report.md（含真实文书实测章节） | 🔄 待用户审阅后提交 |
 | 99 | 答辩流程 defense_process.md（时间轴 + 演示脚本 + 预设问答） | pending |
-| 100 | 答辩 PPT（用户确认 Markdown 后生成） | pending |
+| 100 | 答辩 PPT（13 页，judge 视觉验收通过，构建脚本 docs/defense/build_ppt.js 可复用改版） | ✅ 完成 |
 
 ## 后续迭代候选（已列入答辩报告「不足与展望」，未经用户确认不要擅自动工）
 
