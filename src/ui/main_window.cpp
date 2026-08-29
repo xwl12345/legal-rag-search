@@ -552,7 +552,7 @@ void MainWindow::onImportFiles() {
 
     progressBar_->setVisible(true);
     progressBar_->setRange(0, files.size());
-    statusLabel_->setText("正在导入文档...");
+    statusLabel_->setText("正在导入文档...（扫描件 OCR 逐页识别，可能需要数分钟，请耐心等待）");
 
     int imported = 0;
     int chunksAdded = 0;

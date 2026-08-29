@@ -27,6 +27,7 @@
 #include <cassert>
 #include <cmath>
 #include <fstream>
+#include <QApplication>
 #include <QDirIterator>
 #include <QFile>
 
@@ -962,7 +963,11 @@ void run_all_tests() {
     std::cout << "═══════════════════════════════════════════" << std::endl;
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    // 事件派发器：OcrClient 等待 OCR 子进程使用 QEventLoop，
+    // 没有 QCoreApplication 时事件循环无法工作。
+    QApplication app(argc, argv);
+
     // 确保从项目根目录运行，以便找到 test/data/ 和 dict/
     if (!QFile::exists(QStringLiteral("test/data/rag_intro.txt"))) {
         std::cerr << "⚠️  请从项目根目录运行测试程序！" << std::endl;

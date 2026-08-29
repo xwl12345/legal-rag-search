@@ -2,9 +2,11 @@
 #include <QProcess>
 #include <QCoreApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QDebug>
 #include <QStandardPaths>
+#include <QTimer>
 #include <vector>
 
 namespace {
@@ -47,6 +49,27 @@ std::optional<std::string> OcrClient::findPython() {
     for (const auto& candidate : localCandidates) {
         if (QFileInfo(candidate).isFile() && canImportFitz(candidate)) {
             return candidate.toStdString();
+        }
+    }
+
+    // 官方安装器 / winget 的标准安装位置（Python 310–313，版本号倒序优先）。
+    // 放在 PATH 探测之前：PATH 上的 python.exe 可能是 Windows 商店占位程序，
+    // 会导致真实安装的 Python 永远探测不到。
+    const QStringList installBases = {
+        QDir::homePath() + "/AppData/Local/Programs/Python",  // 每用户安装
+        "C:/Program Files/Python",                            // 全机安装
+    };
+    for (const auto& base : installBases) {
+        const QDir baseDir(base);
+        if (!baseDir.exists()) continue;
+        const auto versions = baseDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot,
+                                                QDir::Name | QDir::Reversed);
+        for (const auto& ver : versions) {
+            if (!ver.startsWith("Python")) continue;
+            const QString candidate = base + "/" + ver + "/python.exe";
+            if (QFileInfo(candidate).isFile() && canImportFitz(candidate)) {
+                return candidate.toStdString();
+            }
         }
     }
 
@@ -133,12 +156,25 @@ OcrResult OcrClient::extractText(const std::string& pdfPath, int timeoutMs) {
         return {OcrStatus::PythonStartFailed, "", diagnostic};
     }
 
-    if (!proc.waitForFinished(timeoutMs)) {
+    // 用事件循环等待子进程结束：OCR 逐页识别可能持续数分钟，期间持续泵
+    // 界面绘制事件，避免主窗口被系统标记“未响应”。
+    // ExcludeUserInputEvents：屏蔽输入事件，防止等待期间触发与导入冲突的操作。
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    QObject::connect(&proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                     &loop, &QEventLoop::quit);
+    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timer.start(timeoutMs);
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
+
+    if (!timer.isActive()) {  // 超时触发退出
         qWarning() << "[OCR] Timeout after" << timeoutMs << "ms, killing process";
         proc.kill();
         proc.waitForFinished(5000);
         return {OcrStatus::TimedOut, "", "OCR 识别超时，请尝试页数更少或更清晰的 PDF"};
     }
+    timer.stop();
 
     const QString stderrText = QString::fromUtf8(proc.readAllStandardError()).trimmed();
     if (proc.exitCode() != 0) {

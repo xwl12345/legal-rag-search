@@ -31,10 +31,11 @@ class OcrClient {
 public:
     /// 对 PDF 文件执行 OCR
     /// @param pdfPath  PDF 文件路径
-    /// @param timeoutMs 超时时间（毫秒），默认 5 分钟
+    /// @param timeoutMs 超时时间（毫秒），默认 10 分钟
+    ///                  扫描件逐页识别约 5–10 秒/页，需为大页数扫描件留出余量
     /// @return 识别文本及失败原因
     static OcrResult extractText(const std::string& pdfPath,
-                                 int timeoutMs = 300000);
+                                 int timeoutMs = 600000);
 
     /// 检查 OCR 环境是否可用（Python + PyMuPDF）
     static bool isAvailable();

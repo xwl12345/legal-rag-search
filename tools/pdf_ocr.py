@@ -4,8 +4,9 @@ PDF 文本提取脚本（统一入口）
 
 提取策略（自动级联）：
   1. PyMuPDF 文本层提取 — 支持中文 CID/CJK 字体编码，适用于文字型 PDF
-  2. Tesseract OCR — 扫描件/图片型 PDF 回退方案
-  3. PaddleOCR — 更高准确率的 OCR 回退
+  2. RapidOCR — 纯 pip 安装的中文 OCR（推荐，无需系统级软件）
+  3. Tesseract OCR — 扫描件/图片型 PDF 回退方案
+  4. PaddleOCR — 更高准确率的 OCR 回退
 
 用法：
     python pdf_ocr.py <pdf_file_path>
@@ -13,9 +14,12 @@ PDF 文本提取脚本（统一入口）
 输出：提取的纯文本（UTF-8），失败时返回空。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-环境配置（选一种即可）：
+环境配置（按需选一种即可）：
 
-  方案 A — Tesseract（推荐，轻量）：
+  方案 A — RapidOCR（推荐，纯 pip 约 60MB，中文效果好）：
+    pip install PyMuPDF rapidocr-onnxruntime
+
+  方案 B — Tesseract（轻量系统级）：
     1. 下载安装 Tesseract OCR：
        https://github.com/UB-Mannheim/tesseract/wiki
     2. 下载中文语言包 chi_sim.traineddata：
@@ -23,7 +27,7 @@ PDF 文本提取脚本（统一入口）
        放到 Tesseract 安装目录的 tessdata 文件夹下
     3. pip install pytesseract PyMuPDF
 
-  方案 B — PaddleOCR（准确率更高，约 500MB）：
+  方案 C — PaddleOCR（准确率更高，约 500MB）：
     1. pip install paddlepaddle paddleocr PyMuPDF
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
@@ -31,6 +35,51 @@ PDF 文本提取脚本（统一入口）
 import sys
 import os
 import fitz  # PyMuPDF — PDF 页面渲染
+
+
+# ═══════════════════════════════════════════════════════════════
+# RapidOCR 引擎（纯 pip 安装，onnxruntime 推理）
+# ═══════════════════════════════════════════════════════════════
+
+def _ocr_rapidocr(pdf_path: str) -> str:
+    """使用 RapidOCR 提取 PDF 文本（中文识别效果好，无系统级依赖）"""
+    try:
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError:
+        return ""
+
+    try:
+        ocr = RapidOCR()
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        print(f"[OCR] RapidOCR init failed: {e}", file=sys.stderr)
+        return ""
+
+    all_text: list[str] = []
+    total_pages = doc.page_count
+
+    for page_idx in range(total_pages):
+        try:
+            page = doc[page_idx]
+            pix = page.get_pixmap(dpi=150)
+            img_bytes = pix.tobytes("png")
+
+            result, _ = ocr(img_bytes)
+
+            page_lines: list[str] = []
+            if result:
+                for line_info in result:
+                    # RapidOCR 行结构: [box, text, score]
+                    page_lines.append(line_info[1])
+
+            if page_lines:
+                all_text.append("\n".join(page_lines))
+        except Exception as e:
+            print(f"[OCR] Page {page_idx + 1} error: {e}", file=sys.stderr)
+            continue
+
+    doc.close()
+    return "\n\n".join(all_text)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -188,11 +237,16 @@ def extract_text(pdf_path: str) -> str:
         return text
 
     # 第二步：文本层为空 → 扫描件，回退到 OCR
+    text = _ocr_rapidocr(pdf_path)
+    if text.strip():
+        return text
+
+    # 第三步：Tesseract
     text = _ocr_tesseract(pdf_path)
     if text.strip():
         return text
 
-    # 第三步：PaddleOCR
+    # 第四步：PaddleOCR
     text = _ocr_paddleocr(pdf_path)
     if text.strip():
         return text

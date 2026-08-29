@@ -315,19 +315,83 @@ run.bat         # 含 API Key
 
 ---
 
+## 真实文档实测问题（2026-08 用真实裁判文书验证时发现）
+
+### 17. 真实判决书 PDF（WPS/CID 字体）文本层提取为空 → 导入失败
+
+**现象**：导入真实下载的判决书 PDF，弹「未找到可运行 PyMuPDF（fitz）的 Python 解释器」。
+
+**根因**：两连击。① 自研 PDF 解析器只支持简单文本编码，而真实文书（WPS 导出）使用 CID 子集字体 + ToUnicode CMap，正确逐字提取需要解析 CMap，超出轻量解析器能力 → 文本层为空 → 触发 OCR 回退；② 本机没有 Python 环境 → OCR 也失败 → 导入整体失败。
+
+**修复**：安装 Python 3.12 + PyMuPDF + rapidocr-onnxruntime（覆盖级联第 1、2 级）后，该 PDF 由 PyMuPDF 文本层直接完整提取（9 页）。
+
+> **教训**：处理真实 PDF 时 OCR 环境是实际前置条件，诊断弹窗给出的提示就是安装指引；自研解析器的「零依赖」能力边界要如实标注（CID/ToUnicode 解析为后续增强方向）。
+
+---
+
+### 18. PATH 上的商店占位 `python.exe` 遮蔽真实 Python
+
+**现象**：装好 Python 后，OCR 仍报「未找到可运行 PyMuPDF 的 Python 解释器」。
+
+**根因**：Windows 商店的 App Execution Alias 在 PATH 上放了一个假的 `python.exe`（运行只提示"未找到"并退出）。`findPython` 探测 PATH 命中这个占位程序、验证失败后就返回空，真实安装在 `AppData\Local\Programs\Python\Python312` 的解释器永远轮不到。
+
+**修复**：`findPython` 在 PATH 探测**之前**先扫描标准安装位置（`%LOCALAPPDATA%\Programs\Python\Python3xx`、`C:\Program Files\Python\Python3xx`，版本号倒序），每个候选都用 `python -c "import fitz"` 实测验证。
+
+> **教训**：Windows 的商店占位程序会"顶替"真实解释器；任何依赖 PATH 探测运行时的逻辑都要对占位程序免疫。
+
+---
+
+### 19. 扫描件 OCR 期间程序"未响应"（假死约 3 分钟）
+
+**现象**：导入 20 页扫描件 PDF（15.8 MB），窗口灰掉拖不动，约 3 分钟后恢复；观感等同死机。
+
+**根因**：RapidOCR 逐页约 8 秒 × 20 页 ≈ 3 分钟，`QProcess::waitForFinished` 在 UI 线程同步阻塞，期间不派发绘制事件 → Windows 判定无响应。且旧超时上限 5 分钟，35 页以上的扫描件会被中途误杀。
+
+**修复**：等待改为 `QEventLoop` + `QEventLoop::ExcludeUserInputEvents`（持续泵绘制事件，窗口保持响应；屏蔽输入防止等待期间误操作）；默认超时 5→10 分钟；导入状态栏提示「扫描件 OCR 逐页识别，可能需要数分钟」。
+
+> **教训**：凡在 UI 线程同步等待长耗时子进程/网络，必须泵事件或整体移出 UI 线程，否则界面必然假死。
+
+---
+
+### 20. AI 生成报「TLS initialization failed」
+
+**现象**：配置 API Key 后，AI 回答报「LLM API request failed: TLS initialization failed」。
+
+**根因**：Qt 的 HTTPS 依赖 OpenSSL 1.1 动态库（`libssl-1_1-x64.dll`、`libcrypto-1_1-x64.dll`）。本 Qt 5.15.2 安装变体未附带，手工部署运行时时也漏了它们 → Qt 加载不到 OpenSSL，所有 HTTPS 请求直接失败。注意 Git 自带的 OpenSSL 3（libssl-3-x64.dll）**不能**给 Qt 5.15 用，版本必须匹配 1.1。
+
+**修复**：安装 slproweb「Win64OpenSSL Light 1.1.1w」（MSI），把 `libssl-1_1-x64.dll`、`libcrypto-1_1-x64.dll` 拷到 exe 目录。
+
+> **教训**：Qt 网络应用部署清单 = Qt5*.dll + platforms 插件 + MinGW 运行时 + **OpenSSL 1.1**，缺一即 HTTPS 全挂；修改部署清单后必须重启应用重新加载。
+
+---
+
+### 21. AI 回答流式输出完毕后报「substr: __pos > size」
+
+**现象**：AI 回答已完整逐字输出（含四段式与参考来源），结尾却弹「❌ AI 生成失败：basic_string::substr: __pos (1409) > this->size() (1408)」。
+
+**根因**：SSE 解析用 `std::getline` 逐行切分并累计 `processed` 计数，再 `sseBuffer.substr(processed.size())` 保留未完成尾行。当流末尾以**无换行符的半行**结束时，`getline` 依然会取出尾行，代码给它补了一个缓冲区中并不存在的 `'\n'` 计入 `processed` → `processed.size()` 比缓冲区真实长度大 1 → `substr` 越界抛异常。
+
+**修复**：改为标准写法——`find('\n')` 只消费完整行（顺带兼容 CRLF），不完整尾行留在缓冲区；`finished` 后再单独处理残留的最后一行。
+
+> **教训**：手写流式协议解析时，"已消费字节数"必须以真实分隔符为界记账，严禁给补全出来的内容记账；这类差一错误在流刚好断在行中间时才触发，测试很难覆盖到。
+
+---
+
 ## 快速排查清单
 
 遇到问题时按顺序检查：
 
 | # | 检查项 | 命令/方法 |
 |---|--------|-----------|
-| 1 | exe 缺哪些 DLL | `objdump -p build/rag_search_engine.exe \| grep "DLL Name"` |
+| 1 | exe 缺哪些 DLL | `objdump -p build/legal_rag_search.exe \| grep "DLL Name"` |
 | 2 | build 目录有这些 DLL 吗 | `ls build/*.dll build/platforms/*.dll` |
-| 3 | tests 还能过吗 | `build\run_tests.exe` |
-| 4 | CMake 配置对了吗 | 重新 `cmake .. -DCMAKE_PREFIX_PATH=...` |
-| 5 | Qt 插件目录在吗 | `ls build/platforms/qwindows.dll` |
-| 6 | API Key 设了吗 | 看 UI 顶部 API Key 状态指示 |
-| 7 | 文档导入了吗 | 看状态栏 docCount |
+| 3 | HTTPS 报 TLS 错误 | build 下有 `libssl-1_1-x64.dll`、`libcrypto-1_1-x64.dll` 吗 |
+| 4 | tests 还能过吗 | `build\run_tests.exe` |
+| 5 | CMake 配置对了吗 | 重新 `cmake -B build -DCMAKE_PREFIX_PATH=...` |
+| 6 | Qt 插件目录在吗 | `ls build/platforms/qwindows.dll` |
+| 7 | API Key 设了吗 | 看 UI 顶部 API Key 状态指示 |
+| 8 | 文档导入了吗 | 看状态栏导入计数 |
+| 9 | 导入扫描件卡住？ | OCR 正常耗时（约 8 秒/页），窗口应保持响应 |
 
 ---
 
@@ -335,8 +399,9 @@ run.bat         # 含 API Key
 
 | 组件 | 路径 |
 |------|------|
-| Qt 6.10.2 | `D:\Qt\6.10.2\mingw_64` |
-| 编译器 (GCC 13.1.0) | `D:\Qt\Tools\mingw1310_64\bin\g++.exe` |
-| CMake | `D:\Qt\Tools\CMake_64\bin\cmake.exe` |
-| windeployqt | `D:\Qt\6.10.2\mingw_64\bin\windeployqt.exe` |
+| Qt 5.15.2 (MinGW 8.1) | `D:\QT5.15.2\5.15.2\mingw81_64` |
+| 编译器 (GCC 8.1.0) | `D:\QT5.15.2\Tools\mingw810_64\bin\g++.exe` |
+| CMake 4.x | `C:\Program Files\CMake\bin\cmake.exe` |
+| OpenSSL 1.1.1w（TLS 必需） | `C:\Program Files\OpenSSL-Win64`（DLL 需拷到 exe 目录） |
+| Python 3.12 + PyMuPDF + RapidOCR（OCR 级联） | `%LOCALAPPDATA%\Programs\Python\Python312` |
 | cppjieba 词典 | `third_party/cppjieba/dict/` |

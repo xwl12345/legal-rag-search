@@ -59,60 +59,65 @@ std::string Generator::generate(const std::string& query,
     std::string fullAnswer;
     std::string sseBuffer;  // buffer for partial SSE lines
 
-    // Process SSE stream chunks as they arrive
+    // 处理单条 SSE 行（"data: {...}" / "data: [DONE]" / 注释行）
+    auto processSseLine = [&](const std::string& line) {
+        if (line.empty() || line[0] == ':') return;
+
+        if (line.rfind("data: ", 0) != 0) return;
+        const std::string jsonStr = line.substr(6);
+        if (jsonStr == "[DONE]") return;
+
+        QJsonParseError parseError;
+        QJsonDocument jdoc = QJsonDocument::fromJson(
+            QByteArray::fromStdString(jsonStr), &parseError);
+        if (parseError.error == QJsonParseError::NoError && jdoc.isObject()) {
+            QJsonObject root = jdoc.object();
+            QJsonArray choices = root["choices"].toArray();
+            if (!choices.isEmpty()) {
+                QJsonObject choice = choices[0].toObject();
+                QJsonObject delta = choice["delta"].toObject();
+                if (delta.contains("content")) {
+                    std::string content = delta["content"].toString().toStdString();
+                    fullAnswer += content;
+                    if (callback) {
+                        callback(content);
+                    }
+                }
+            }
+        }
+    };
+
+    // Process SSE stream chunks as they arrive.
+    // 只消费以 \n 结尾的完整行，不完整的尾行留在缓冲区等下一次数据到达。
+    // （旧实现用 getline + processed 计数回退：当流末尾无换行时，getline 仍会
+    //   取出尾行并给它补一个缓冲区中不存在的 '\n'，使 processed.size() 比
+    //   缓冲区大 1，substr 越界抛出 basic_string::substr __pos > size。）
     QObject::connect(reply, &QNetworkReply::readyRead, [&]() {
         QByteArray chunk = reply->readAll();
         sseBuffer += chunk.toStdString();
 
-        std::istringstream stream(sseBuffer);
-        std::string line;
-        std::string processed;
-
-        while (std::getline(stream, line)) {
-            // Check if this is a complete line (ends with \n)
-            // getline consumes the \n, so if stream is good, it was a complete line
-            if (line.empty() || line[0] == ':') {
-                processed += line + "\n";
-                continue;
-            }
-
-            if (line.rfind("data: ", 0) == 0) {
-                std::string jsonStr = line.substr(6);
-                if (jsonStr == "[DONE]") {
-                    processed += line + "\n";
-                    continue;
-                }
-
-                QJsonParseError parseError;
-                QJsonDocument jdoc = QJsonDocument::fromJson(
-                    QByteArray::fromStdString(jsonStr), &parseError);
-                if (parseError.error == QJsonParseError::NoError && jdoc.isObject()) {
-                    QJsonObject root = jdoc.object();
-                    QJsonArray choices = root["choices"].toArray();
-                    if (!choices.isEmpty()) {
-                        QJsonObject choice = choices[0].toObject();
-                        QJsonObject delta = choice["delta"].toObject();
-                        if (delta.contains("content")) {
-                            std::string content = delta["content"].toString().toStdString();
-                            fullAnswer += content;
-                            if (callback) {
-                                callback(content);
-                            }
-                        }
-                    }
-                }
-            }
-            processed += line + "\n";
+        size_t pos = 0;
+        size_t nl;
+        while ((nl = sseBuffer.find('\n', pos)) != std::string::npos) {
+            std::string line = sseBuffer.substr(pos, nl - pos);
+            pos = nl + 1;
+            if (!line.empty() && line.back() == '\r') line.pop_back();  // 兼容 CRLF
+            processSseLine(line);
         }
-
-        // Keep any incomplete last line in the buffer
-        sseBuffer = sseBuffer.substr(processed.size());
+        sseBuffer.erase(0, pos);  // 保留不完整的尾行（pos ≤ size，安全）
     });
 
     // Synchronous wait via local event loop
     QEventLoop loop;
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
+
+    // 流结束后处理缓冲区中残留的最后一行（可能没有换行结尾）
+    if (!sseBuffer.empty()) {
+        std::string lastLine = sseBuffer;
+        if (!lastLine.empty() && lastLine.back() == '\r') lastLine.pop_back();
+        processSseLine(lastLine);
+    }
 
     // Check for network errors (but don't throw - return what we got)
     if (reply->error() != QNetworkReply::NoError) {
