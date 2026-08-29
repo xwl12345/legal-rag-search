@@ -26,7 +26,7 @@ const hair = (s, x, y, w) => s.addShape(P.shapes.LINE, { x, y, w, h: 0, line: { 
   s.addText("法律文档智能检索引擎", T({ x: 1.05, y: 1.75, w: 11.2, h: 1.15, fontSize: 52, bold: true, color: WHITE, margin: 0 }));
   s.addText("基于 BM25 + 向量混合检索与 DeepSeek 大模型的 RAG 系统", T({ x: 1.1, y: 3.05, w: 11, h: 0.5, fontSize: 19, color: SUB, margin: 0 }));
   hair(s, 1.1, 4.1, 4.2);
-  const meta = [["答辩人", "＿＿＿＿"], ["学号", "＿＿＿＿＿＿"], ["专业", "＿＿＿＿＿＿"], ["指导教师", "＿＿＿＿"]];
+  const meta = [["答辩人", "＿＿＿＿"], ["学号", "＿＿＿＿＿＿＿＿"], ["专业", "＿＿＿＿＿＿＿＿"], ["指导教师", "＿＿＿＿"]];
   meta.forEach((m, i) => {
     s.addText(m[0], T({ x: 1.1 + i * 2.85, y: 4.4, w: 2.7, h: 0.3, fontSize: 12, color: SUB, margin: 0 }));
     s.addText(m[1], T({ x: 1.1 + i * 2.85, y: 4.72, w: 2.7, h: 0.4, fontSize: 16, color: WHITE, bold: true, margin: 0 }));
