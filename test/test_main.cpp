@@ -849,6 +849,35 @@ void test_e2e_performance_stress() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 12: 回归 — OCR 失败的 PDF 导入不得破坏既有检索能力
+// （GUI 实测中发现导入 OCR 失败文件后检索返回 0 条的异常）
+// ═══════════════════════════════════════════════════════════════
+void test_e2e_failed_ocr_import_then_search() {
+    TEST("回归: OCR 失败导入后检索仍正常");
+    rag::Retriever retriever;
+    for (const auto& file : listTxtFiles("test/data/legal_cases")) {
+        retriever.addDocument(file);
+    }
+
+    // 导入前检索正常
+    auto before = retriever.search("专利侵权", 5);
+    CHECK(before.size() >= 1);
+
+    // 导入一个无文本层的伪扫描 PDF（本机无 OCR 环境 → 导入失败）
+    auto result = retriever.addDocument("test/data/fake_scanned.pdf");
+    std::cout << "    (fake_scanned 导入: " << (result.imported ? "成功" : "失败(符合预期)") << ") ";
+
+    // 导入失败后，既有检索能力必须保持
+    auto after = retriever.search("专利侵权", 5);
+    std::cout << "(导入后检索: " << after.size() << " 条) ";
+    CHECK(after.size() >= 1);
+
+    // 元数据不应被破坏
+    CHECK(retriever.docCount() >= 21);
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -923,6 +952,7 @@ void run_all_tests() {
     test_e2e_filter_functionality();
     test_e2e_legal_prompt_detection();
     test_e2e_performance_stress();
+    test_e2e_failed_ocr_import_then_search();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;
