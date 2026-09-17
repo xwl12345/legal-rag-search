@@ -12,10 +12,10 @@ int main(int argc, char* argv[]) {
 #endif
 
     QApplication app(argc, argv);
-    app.setApplicationName("RAG Search Engine");
-    app.setApplicationVersion("1.0.0");
+    app.setApplicationName(QStringLiteral("Legal RAG Search"));
+    app.setApplicationVersion(QStringLiteral("2.0.0"));
 
-    // 全局字体设置
+    // 全局字体基准（AppTheme 的 Ctrl+滚轮缩放以此为 100%）
     QFont font = app.font();
     font.setPointSize(10);
     app.setFont(font);

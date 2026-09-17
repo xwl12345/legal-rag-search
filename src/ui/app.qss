@@ -1,0 +1,289 @@
+/* ============================================================================
+ * 全局主题 —— 藏青 #14213D + 铜金 #B7791F
+ * 视觉基准：毕业设计工作台/UI改版视觉预览.html
+ *
+ * 字号层级：标题 18px / 正文 13px / 辅助 11px
+ * 控件约定（由代码端配合）：
+ *   - role="primary"  : 主行动按钮（铜金实心）
+ *   - role="danger"   : 破坏性操作按钮
+ *   - status="ok|error": 状态标签取值，由 AppTheme::setStatusFlag 切换
+ * 备注：本文件中除注释外只使用 ASCII 字符，避免 QSS 解析器处理多字节字符。
+ * ==========================================================================*/
+
+/* ── 页面骨架 ──────────────────────────────────────────────────────────────*/
+QMainWindow {
+    background: #F4F6F9;
+}
+QSplitter::handle {
+    background: #E2E7EE;
+    width: 1px;
+}
+
+/* ── 页面标题区 ────────────────────────────────────────────────────────────*/
+QLabel#pageTitle {
+    font-size: 18px;
+    font-weight: 800;
+    color: #14213D;
+}
+QLabel#pageSubtitle {
+    font-size: 11px;
+    color: #64748B;
+}
+QLabel#fieldLabel {
+    font-size: 11px;
+    color: #64748B;
+}
+QLabel#hint {
+    font-size: 11px;
+    color: #64748B;
+}
+
+/* ── 卡片容器 ──────────────────────────────────────────────────────────────*/
+QFrame#card {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 10px;
+}
+QLabel#cardTitle {
+    background: #FAFBFD;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    border-bottom: 1px solid #E2E7EE;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #14213D;
+}
+QFrame#placeholderCard {
+    background: #FFFFFF;
+    border: 1px dashed #CBD5E1;
+    border-radius: 10px;
+}
+QLabel#placeholderBody {
+    font-size: 13px;
+    color: #64748B;
+}
+QLabel#placeholderBadge {
+    background: #FDF6EC;
+    border: 1px solid #EFD9B4;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #B7791F;
+}
+
+/* ── 按钮 ──────────────────────────────────────────────────────────────────*/
+QPushButton {
+    background: #FFFFFF;
+    color: #14213D;
+    border: 1px solid #E2E7EE;
+    border-radius: 8px;
+    padding: 7px 16px;
+    font-size: 13px;
+    font-weight: 700;
+}
+QPushButton:hover {
+    border-color: #B7791F;
+    color: #B7791F;
+}
+QPushButton:pressed {
+    background: #FDF6EC;
+}
+QPushButton:disabled {
+    background: #F4F6F9;
+    color: #9AA7B6;
+    border-color: #E2E7EE;
+}
+QPushButton[role="primary"] {
+    background: #B7791F;
+    color: #FFFFFF;
+    border: none;
+}
+QPushButton[role="primary"]:hover {
+    background: #9A6517;
+    color: #FFFFFF;
+}
+QPushButton[role="primary"]:pressed {
+    background: #7F5313;
+}
+QPushButton[role="primary"]:disabled {
+    background: #D9C5A2;
+    color: #FFFFFF;
+}
+QPushButton[role="danger"] {
+    background: #FFFFFF;
+    color: #C62828;
+    border: 1px solid #F0CFCF;
+}
+QPushButton[role="danger"]:hover {
+    background: #FFF5F5;
+    border-color: #C62828;
+    color: #C62828;
+}
+
+/* ── 输入框 ────────────────────────────────────────────────────────────────*/
+QLineEdit {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 9px;
+    padding: 8px 14px;
+    font-size: 13px;
+    color: #1F2937;
+    selection-background-color: #B7791F;
+    selection-color: #FFFFFF;
+}
+QLineEdit:focus {
+    border: 1px solid #B7791F;
+}
+QLineEdit#searchInput {
+    font-size: 14px;
+    padding: 10px 14px;
+    border-radius: 9px;
+}
+
+/* ── 下拉筛选 ──────────────────────────────────────────────────────────────*/
+QComboBox {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 8px;
+    padding: 5px 10px;
+    font-size: 12px;
+    color: #1F2937;
+    min-height: 18px;
+}
+QComboBox:hover {
+    border-color: #B7791F;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QComboBox QAbstractItemView {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 8px;
+    outline: 0;
+    selection-background-color: #FDF6EC;
+    selection-color: #B7791F;
+}
+
+/* ── 检索结果列表 ──────────────────────────────────────────────────────────*/
+QListWidget#resultList {
+    background: #FFFFFF;
+    border: none;
+    outline: 0;
+    font-size: 13px;
+}
+QListWidget#resultList::item {
+    padding: 10px 14px;
+    border-bottom: 1px solid #F0F3F7;
+}
+QListWidget#resultList::item:hover {
+    background: #FDF6EC;
+}
+QListWidget#resultList::item:selected {
+    background: #FDF6EC;
+    color: #1F2937;
+}
+
+/* ── AI 回答区 ─────────────────────────────────────────────────────────────*/
+QTextEdit#aiAnswer {
+    background: #FFFFFF;
+    border: none;
+    font-size: 13px;
+    padding: 12px 14px;
+    color: #1F2937;
+}
+
+/* ── 左侧导航（藏青底 / 铜金选中）─────────────────────────────────────────*/
+QFrame#navPanel {
+    background: #14213D;
+}
+QLabel#navBrand {
+    color: #FFFFFF;
+    font-size: 15px;
+    font-weight: 800;
+}
+QLabel#navBrandSub {
+    color: #8FA3BF;
+    font-size: 10px;
+}
+QLabel#navFooter {
+    color: #5F7089;
+    font-size: 11px;
+}
+QListWidget#navList {
+    background: #14213D;
+    border: none;
+    outline: 0;
+    font-size: 14px;
+    padding: 0px;
+}
+QListWidget#navList::item {
+    color: #B9C6D8;
+    padding: 10px 12px;
+    margin: 2px 0px;
+    border-radius: 8px;
+}
+QListWidget#navList::item:hover {
+    background: #1F3A5F;
+    color: #E8EEF6;
+}
+QListWidget#navList::item:selected {
+    background: #B7791F;
+    color: #FFFFFF;
+    font-weight: 700;
+}
+QListWidget#navList::item:selected:!active {
+    background: #B7791F;
+    color: #FFFFFF;
+    font-weight: 700;
+}
+
+/* ── 底部状态栏 ────────────────────────────────────────────────────────────*/
+QStatusBar {
+    background: #14213D;
+}
+QStatusBar::item {
+    border: none;
+}
+QStatusBar QLabel {
+    font-size: 11px;
+    color: #9FB2CC;
+}
+QLabel#statusDotOk {
+    font-size: 12px;
+    color: #66BB6A;
+}
+QLabel#statusDotOff {
+    font-size: 12px;
+    color: #EF5350;
+}
+QLabel#statusVersion {
+    font-size: 11px;
+    color: #5F7089;
+}
+
+/* ── API Key 状态指示（配合 status 动态属性）────────────────────────────*/
+QLabel#apiKeyStatus {
+    font-size: 11px;
+    font-weight: 700;
+}
+QLabel#apiKeyStatus[status="ok"] {
+    color: #2E7D32;
+}
+QLabel#apiKeyStatus[status="error"] {
+    color: #C62828;
+}
+
+/* ── 进度条 ────────────────────────────────────────────────────────────────*/
+QProgressBar {
+    border: none;
+    background: #E2E7EE;
+    border-radius: 2px;
+}
+QProgressBar::chunk {
+    background: #B7791F;
+    border-radius: 2px;
+}

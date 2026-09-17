@@ -4,6 +4,12 @@ project(legal_rag_search VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+
+# ── Qt resources (global QSS theme) ──
+set(RESOURCES
+    src/ui/theme.qrc
+)
 
 # ── Third-party header-only libraries ──
 set(JSON_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/nlohmann/single_include)
@@ -11,9 +17,8 @@ set(CPPJIEBA_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/cppjieba/include)
 set(LIMONP_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/third_party/limonp/include)
 
 # ── Source files ──
-set(SOURCES
-    src/main.cpp
-
+# 引擎层（不含 Qt UI，测试目标复用）
+set(SRC_ENGINE
     # Document parsing & tokenization
     src/document/parser.cpp
     src/document/tokenizer.cpp
@@ -32,9 +37,21 @@ set(SOURCES
     # RAG pipeline
     src/rag/retriever.cpp
     src/rag/generator.cpp
+)
 
-    # Qt UI
+# Qt UI 层（T0 起统一由此三块组成：主题 / 组件 / 页面）
+set(SRC_UI
+    src/ui/app_theme.cpp
+    src/ui/navigation_bar.cpp
+    src/ui/placeholder_page.cpp
+    src/ui/search_page.cpp
     src/ui/main_window.cpp
+)
+
+set(SOURCES
+    src/main.cpp
+    ${SRC_ENGINE}
+    ${SRC_UI}
 )
 
 # ── Headers ──
@@ -49,11 +66,45 @@ set(HEADERS
     include/rag/retriever.h
     include/rag/generator.h
     include/ui/main_window.h
+    include/ui/app_theme.h
+    include/ui/navigation_bar.h
+    include/ui/placeholder_page.h
+    include/ui/search_page.h
     include/config/app_config.h
 )
 
+# ── UI 骨架冒烟测试（离屏渲染，导出各页截图）──
+add_executable(ui_smoke
+    test/ui_smoke.cpp
+    ${SRC_ENGINE}
+    ${SRC_UI}
+    ${HEADERS}
+    ${RESOURCES}
+)
+
+target_include_directories(ui_smoke PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${JSON_INCLUDE_DIR}
+    ${CPPJIEBA_INCLUDE_DIR}
+    ${LIMONP_INCLUDE_DIR}
+)
+
+target_compile_definitions(ui_smoke PRIVATE
+    CPPJIEBA_DICT_PATH="${CMAKE_SOURCE_DIR}/third_party/cppjieba/dict"
+)
+
+if(Qt6_FOUND)
+    target_link_libraries(ui_smoke PRIVATE Qt6::Widgets Qt6::Core Qt6::Network)
+else()
+    target_link_libraries(ui_smoke PRIVATE Qt5::Widgets Qt5::Core Qt5::Network)
+endif()
+
+if(WIN32)
+    target_link_libraries(ui_smoke PRIVATE ws2_32 z)
+endif()
+
 # ── Executable ──
-add_executable(${PROJECT_NAME} ${SOURCES} ${HEADERS})
+add_executable(${PROJECT_NAME} src/main.cpp ${SRC_ENGINE} ${SRC_UI} ${HEADERS} ${RESOURCES})
 
 # OCR helper is deployed next to the executable so the PDF fallback works
 # outside the source-tree working directory.

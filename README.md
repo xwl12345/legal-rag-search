@@ -12,8 +12,8 @@
 - 📋 **法律 Prompt 模板** — 自动检测法律上下文，切换结构化四段式法律问答格式（案件概述 → 法律分析 → 结论 → 参考来源）
 - 🤖 **流式 AI 回答** — 基于 DeepSeek Chat API 的 SSE 流式生成，实时逐字展示
 - 🇨🇳 **中文分词** — 集成 cppjieba + 法律自定义词典，精准的中文分词和关键词提取
-- 🎨 **现代桌面 UI** — 基于 Qt6，左右分栏（检索结果 + AI 回答），支持 API Key 界面配置
-- 🧪 **完整测试** — 43 个单元测试 + 端到端测试，21 篇模拟裁判文书 Demo 数据集
+- 🎨 **现代桌面 UI** — 藏青 + 铜金主题，五页导航架构（检索问答 / 文档库 / 问答历史 / 算法评测 / 设置），左右分栏（检索结果 + AI 回答），支持 API Key 界面配置
+- 🧪 **完整测试** — 45 个单元测试 + 端到端测试，21 篇模拟裁判文书 Demo 数据集
 
 ## 技术架构
 
@@ -81,7 +81,11 @@ rag-search-engine/
 │   │   ├── retriever.h               # 混合检索器（BM25 + 向量融合）
 │   │   └── generator.h               # AI 答案生成器（SSE 流式 + Prompt 模板）
 │   └── ui/
-│       └── main_window.h             # Qt 主窗口（含筛选栏）
+│       ├── main_window.h             # 主窗口骨架（导航 + QStackedWidget + 状态栏）
+│       ├── navigation_bar.h          # 左侧导航栏（藏青底 / 铜金选中）
+│       ├── search_page.h             # 检索问答页（导入 / 检索 / 筛选 / 流式回答）
+│       ├── placeholder_page.h        # 占位页（文档库 / 历史 / 评测 / 设置 待实现）
+│       └── app_theme.h               # 全局主题（加载 QSS + Ctrl+滚轮缩放）
 ├── src/                              # 实现文件（与 include/ 一一对应）
 │   ├── main.cpp                      # 程序入口
 │   ├── document/
@@ -95,7 +99,13 @@ rag-search-engine/
 │   │   ├── retriever.cpp             # 混合检索 + 元数据管理
 │   │   └── generator.cpp             # Prompt 模板 + SSE 解析
 │   └── ui/
-│       └── main_window.cpp           # 主窗口 UI + 筛选逻辑
+│       ├── app_theme.cpp             # 全局 QSS 加载与字号缩放（唯一 setStyleSheet 调用点）
+│       ├── app.qss                   # 主题样式表（Qt 资源 :/theme/app.qss）
+│       ├── theme.qrc                 # 资源清单
+│       ├── navigation_bar.cpp        # 左侧导航栏
+│       ├── search_page.cpp           # 检索问答页（自旧 MainWindow 整体迁入）
+│       ├── placeholder_page.cpp      # 占位页
+│       └── main_window.cpp           # 主窗口骨架 + 状态栏汇总
 ├── third_party/
 │   ├── cppjieba/                     # 中文分词（MIT）含法律自定义词典
 │   │   └── dict/
@@ -312,11 +322,46 @@ mingw32-make -j4
 
 ### 技术要点
 
+- **多页 UI 架构** — `MainWindow` 只保留骨架（左侧导航 + `QStackedWidget` + `QStatusBar`），业务逻辑全部收敛到页面类；`SearchPage` 承载原有的导入 / 检索 / 筛选 / 流式回答
+- **全局 QSS 主题** — 全项目仅 `AppTheme::apply()` 一处调用 `setStyleSheet`；组件配色统一靠 `objectName` 与动态属性（`role="primary"`、`status="ok"`）在 `src/ui/app.qss` 中匹配，样式调整不必改 C++
 - **Pimpl 模式** — `Tokenizer` 通过 `Impl` 封装 cppjieba，避免头文件暴露第三方库依赖
 - **静态链接** — MinGW 运行时（libstdc++/libgcc/libwinpthread）全部静态链接，消除 DLL 版本冲突
 - **UTF-8 字节扫描** — 元数据提取中 Unicode 字符匹配使用手动 UTF-8 字节扫描，规避 GCC `<regex>` 的 Unicode 兼容问题
 - **中文数字解析** — 区分位置记数法（「二〇二四」→ 2024）与叠加记数法（「十五」→ 15）
 - **SSE 流式解析** — 非完整行缓冲 + `QEventLoop` 同步阻塞，确保流式输出的可靠拼接
+
+## UI 架构
+
+```
+MainWindow
+├── NavigationBar          # 190px 固定宽，藏青 #14213D，选中项铜金 #B7791F
+└── QStackedWidget
+    ├── [0] SearchPage     # 已实现：导入 / 混合检索 / 三维筛选 / SSE 流式回答
+    ├── [1] 文档库          # 占位 → T1 持久化 + 文档生命周期管理
+    ├── [2] 问答历史        # 占位 → T2 Qt SQLite 落库
+    ├── [3] 算法评测        # 占位 → T4 四路并列对比
+    └── [4] 设置            # 占位 → T3 检索参数配置中心
+QStatusBar                 # 索引规模 / Embedding 与 LLM 可用性 / 版本号
+```
+
+主题色板（与开题 PPT、论文同源）：藏青 `#14213D`、铜金 `#B7791F`、内容区 `#F4F6F9`、
+卡片 `#FFFFFF` 圆角 10px、分割线 `#E2E7EE`；字号层级 标题 18px / 正文 13px / 辅助 11px。
+
+`Ctrl + 滚轮` 可整体缩放界面字号（60%–250%），QSS 中的 px 字号由 `AppTheme::scaledSource()` 等比重算。
+
+### UI 冒烟测试
+
+```bash
+# 导航切换 + 五页渲染 + 高分屏档位（离屏渲染，不弹窗）
+build\ui_smoke.exe -platform offscreen docs/screenshots 1x
+QT_SCALE_FACTOR=1.5 build\ui_smoke.exe -platform offscreen docs/screenshots 1.5
+
+# 追加「导入 → 检索 → 筛选」端到端校验
+build\ui_smoke.exe -platform offscreen docs/screenshots 1x --e2e test/data/legal_cases
+```
+
+截图输出到指定目录；`--e2e` 需要 `test/data/legal_cases` 语料。配了 `DEEPSEEK_API_KEY` 时
+会一并发出流式生成请求，未配置则跳过该步（不算失败）。
 
 ## 常见问题
 
