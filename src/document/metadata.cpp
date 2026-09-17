@@ -176,107 +176,103 @@ std::optional<std::string> MetadataExtractor::extractCourt(const std::string& te
 // ═══════════════════════════════════════════════════════════════
 // 日期提取
 // ═══════════════════════════════════════════════════════════════
+// 说明：判决书正文中会出现多个日期（当事人出生日期、合同日期等），
+// 裁判日期（落款日期）位于文书末尾。因此对每类模式取"最后一个"匹配，
+// 再在阿拉伯与中文两类结果中取较晚者，避免误取出生日期等在文首的日期。
 std::optional<std::string> MetadataExtractor::extractDate(const std::string& text) {
-    // 模式 1: 阿拉伯数字日期 "2024年3月15日"
-    {
-        static std::regex re(R"((\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日)");
-        std::smatch match;
-        if (safeRegexSearch(text, match, re)) {
+    auto makeDate = [](int y, int m, int d) -> std::optional<std::string> {
+        if (y > 1900 && y < 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
             char buf[16];
-            int y = std::stoi(match[1].str());
-            int m = std::stoi(match[2].str());
-            int d = std::stoi(match[3].str());
             snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
             return std::string(buf);
         }
+        return std::nullopt;
+    };
+
+    std::optional<std::string> bestArabic;   // 最后一个阿拉伯数字日期
+    std::optional<std::string> bestChinese;  // 最后一个中文数字日期
+
+    // 模式 1: 阿拉伯数字日期 "2024年3月15日"，遍历全部匹配取最后一个
+    {
+        static std::regex re(R"((\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日)");
+        try {
+            auto it = std::sregex_iterator(text.begin(), text.end(), re);
+            auto end = std::sregex_iterator();
+            for (auto k = it; k != end; ++k) {
+                int y = std::stoi((*k)[1].str());
+                int m = std::stoi((*k)[2].str());
+                int d = std::stoi((*k)[3].str());
+                if (auto s = makeDate(y, m, d)) bestArabic = s;  // 迭代为正序，后者覆盖
+            }
+        } catch (const std::regex_error&) {
+            // 正则异常时跳过该模式
+        }
     }
 
-    // 模式 2: ISO 日期 "2024-03-15"
-    {
+    // 模式 2: ISO 日期 "2024-03-15"（仅当未找到任何日期时使用第一个）
+    if (!bestArabic && !bestChinese) {
         static std::regex re(R"((\d{4})-(\d{1,2})-(\d{1,2}))");
         std::smatch match;
         if (safeRegexSearch(text, match, re)) {
-            char buf[16];
-            int y = std::stoi(match[1].str());
-            int m = std::stoi(match[2].str());
-            int d = std::stoi(match[3].str());
-            snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
-            return std::string(buf);
+            bestArabic = makeDate(std::stoi(match[1].str()),
+                                  std::stoi(match[2].str()),
+                                  std::stoi(match[3].str()));
         }
     }
 
-    // 模式 3: 中文数字日期，手动解析（避免 regex Unicode 问题）
+    // 模式 3: 中文数字日期（如"二〇二六年七月三日"，判决书落款），从文末向前找最后一个
     {
-        // "年" "月" "日" UTF-8
-        const std::string YEAR = "\xE5\xB9\xB4";   // 年
+        const std::string YEAR = "\xE5\xB9\xB4";    // 年
         const std::string MONTH = "\xE6\x9C\x88";   // 月
         const std::string DAY = "\xE6\x97\xA5";     // 日
 
-        size_t yearPos = text.find(YEAR);
-        if (yearPos != std::string::npos && yearPos >= 6) {
+        auto isChineseNum = [](const std::string& ch3) -> bool {
+            return ch3 == "零" || ch3 == "〇" || ch3 == "一" || ch3 == "二" ||
+                   ch3 == "三" || ch3 == "四" || ch3 == "五" || ch3 == "六" ||
+                   ch3 == "七" || ch3 == "八" || ch3 == "九" || ch3 == "十";
+        };
+        // 向前扫描连续中文数字，返回起始位置与字符串
+        auto scanBack = [&text, &isChineseNum](size_t pos) -> std::pair<size_t, std::string> {
+            size_t start = pos;
+            while (start >= 3) {
+                std::string ch3 = text.substr(start - 3, 3);
+                if (!isChineseNum(ch3)) break;
+                start -= 3;
+            }
+            return {start, text.substr(start, pos - start)};
+        };
+
+        size_t yearPos = text.rfind(YEAR);
+        while (yearPos != std::string::npos && yearPos >= 6) {
+            // 月份必须在年份之后不远处（年份最多 4 个中文数字 = 12 字节）
             size_t monthPos = text.find(MONTH, yearPos + 3);
-            if (monthPos != std::string::npos && monthPos > yearPos + 3) {
+            if (monthPos != std::string::npos && monthPos - yearPos <= 15) {
                 size_t dayPos = text.find(DAY, monthPos + 3);
-                if (dayPos != std::string::npos && dayPos > monthPos + 3) {
-                    // 判断一个 UTF-8 中文字符是否为中文数字
-                    auto isChineseNum = [](const std::string& ch3) -> bool {
-                        return ch3 == "零" || ch3 == "〇" || ch3 == "一" || ch3 == "二" ||
-                               ch3 == "三" || ch3 == "四" || ch3 == "五" || ch3 == "六" ||
-                               ch3 == "七" || ch3 == "八" || ch3 == "九" || ch3 == "十";
-                    };
-
-                    // 向前扫描提取年份中文数字（只取连续的中文数字）
-                    std::string yearStr;
-                    size_t yStart = yearPos;
-                    while (yStart >= 3) {
-                        std::string ch3 = text.substr(yStart - 3, 3);
-                        if (isChineseNum(ch3)) {
-                            yStart -= 3;
-                            yearStr = text.substr(yStart, yearPos - yStart);
-                        } else {
+                if (dayPos != std::string::npos && dayPos - monthPos <= 12) {
+                    auto [yStart, yearStr] = scanBack(yearPos);
+                    auto [mStart, monthStr] = scanBack(monthPos);
+                    auto [dStart, dayStr] = scanBack(dayPos);
+                    // 年/月/日三段必须连续衔接，中间不能插入其他字符
+                    if (yStart < yearPos && mStart == yearPos + 3 &&
+                        dStart == monthPos + 3) {
+                        if (auto s = makeDate(chineseNumToInt(yearStr),
+                                              chineseNumToInt(monthStr),
+                                              chineseNumToInt(dayStr))) {
+                            bestChinese = s;  // rfind 从文末向前来，首个即最后一个
                             break;
                         }
-                    }
-
-                    // 提取月份中文数字
-                    std::string monthStr;
-                    size_t mStart = monthPos;
-                    while (mStart >= 3) {
-                        std::string ch3 = text.substr(mStart - 3, 3);
-                        if (isChineseNum(ch3)) {
-                            mStart -= 3;
-                            monthStr = text.substr(mStart, monthPos - mStart);
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // 提取日期中文数字
-                    std::string dayStr;
-                    size_t dStart = dayPos;
-                    while (dStart >= 3) {
-                        std::string ch3 = text.substr(dStart - 3, 3);
-                        if (isChineseNum(ch3)) {
-                            dStart -= 3;
-                            dayStr = text.substr(dStart, dayPos - dStart);
-                        } else {
-                            break;
-                        }
-                    }
-
-                    int y = chineseNumToInt(yearStr);
-                    int m = chineseNumToInt(monthStr);
-                    int d = chineseNumToInt(dayStr);
-                    if (y > 1900 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
-                        char buf[16];
-                        snprintf(buf, sizeof(buf), "%04d-%02d-%02d", y, m, d);
-                        return std::string(buf);
                     }
                 }
             }
+            if (yearPos < 3) break;
+            yearPos = text.rfind(YEAR, yearPos - 1);
         }
     }
 
+    // 两类结果取较晚者（裁判落款日期晚于正文中引用的合同/出生等日期）
+    if (bestArabic && bestChinese) return std::max(*bestArabic, *bestChinese);
+    if (bestArabic) return bestArabic;
+    if (bestChinese) return bestChinese;
     return std::nullopt;
 }
 

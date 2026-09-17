@@ -43,3 +43,11 @@ docs/defense/pptx_render/
 .zcode/
 
 # ── ZCode 会话目录 ──
+
+# ── 个人材料 / 答辩材料（仅本地，不入库 2026-09-17）──
+.vs/
+out/
+.workbuddy/
+docs/defense/
+2027届毕业设计附件1-10：毕业论文（设计）过程管理表册/
+毕业设计工作台/

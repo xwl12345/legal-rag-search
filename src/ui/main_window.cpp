@@ -530,8 +530,13 @@ void MainWindow::onSearch() {
                     context,
                     [this](const std::string& delta) {
                         QMetaObject::invokeMethod(this, [this, text = QString::fromStdString(delta)]() {
+                            // 剥离模型输出中的 Markdown 标记（** 加粗、行首 # 标题），
+                            // 纯文本区不渲染这些符号
+                            QString cleaned = text;
+                            cleaned.remove(QStringLiteral("**"));
+                            cleaned.replace(QRegularExpression(QStringLiteral("(^|\\n)#{1,6}\\s+")), QStringLiteral("\\1"));
                             aiAnswerArea_->moveCursor(QTextCursor::End);
-                            aiAnswerArea_->insertPlainText(text);
+                            aiAnswerArea_->insertPlainText(cleaned);
                             aiAnswerArea_->moveCursor(QTextCursor::End);
                         }, Qt::QueuedConnection);
                     }
@@ -774,12 +779,18 @@ void MainWindow::onFilterChanged() {
 }
 
 void MainWindow::populateYearFilter(const std::vector<rag::SearchResult>& results) {
-    // 收集所有结果中的年份
+    Q_UNUSED(results);
+    // 从【全部已导入文档】的元数据收集年份（原先只从最近一次检索结果收集，
+    // 导致年份下拉选项残缺且随搜索词变化）
     std::set<QString> years;
-    for (const auto& r : results) {
-        const auto* meta = retriever_->getMetadata(r.docId);
+    for (const auto& id : retriever_->allDocIds()) {
+        const auto* meta = retriever_->getMetadata(id);
         if (meta && meta->date.size() >= 4) {
-            years.insert(QString::fromStdString(meta->date.substr(0, 4)));
+            std::string y = meta->date.substr(0, 4);
+            // 过滤明显非法的年份（元数据提取异常时的兜底）
+            if (y >= "1900" && y <= "2100") {
+                years.insert(QString::fromStdString(y));
+            }
         }
     }
 
