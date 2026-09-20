@@ -5,6 +5,24 @@
 
 namespace document {
 
+/// 裁判结果倾向（第 8 类元数据，T1 / S1 第 1 层）
+///
+/// 由「判决如下 / 裁定如下」主文段的判项推导，用于文档库展示与四维筛选。
+/// 判定规则与取舍见 metadata.cpp 中 extractResultTendency() 的函数头注释。
+enum class ResultTendency {
+    Unknown,          // 未能判定（无主文段 / 无实质判项）
+    FavorPlaintiff,   // 利于原告
+    FavorDefendant,   // 利于被告
+    PartialSupport,   // 部分支持
+    Other             // 其他（刑事定罪量刑、破产受理、撤销行政行为、二审驳回上诉等）
+};
+
+/// 结果倾向 → 中文标签（用于界面显示与筛选比对）
+const char* resultTendencyLabel(ResultTendency tendency);
+
+/// 中文标签 → 结果倾向（标签不匹配返回 Unknown）
+ResultTendency resultTendencyFromLabel(const std::string& label);
+
 /// 法律文档结构化元数据
 struct DocMetadata {
     std::string caseNumber;    // 案号，如 (2024)京0105民初12345号
@@ -13,6 +31,8 @@ struct DocMetadata {
     std::string caseType;      // 案件类型：民事/刑事/行政/知识产权/商事/其他
     std::string litigants;     // 当事人摘要，如 原告张三诉被告李四
     std::string procedure;     // 审判程序：一审/二审/再审
+
+    ResultTendency tendency = ResultTendency::Unknown;  // 第 8 类：裁判结果倾向
 
     /// 是否提取到任何有效元数据
     bool isEmpty() const {
@@ -31,6 +51,12 @@ public:
 
     /// 仅提取案号
     static std::optional<std::string> extractCaseNumber(const std::string& text);
+
+    /// 提取裁判结果倾向（第 8 类元数据）
+    ///
+    /// 定位「判决如下 / 裁定如下 / 判令如下」主文段，按判项措辞判定倾向。
+    /// 判定依据全部来自判项本身；无法确定时返回 Other 或 Unknown，不做猜测。
+    static ResultTendency extractResultTendency(const std::string& text);
 
 private:
     /// 提取审理法院

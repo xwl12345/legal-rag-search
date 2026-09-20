@@ -29,6 +29,8 @@ set(SRC_ENGINE
     # Index & search
     src/index/inverted_index.cpp
     src/index/bm25_ranker.cpp
+    # Index persistence（T1：与 UI 解耦的落盘层）
+    src/index/index_store.cpp
 
     # Vector retrieval
     src/vector/embedding.cpp
@@ -45,6 +47,7 @@ set(SRC_UI
     src/ui/navigation_bar.cpp
     src/ui/placeholder_page.cpp
     src/ui/search_page.cpp
+    src/ui/library_page.cpp
     src/ui/main_window.cpp
 )
 
@@ -61,6 +64,7 @@ set(HEADERS
     include/document/ocr_client.h
     include/index/inverted_index.h
     include/index/bm25_ranker.h
+    include/index/index_store.h
     include/vector/embedding.h
     include/vector/similarity.h
     include/rag/retriever.h
@@ -70,6 +74,7 @@ set(HEADERS
     include/ui/navigation_bar.h
     include/ui/placeholder_page.h
     include/ui/search_page.h
+    include/ui/library_page.h
     include/config/app_config.h
 )
 
@@ -171,6 +176,7 @@ add_executable(test_utf8_location_regression
     src/document/metadata.cpp
     src/index/inverted_index.cpp
     src/index/bm25_ranker.cpp
+    src/index/index_store.cpp
     src/vector/embedding.cpp
     src/vector/similarity.cpp
     src/rag/retriever.cpp
@@ -207,6 +213,7 @@ set(TEST_SOURCES
     src/document/metadata.cpp
     src/index/inverted_index.cpp
     src/index/bm25_ranker.cpp
+    src/index/index_store.cpp
     src/vector/embedding.cpp
     src/vector/similarity.cpp
     src/rag/retriever.cpp
@@ -245,6 +252,7 @@ add_executable(eval_retrieval test/eval_retrieval.cpp
     src/document/metadata.cpp
     src/index/inverted_index.cpp
     src/index/bm25_ranker.cpp
+    src/index/index_store.cpp
     src/vector/embedding.cpp
     src/vector/similarity.cpp
     src/rag/retriever.cpp

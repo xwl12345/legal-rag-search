@@ -4,6 +4,7 @@
 #include "config/app_config.h"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <sstream>
 #include <iomanip>
 #include <unordered_set>
@@ -36,14 +37,35 @@ void expandLegalLocationTerms(const std::string& query,
     }
 }
 
+/// 文本块在 chunkStore_ 中的键：(docId, chunkIndex) 唯一确定一个块。
+std::string chunkKey(const std::string& docId, int chunkIndex) {
+    return docId + ":" + std::to_string(chunkIndex);
+}
+
 } // namespace
 
 namespace rag {
 
-Retriever::Retriever() = default;
+Retriever::Retriever()
+    : store_(std::make_unique<index_store::IndexStore>()) {}
 
 void Retriever::setApiKey(const std::string& key) {
     embedding_.setApiKey(key);
+}
+
+// ────────────────────────────────────────────────────────────────
+// 索引写入（导入与落盘恢复共用）
+// ────────────────────────────────────────────────────────────────
+
+void Retriever::indexDocument(const StoredDocument& doc) {
+    for (size_t i = 0; i < doc.chunks.size(); ++i) {
+        const int chunkIndex = static_cast<int>(i);
+        const std::string& content = doc.chunks[i];
+
+        auto terms = tokenizer_.cutForIndex(content);
+        index_.addDocument(doc.docId, chunkIndex, terms);
+        chunkStore_[chunkKey(doc.docId, chunkIndex)] = content;
+    }
 }
 
 ImportResult Retriever::addDocument(const std::string& filePath,
@@ -61,25 +83,40 @@ ImportResult Retriever::addDocument(const std::string& filePath,
     }
 
     auto& chunks = parseResult.chunks;
-    std::string docId = chunks[0].docId;
-    std::string fullText;
-    for (const auto& chunk : chunks) {
-        fullText += chunk.content + "\n";
+    if (chunks.empty()) {
+        return {false, "", 0, parseResult.source, "解析结果为空", false};
     }
 
-    // 提取元数据
-    auto meta = document::MetadataExtractor::extract(fullText);
-    if (!meta.isEmpty()) {
-        docMeta_[docId] = std::move(meta);
+    const std::string docId = chunks[0].docId;
+
+    // 同一 docId 重复导入：先清掉旧记录，避免产生"幽灵块"
+    // （倒排里留着旧块、chunkStore_ 里却已被新块覆盖）。
+    if (documents_.find(docId) != documents_.end()) {
+        removeDocument(docId);
     }
 
-    // 逐块分词 → 建索引 → 存储
+    StoredDocument doc;
+    doc.docId = docId;
+    doc.sourcePath = filePath;
+    doc.importedAt = index_store::nowTimestamp();
+    doc.ocr = (parseResult.source == document::ParseSource::Ocr);
+
+    // 整篇原文（T10 全文阅读的数据源；分块只够判断相关性）
     for (const auto& chunk : chunks) {
-        auto terms = tokenizer_.cutForIndex(chunk.content);
-        index_.addDocument(chunk.docId, chunk.chunkIndex, terms);
-        std::string key = chunk.docId + ":" + std::to_string(chunk.chunkIndex);
-        chunkStore_[key] = chunk.content;
+        doc.fullText += chunk.content;
+        doc.chunks.push_back(chunk.content);
     }
+
+    doc.metadata = document::MetadataExtractor::extract(doc.fullText);
+
+    indexDocument(doc);
+
+    if (!doc.metadata.isEmpty()) {
+        docMeta_[docId] = doc.metadata;
+    }
+    documents_[docId] = std::move(doc);
+    documentOrder_.push_back(docId);
+    std::sort(documentOrder_.begin(), documentOrder_.end());
 
     return {true, docId, static_cast<int>(chunks.size()), parseResult.source, ""};
 }
@@ -87,30 +124,40 @@ ImportResult Retriever::addDocument(const std::string& filePath,
 void Retriever::addText(const std::string& text, const std::string& docId) {
     if (text.empty() || docId.empty()) return;
 
-    // 提取元数据（如果尚未提取）
-    if (docMeta_.find(docId) == docMeta_.end()) {
-        auto meta = document::MetadataExtractor::extract(text);
-        if (!meta.isEmpty()) {
-            docMeta_[docId] = std::move(meta);
-        }
+    if (documents_.find(docId) != documents_.end()) {
+        removeDocument(docId);
     }
 
     // 使用已有的 parser 来分块
     document::DocumentParser parser;
     auto chunks = parser.parseText(text, docId);
 
+    StoredDocument doc;
+    doc.docId = docId;
+    doc.sourcePath = "";
+    doc.importedAt = index_store::nowTimestamp();
+    doc.ocr = false;
+    doc.fullText = text;
+
     for (const auto& chunk : chunks) {
-        // 1. 分词
-        auto terms = tokenizer_.cutForIndex(chunk.content);
-
-        // 2. 建倒排索引
-        index_.addDocument(chunk.docId, chunk.chunkIndex, terms);
-
-        // 3. 存储文本块
-        std::string key = chunk.docId + ":" + std::to_string(chunk.chunkIndex);
-        chunkStore_[key] = chunk.content;
+        doc.chunks.push_back(chunk.content);
     }
+
+    doc.metadata = document::MetadataExtractor::extract(doc.fullText);
+
+    indexDocument(doc);
+
+    if (!doc.metadata.isEmpty()) {
+        docMeta_[docId] = doc.metadata;
+    }
+    documents_[docId] = std::move(doc);
+    documentOrder_.push_back(docId);
+    std::sort(documentOrder_.begin(), documentOrder_.end());
 }
+
+// ────────────────────────────────────────────────────────────────
+// 检索
+// ────────────────────────────────────────────────────────────────
 
 std::vector<SearchResult> Retriever::search(const std::string& query, int topK) {
     // ── Step 1: BM25 关键词检索 ──
@@ -136,7 +183,7 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
                 auto allDocs = index_.allDocs();
                 std::vector<std::string> allTexts;
                 for (const auto& [docId, chunkIdx] : allDocs) {
-                    std::string key = docId + ":" + std::to_string(chunkIdx);
+                    std::string key = chunkKey(docId, chunkIdx);
                     auto it = chunkStore_.find(key);
                     if (it != chunkStore_.end()) {
                         allTexts.push_back(it->second);
@@ -169,14 +216,14 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
                 std::unordered_map<std::string, double> vectorScores;
 
                 for (const auto& r : bm25Results) {
-                    std::string key = r.docId + ":" + std::to_string(r.chunkIndex);
+                    std::string key = chunkKey(r.docId, r.chunkIndex);
                     bm25Scores[key] = r.score;
                 }
 
                 for (const auto& r : vectorResults) {
                     if (r.index >= 0 && static_cast<size_t>(r.index) < vectorIndexMap_.size()) {
                         auto [docId, chunkIdx] = vectorIndexMap_[r.index];
-                        std::string key = docId + ":" + std::to_string(chunkIdx);
+                        std::string key = chunkKey(docId, chunkIdx);
                         vectorScores[key] = r.similarity;
                     }
                 }
@@ -239,7 +286,7 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
             sr.chunkIndex = r.chunkIndex;
             sr.bm25Score = r.score;
             sr.finalScore = r.score;
-            std::string key = r.docId + ":" + std::to_string(r.chunkIndex);
+            std::string key = chunkKey(r.docId, r.chunkIndex);
             auto it = chunkStore_.find(key);
             if (it != chunkStore_.end()) {
                 sr.content = it->second;
@@ -283,6 +330,10 @@ std::string Retriever::buildContext(const std::vector<SearchResult>& results,
     return oss.str();
 }
 
+// ────────────────────────────────────────────────────────────────
+// 只读视图（文档库页 / 全文阅读页消费）
+// ────────────────────────────────────────────────────────────────
+
 const document::DocMetadata* Retriever::getMetadata(const std::string& docId) const {
     auto it = docMeta_.find(docId);
     if (it != docMeta_.end()) {
@@ -292,11 +343,245 @@ const document::DocMetadata* Retriever::getMetadata(const std::string& docId) co
 }
 
 std::vector<std::string> Retriever::allDocIds() const {
+    // 按 documentOrder_ 输出，保证跨次运行顺序稳定（unordered_map 遍历顺序不可依赖）
     std::vector<std::string> ids;
-    for (const auto& [docId, _] : docMeta_) {
-        ids.push_back(docId);
+    ids.reserve(documentOrder_.size());
+    for (const auto& docId : documentOrder_) {
+        if (documents_.find(docId) != documents_.end()) {
+            ids.push_back(docId);
+        }
     }
     return ids;
+}
+
+std::vector<DocumentInfo> Retriever::documentInfos() const {
+    std::vector<DocumentInfo> infos;
+    infos.reserve(documentOrder_.size());
+
+    for (const auto& docId : documentOrder_) {
+        auto it = documents_.find(docId);
+        if (it == documents_.end()) continue;
+        const auto& doc = it->second;
+
+        DocumentInfo info;
+        info.docId = doc.docId;
+        info.sourcePath = doc.sourcePath;
+        info.importedAt = doc.importedAt;
+        info.chunkCount = static_cast<int>(doc.chunks.size());
+        info.byteSize = static_cast<std::uint64_t>(doc.fullText.size());
+        info.ocr = doc.ocr;
+        info.tendency = doc.metadata.tendency;
+        infos.push_back(std::move(info));
+    }
+    return infos;
+}
+
+bool Retriever::getDocumentInfo(const std::string& docId, DocumentInfo& out) const {
+    auto it = documents_.find(docId);
+    if (it == documents_.end()) return false;
+
+    const auto& doc = it->second;
+    out.docId = doc.docId;
+    out.sourcePath = doc.sourcePath;
+    out.importedAt = doc.importedAt;
+    out.chunkCount = static_cast<int>(doc.chunks.size());
+    out.byteSize = static_cast<std::uint64_t>(doc.fullText.size());
+    out.ocr = doc.ocr;
+    out.tendency = doc.metadata.tendency;
+    return true;
+}
+
+bool Retriever::getFullText(const std::string& docId, std::string& out) const {
+    auto it = documents_.find(docId);
+    if (it == documents_.end()) return false;
+    out = it->second.fullText;
+    return true;
+}
+
+bool Retriever::getChunk(const std::string& docId, int chunkIndex, std::string& out) const {
+    auto it = chunkStore_.find(chunkKey(docId, chunkIndex));
+    if (it == chunkStore_.end()) return false;
+    out = it->second;
+    return true;
+}
+
+// ────────────────────────────────────────────────────────────────
+// 删除
+// ────────────────────────────────────────────────────────────────
+
+int Retriever::removeDocument(const std::string& docId) {
+    auto it = documents_.find(docId);
+    if (it == documents_.end()) return 0;
+
+    const StoredDocument& doc = it->second;
+    const int chunkTotal = static_cast<int>(doc.chunks.size());
+
+    // 1. 倒排索引：逐块摘除 posting，并同步 totalDocs_
+    for (int i = 0; i < chunkTotal; ++i) {
+        index_.removeChunk(docId, i);
+        chunkStore_.erase(chunkKey(docId, i));
+    }
+
+    // 2. 元数据与文档记录
+    docMeta_.erase(docId);
+    documentOrder_.erase(
+        std::remove(documentOrder_.begin(), documentOrder_.end(), docId),
+        documentOrder_.end());
+    documents_.erase(it);
+
+    // 3. 向量库：槽位与块索引强绑定，删块后按下标对应关系失效，
+    //    直接作废整个向量库，下次 search() 时按现有块重建（懒加载）。
+    similarity_.clear();
+    vectorIndexMap_.clear();
+
+    return chunkTotal;
+}
+
+void Retriever::clearAll(bool alsoDeletePersistedFile) {
+    index_.clear();
+    chunkStore_.clear();
+    docMeta_.clear();
+    documents_.clear();
+    documentOrder_.clear();
+    similarity_.clear();
+    vectorIndexMap_.clear();
+    restoredFromDisk_ = false;
+    lastLoadMs_ = -1;
+
+    if (alsoDeletePersistedFile && store_) {
+        store_->remove();
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 持久化
+// ────────────────────────────────────────────────────────────────
+
+PersistResult Retriever::saveIndex() const {
+    PersistResult result;
+
+    if (!store_) {
+        result.diagnostic = "持久化层未初始化";
+        return result;
+    }
+
+    // 按 docId 排序写出，保证落盘内容可复现（便于 diff 与测试比对）
+    std::vector<index_store::StoredDocument> records;
+    records.reserve(documentOrder_.size());
+
+    for (const auto& docId : documentOrder_) {
+        auto it = documents_.find(docId);
+        if (it == documents_.end()) continue;
+        const StoredDocument& doc = it->second;
+
+        index_store::StoredDocument record;
+        record.docId = doc.docId;
+        record.sourcePath = doc.sourcePath;
+        record.importedAt = doc.importedAt;
+        record.chunkCount = static_cast<int>(doc.chunks.size());
+        record.byteSize = static_cast<std::uint64_t>(doc.fullText.size());
+        record.ocr = doc.ocr;
+        record.metadata = doc.metadata;
+        record.fullText = doc.fullText;
+        record.chunks = doc.chunks;
+
+        records.push_back(std::move(record));
+    }
+
+    auto saveResult = store_->save(records);
+    result.ok = saveResult.ok;
+    result.bytes = saveResult.bytesWritten;
+    result.diagnostic = saveResult.diagnostic;
+    result.documentCount = static_cast<int>(records.size());
+
+    int chunks = 0;
+    for (const auto& r : records) {
+        chunks += static_cast<int>(r.chunks.size());
+    }
+    result.chunkCount = chunks;
+
+    return result;
+}
+
+PersistResult Retriever::loadIndex() {
+    PersistResult result;
+
+    if (!store_) {
+        result.diagnostic = "持久化层未初始化";
+        return result;
+    }
+
+    const auto begin = std::chrono::steady_clock::now();
+
+    std::vector<index_store::StoredDocument> records;
+    auto loadResult = store_->load(records);
+
+    // 无论成败，先把内存清干净——避免失败时残留半套旧索引，
+    // 导致"文档列表是新的、倒排是旧的"这类不一致。
+    const bool hadFile = store_->exists();
+    clearAll(false);
+
+    result.ok = loadResult.ok;
+    result.diagnostic = loadResult.diagnostic;
+    result.documentCount = loadResult.documentCount;
+    result.chunkCount = loadResult.chunkCount;
+    result.bytes = hadFile ? store_->fileSize() : 0;
+
+    if (!loadResult.ok) {
+        const auto end = std::chrono::steady_clock::now();
+        result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               end - begin).count();
+        lastLoadMs_ = result.elapsedMs;
+        restoredFromDisk_ = false;
+        return result;
+    }
+
+    for (auto& record : records) {
+        StoredDocument doc;
+        doc.docId = record.docId;
+        doc.sourcePath = record.sourcePath;
+        doc.importedAt = record.importedAt;
+        doc.ocr = record.ocr;
+        doc.metadata = record.metadata;
+        doc.fullText = record.fullText;
+        doc.chunks = record.chunks;
+
+        if (doc.chunks.empty()) continue;
+
+        indexDocument(doc);
+
+        if (!doc.metadata.isEmpty()) {
+            docMeta_[doc.docId] = doc.metadata;
+        }
+        const std::string id = doc.docId;
+        documents_[id] = std::move(doc);
+        documentOrder_.push_back(id);
+    }
+    std::sort(documentOrder_.begin(), documentOrder_.end());
+
+    const auto end = std::chrono::steady_clock::now();
+    result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           end - begin).count();
+    lastLoadMs_ = result.elapsedMs;
+    restoredFromDisk_ = !documents_.empty();
+
+    // 以实际重建结果为准，防止文件头记录数与内容不符时误导调用方
+    result.documentCount = static_cast<int>(documents_.size());
+    result.chunkCount = static_cast<int>(chunkStore_.size());
+
+    return result;
+}
+
+std::string Retriever::indexFilePath() const {
+    return store_ ? store_->filePath() : std::string();
+}
+
+void Retriever::setIndexFilePath(const std::string& path) {
+    store_ = std::make_unique<index_store::IndexStore>(path);
+}
+
+bool Retriever::hasPersistedIndex() const {
+    return store_ && store_->exists();
 }
 
 } // namespace rag

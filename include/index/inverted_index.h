@@ -24,6 +24,14 @@ public:
     /// 查询词对应的倒排列表
     const std::vector<Posting>* getPostings(const std::string& term) const;
 
+    /// 移除一个文本块的倒排记录（T1 文档级删除用）。
+    ///
+    /// 会从 docLengths_ 删除该块的长度记录、剔除各词项倒排表中属于
+    /// (docId, chunkIndex) 的 posting（词项倒排表清空后一并删除词项），
+    /// 并同步递减 totalDocs_。
+    /// @return 被移除的 posting 数（用于校验一致性）
+    int removeChunk(const std::string& docId, int chunkIndex);
+
     /// 获取文档总数
     int totalDocs() const { return totalDocs_; }
 

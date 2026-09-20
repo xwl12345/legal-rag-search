@@ -69,6 +69,41 @@ double InvertedIndex::avgDocLength() const {
     return static_cast<double>(total) / docLengths_.size();
 }
 
+int InvertedIndex::removeChunk(const std::string& docId, int chunkIndex) {
+    const std::string docKey = docId + ":" + std::to_string(chunkIndex);
+
+    // 块长度记录：不存在说明该块本就没被索引，直接返回 0（幂等）
+    auto lenIt = docLengths_.find(docKey);
+    if (lenIt == docLengths_.end()) {
+        return 0;
+    }
+    docLengths_.erase(lenIt);
+    totalDocs_--;
+
+    // 剔除各词项倒排表中属于该块的 posting；词项清空后删除词项
+    int removed = 0;
+    for (auto it = index_.begin(); it != index_.end(); ) {
+        auto& postings = it->second;
+        const size_t before = postings.size();
+        postings.erase(
+            std::remove_if(postings.begin(), postings.end(),
+                           [&](const Posting& p) {
+                               return p.docId == docId &&
+                                      p.chunkIndex == chunkIndex;
+                           }),
+            postings.end());
+        removed += static_cast<int>(before - postings.size());
+
+        if (postings.empty()) {
+            it = index_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    return removed;
+}
+
 void InvertedIndex::clear() {
     index_.clear();
     docLengths_.clear();

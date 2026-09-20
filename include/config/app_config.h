@@ -20,6 +20,11 @@ constexpr double VECTOR_WEIGHT = 0.6;    // 向量检索权重
 // ── 数据库配置 ──
 constexpr const char* DB_PATH = "rag_index.db";
 
+// ── 索引持久化（T1）──
+// 落盘文件默认位于程序工作目录；关闭程序时写出，启动时自动恢复，
+// 免去每次重开都要重新导入语料。
+constexpr const char* INDEX_FILE = "rag_index.dat";
+
 // ── 请求超时 (秒) ──
 constexpr int HTTP_TIMEOUT = 30;
 
