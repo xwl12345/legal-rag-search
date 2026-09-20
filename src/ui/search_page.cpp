@@ -533,10 +533,12 @@ void SearchPage::importPaths(const QStringList& files) {
     int chunksAdded = 0;
     int ocrImported = 0;
     bool userCancelled = false;
+    int stoppedAt = -1;   // 取消发生时的文件下标（用于统计未处理文件数）
     QStringList errors;
     for (int i = 0; i < files.size(); ++i) {
         if (cancelledQuery()) {
             userCancelled = true;
+            stoppedAt = i;
             break;
         }
         progress.setLabelText(
@@ -554,6 +556,7 @@ void SearchPage::importPaths(const QStringList& files) {
                 }
             } else if (result.cancelled) {
                 userCancelled = true;
+                stoppedAt = i;
                 break;
             } else {
                 const QString name = QFileInfo(files[i]).fileName();
@@ -573,9 +576,20 @@ void SearchPage::importPaths(const QStringList& files) {
 
     progressBar_->setVisible(false);
     if (userCancelled) {
-        statusLabel_->setText(
-            QStringLiteral("已取消导入：%1 个文档成功，新增 %2 个文本块")
-                .arg(imported).arg(chunksAdded));
+        const int remaining =
+            (stoppedAt >= 0) ? (files.size() - stoppedAt - 1) : 0;
+        QString message = QStringLiteral("已取消导入：成功 %1 个文档，新增 %2 个文本块")
+                              .arg(imported).arg(chunksAdded);
+        if (imported == 0) {
+            // 说明"为什么是 0"：扫描件按整篇入库，识别中途取消 = 整份未入库
+            message += QStringLiteral("。OCR 需整份文档全部页识别完成后才会建立索引，"
+                                      "取消的文件不会入库，已识别的页不保留，"
+                                      "重新导入时将从第一页重新识别");
+        }
+        if (remaining > 0) {
+            message += QStringLiteral("；剩余 %1 个文件未处理").arg(remaining);
+        }
+        statusLabel_->setText(message);
     } else if (errors.isEmpty()) {
         QString message = QStringLiteral("✓ 已导入 %1 个文档，新增 %2 个文本块")
                               .arg(imported)
