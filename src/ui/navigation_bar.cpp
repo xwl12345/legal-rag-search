@@ -16,7 +16,7 @@ const NavItem kNavItems[] = {
     { QStringLiteral("🔍"), QStringLiteral("检索问答") },
     { QStringLiteral("📚"), QStringLiteral("文档库") },
     { QStringLiteral("🕘"), QStringLiteral("问答历史") },
-    { QStringLiteral("⚖️"), QStringLiteral("算法评测") },
+    { QStringLiteral("📈"), QStringLiteral("检索质量分析") },
     { QStringLiteral("⚙️"), QStringLiteral("设置") },
 };
 

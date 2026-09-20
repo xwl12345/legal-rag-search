@@ -5,7 +5,7 @@ class QListWidget;
 
 /// 左侧固定导航栏：藏青底 + 铜金选中项。
 ///
-/// 五个页面容器的入口（检索问答 / 文档库 / 问答历史 / 算法评测 / 设置）。
+/// 五个页面容器的入口（检索问答 / 文档库 / 问答历史 / 检索质量分析 / 设置）。
 class NavigationBar : public QFrame {
     Q_OBJECT
 

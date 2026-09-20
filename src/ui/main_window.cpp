@@ -80,11 +80,12 @@ void MainWindow::buildPages() {
         pageStack_));
 
     pageStack_->addWidget(new PlaceholderPage(
-        QStringLiteral("算法评测"),
-        QStringLiteral("同一查询 · 四路并列对比"),
+        QStringLiteral("检索质量分析"),
+        QStringLiteral("同一查询 · 四路并列对比 · 可靠性验证"),
         QStringLiteral("T4"),
-        QStringLiteral("BM25 单路 / 向量单路 / 加权融合 / RRF 融合并列返回，"
-                       "输出 Hit@5、R@10、MRR 指标卡，直接生成论文对比表。"),
+        QStringLiteral("面向系统维护者的检索质量看板：同一查询并列跑 "
+                       "BM25 单路 / 向量单路 / 加权融合 / RRF 融合，"
+                       "输出 Hit@5、R@10、MRR 指标卡——语料或模型变更后重新验证检索可靠性。"),
         pageStack_));
 
     pageStack_->addWidget(new PlaceholderPage(
