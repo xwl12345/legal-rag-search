@@ -20,6 +20,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QLineEdit>
@@ -30,11 +31,14 @@
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTableWidget>
+#include <QTextEdit>
 #include <QTimer>
 
 #include "ui/main_window.h"
 #include "ui/search_page.h"
 #include "ui/library_page.h"
+#include "ui/history_page.h"
+#include "history/history_store.h"
 
 namespace {
 
@@ -323,6 +327,223 @@ int runPersistenceE2E(const QString& corpusDir, const QString& outDir) {
     return g_failures;
 }
 
+/// T2 问答历史 E2E：真实检索 + 回答收尾 → 自动落库 → 列表 / 关键词 / 删除 / 导出 → 重启仍在
+///
+/// 说明：本组验证走的是 MainWindow 默认路径（config::HISTORY_DB，即工作目录下的
+/// rag_history.db），跑完删掉，不与用户手工留下的数据混淆。
+/// 回答文本由 SearchPage::simulateAnswer 给出（本机通常没有 DEEPSEEK_API_KEY），
+/// 但"命中来源"是真实检索出来的文本块 —— 详见该函数头部的说明。
+int runHistoryE2E(const QString& corpusDir, const QString& outDir,
+                  bool deleteDbAfter = true) {
+    const QString dbPath = QStringLiteral("rag_history.db");
+    QFile::remove(dbPath);   // 从空历史起步，保证可复现
+
+    const QString exportPath = outDir + QStringLiteral("/11-history-export.md");
+    QFile::remove(exportPath);
+
+    const QStringList corpus = collectCorpus(corpusDir);
+    if (corpus.isEmpty()) {
+        check(false, QStringLiteral("语料目录可访问"));
+        return g_failures;
+    }
+
+    int survived = 0;
+
+    // ── 会话 1：落库 → 列表 → 关键词 → 详情 → 删除 ──
+    {
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        SearchPage* searchPage = window.findChild<SearchPage*>();
+        HistoryPage* historyPage = window.findChild<HistoryPage*>();
+        history::HistoryStore* store = window.historyStore();
+        QTableWidget* table = window.findChild<QTableWidget*>("historyTable");
+        QLineEdit* keyword = window.findChild<QLineEdit*>("historyKeyword");
+        QLineEdit* searchInput = window.findChild<QLineEdit*>("searchInput");
+        QPushButton* searchBtn = window.findChild<QPushButton*>("searchBtn");
+        QListWidget* navList = window.findChild<QListWidget*>("navList");
+
+        if (!searchPage || !historyPage || !store || !table || !keyword
+            || !searchInput || !searchBtn || !navList) {
+            check(false, QStringLiteral("问答历史页控件齐全"), QStringLiteral("存在控件未找到"));
+            return g_failures;
+        }
+
+        check(store->isOpen(), QStringLiteral("问答历史库打开成功"),
+              QString::fromStdString(store->lastError()));
+        check(store->count() == 0, QStringLiteral("起始历史为空"));
+
+        // 真实的一半：导入 + 检索，命中结果作为落库来源
+        searchPage->importPaths(corpus);
+        QApplication::processEvents();
+
+        searchInput->setText(QStringLiteral("民间借贷 交付凭证"));
+        searchBtn->click();
+        pump(2000);
+        check(searchPage->lastResultCount() > 0,
+              QStringLiteral("检索页已有真实命中结果（作为记录来源）"),
+              QStringLiteral("%1 条").arg(searchPage->lastResultCount()));
+
+        // 两个回合：一条完整、一条中断
+        searchPage->simulateAnswer(QStringLiteral("民间借贷纠纷中交付凭证如何认定？"),
+                                   QStringLiteral("应当结合转账记录、收条与当事人陈述综合认定。"),
+                                   /*interrupted=*/false);
+        QApplication::processEvents();
+
+        // 落库后主窗口应主动刷新历史页（不经切页、不点刷新按钮）
+        check(historyPage->rowCount() == 1,
+              QStringLiteral("回答结束后历史列表自动出现记录（无需手动刷新）"),
+              QStringLiteral("%1 行").arg(historyPage->rowCount()));
+
+        searchPage->simulateAnswer(QStringLiteral("劳动争议申请仲裁的时效怎么算？"),
+                                   QStringLiteral("劳动争议申请仲裁的时效期间为一年，"),
+                                   /*interrupted=*/true);
+        QApplication::processEvents();
+
+        check(historyPage->rowCount() == 2,
+              QStringLiteral("第二个回合后列表继续同步"),
+              QStringLiteral("%1 行").arg(historyPage->rowCount()));
+        check(store->count() == 2, QStringLiteral("两条记录均已落库"),
+              QStringLiteral("%1 条").arg(store->count()));
+
+        // 来源与中断标记确实进了库（recent 按时间倒序，最新在前）
+        const auto records = store->recent(10);
+        check(static_cast<int>(records.size()) == 2, QStringLiteral("可读回 2 条记录"));
+        if (records.size() == 2) {
+            check(!records.front().sources.empty(),
+                  QStringLiteral("命中来源随回答一起入库"),
+                  QStringLiteral("%1 个文本块").arg(records.front().hitCount()));
+            check(records.front().interrupted,
+                  QStringLiteral("中断回合被标记为未完成"),
+                  QString::fromStdString(records.front().note));
+            check(!records.back().interrupted, QStringLiteral("正常回合标记为完整"));
+        }
+
+        // ── 关键词搜索 ──
+        keyword->setText(QStringLiteral("交付凭证"));
+        QApplication::processEvents();
+        check(historyPage->rowCount() == 1, QStringLiteral("关键词搜索命中"),
+              QStringLiteral("%1 行").arg(historyPage->rowCount()));
+
+        keyword->setText(QStringLiteral("凭空捏造的词"));
+        QApplication::processEvents();
+        check(historyPage->rowCount() == 0, QStringLiteral("无关关键词命中 0 条"),
+              QStringLiteral("%1 行").arg(historyPage->rowCount()));
+
+        keyword->clear();
+        QApplication::processEvents();
+        check(historyPage->rowCount() == 2, QStringLiteral("清空关键词后列表还原"),
+              QStringLiteral("%1 行").arg(historyPage->rowCount()));
+
+        // ── 选中一行 → 右侧详情 ──
+        clickNavItem(navList, 2);
+        QApplication::processEvents();
+        if (table->rowCount() > 0) {
+            table->selectRow(0);
+            QApplication::processEvents();
+            QTextEdit* detail = window.findChild<QTextEdit*>("historyDetail");
+            check(detail && !detail->toPlainText().trimmed().isEmpty(),
+                  QStringLiteral("选中记录后详情区有内容"));
+        }
+        window.grab().save(outDir + QStringLiteral("/11-history.png"));
+
+        // ── 导出 Markdown ──
+        long long targetId = 0;
+        const auto all = store->recent(1);
+        if (!all.empty()) {
+            targetId = all.front().id;
+        }
+        check(targetId > 0, QStringLiteral("取到待导出记录的 id"));
+        check(historyPage->exportRecordById(targetId, exportPath, /*confirm=*/false),
+              QStringLiteral("导出 Markdown 成功"), exportPath);
+        {
+            QFile file(exportPath);
+            check(file.exists() && file.size() > 0, QStringLiteral("导出文件已生成"),
+                  QStringLiteral("%1 字节").arg(file.size()));
+            if (file.open(QIODevice::ReadOnly)) {
+                const QByteArray raw = file.readAll();
+                file.close();
+                check(raw.startsWith(QByteArray("\xEF\xBB\xBF")),
+                      QStringLiteral("导出件带 UTF-8 BOM（防记事本乱码）"));
+                const QString text = QString::fromUtf8(
+                    QByteArray(raw.constData() + 3, qMax(0, raw.size() - 3)));
+                check(text.contains(QStringLiteral("劳动争议申请仲裁的时效怎么算？")),
+                      QStringLiteral("导出件回读中文正常（UTF-8 无损）"));
+                check(text.contains(QStringLiteral("命中块数：")),
+                      QStringLiteral("导出件含命中来源章节"));
+            }
+        }
+
+        // ── 删除一条 ──
+        check(historyPage->removeRecordById(targetId, /*confirm=*/false),
+              QStringLiteral("删除单条记录成功"));
+        check(historyPage->rowCount() == 1, QStringLiteral("删除后列表行数 -1"),
+              QStringLiteral("%1 行").arg(historyPage->rowCount()));
+
+        survived = store->count();
+        window.close();
+        QApplication::processEvents();
+    }
+
+    check(QFile::exists(dbPath), QStringLiteral("历史库文件已落盘"), dbPath);
+
+    // ── 会话 2：全新窗口，重启后记录仍在 ──
+    {
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        HistoryPage* historyPage = window.findChild<HistoryPage*>();
+        history::HistoryStore* store = window.historyStore();
+        if (!historyPage || !store) {
+            check(false, QStringLiteral("会话 2 历史页就绪"));
+            return g_failures;
+        }
+
+        check(historyPage->rowCount() == survived,
+              QStringLiteral("重启程序后问答历史自动恢复"),
+              QStringLiteral("%1 行（会话 1 剩余 %2）")
+                  .arg(historyPage->rowCount()).arg(survived));
+
+        window.grab().save(outDir + QStringLiteral("/12-history-restored.png"));
+
+        // 切页也要刷新：会话 2 开窗时本页尚未被点开过，
+        // 若只在构造时读一次库，这里就会看到 0 行（曾经的真实缺陷）。
+        QListWidget* navList = window.findChild<QListWidget*>("navList");
+        if (navList) {
+            clickNavItem(navList, 2);
+            QApplication::processEvents();
+            check(historyPage->rowCount() == survived,
+                  QStringLiteral("切到历史页时列表已刷新"),
+                  QStringLiteral("%1 行").arg(historyPage->rowCount()));
+        }
+
+        // 详情：选中一行后右侧应有内容（验证来源 JSON 跨会话还原）
+        QTableWidget* table = window.findChild<QTableWidget*>("historyTable");
+        QTextEdit* detail = window.findChild<QTextEdit*>("historyDetail");
+        if (table && table->rowCount() > 0 && detail) {
+            table->selectRow(0);
+            QApplication::processEvents();
+            const QString text = detail->toPlainText();
+            check(text.contains(QStringLiteral("命中来源")),
+                  QStringLiteral("重启后详情含命中来源章节"));
+            check(text.contains(QStringLiteral("case_")),
+                  QStringLiteral("重启后来源文档名可读（JSON 往返无损）"));
+        }
+
+        window.close();
+        QApplication::processEvents();
+    }
+
+    if (deleteDbAfter) {
+        QFile::remove(dbPath);
+    }
+    return g_failures;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -395,6 +616,11 @@ int main(int argc, char* argv[]) {
 
         qInfo().noquote() << QStringLiteral("── 索引持久化 E2E（落盘 → 重启 → 自动恢复）──");
         runPersistenceE2E(parser.value(e2eOption), outDirPath);
+
+        // 历史库的删除必须放在下面这个 window 析构之后 ——
+        // Windows 上 SQLite 连接还开着时删不掉文件，会污染下一轮运行。
+        qInfo().noquote() << QStringLiteral("── 问答历史 E2E（落库 → 列表 → 关键词 → 导出 → 重启仍在）──");
+        runHistoryE2E(parser.value(e2eOption), outDirPath, /*deleteDbAfter=*/false);
     }
 
     qInfo().noquote() << (g_failures == 0
@@ -402,5 +628,11 @@ int main(int argc, char* argv[]) {
                               : QStringLiteral("UI smoke: %1 项失败").arg(g_failures));
 
     window.close();
+    QApplication::processEvents();
+
+    // 主窗口已析构、SQLite 连接已归还，此刻才能真的删掉历史库
+    if (parser.isSet(e2eOption)) {
+        QFile::remove(QStringLiteral("rag_history.db"));
+    }
     return g_failures == 0 ? 0 : 1;
 }

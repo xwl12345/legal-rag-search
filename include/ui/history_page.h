@@ -60,6 +60,7 @@ private:
     void setupUi();
     /// 按当前关键词重建列表
     void rebuildTable();
+    /// 更新顶部统计标签
     void updateSummary();
     /// 选中行的 id
     QStringList selectedIds() const;

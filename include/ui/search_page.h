@@ -41,6 +41,15 @@ public slots:
     /// 清掉已失效的检索缓存与筛选器，避免展示已被删除文档的片段。
     void invalidateIndexCache();
 
+    /// ⚠️ 测试钩子（仅供 ui_smoke 的问答历史 E2E 使用，生产逻辑不会调用）。
+    ///
+    /// 无 API Key 的环境下无法产生真实回答，但"回合结束 → 落库 → 历史页出现记录"
+    /// 这条链路必须能被自动验证。本钩子把一段给定的回答文本按正常流程走完：
+    /// 界面显示 → 累计进 answerBuffer_ → finishAnswerRound() → answerFinished()，
+    /// 来源则取当前一轮**真实检索**命中结果（调用方需先检索）。
+    /// 换言之，假的只是"回答从哪来"，其余全是生产代码路径。
+    void simulateAnswer(const QString& query, const QString& answer, bool interrupted = false);
+
 signals:
     /// 索引规模变化（文档数 / 文本块数），供主窗口状态栏显示
     void engineStatsChanged(int docCount, int chunkCount);

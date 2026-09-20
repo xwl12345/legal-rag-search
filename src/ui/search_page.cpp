@@ -921,6 +921,17 @@ history::HistoryRecord SearchPage::buildHistoryRecord(
     return record;
 }
 
+void SearchPage::simulateAnswer(const QString& query, const QString& answer, bool interrupted) {
+    // 与真实流式回合完全一样的复位与累计方式（见头文件说明）：
+    // 界面显示什么，历史就记什么；来源是上一次真实检索的命中结果。
+    answerBuffer_.clear();
+    answerInterrupted_ = interrupted;
+    answerNote_ = interrupted ? QStringLiteral("模拟：生成中途中断") : QString();
+    aiAnswerArea_->clear();
+    appendAiAnswer(answer);
+    finishAnswerRound(query, cachedResults_);
+}
+
 void SearchPage::finishAnswerRound(const QString& query,
                                    const std::vector<rag::SearchResult>& sources) {
     // 空内容回合不入库：一个字都没吐出来的记录不含任何信息，

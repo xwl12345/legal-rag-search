@@ -191,10 +191,19 @@ void HistoryPage::setupUi() {
     connect(clearBtn_, &QPushButton::clicked, this, &HistoryPage::onClearAll);
     connect(table_, &QTableWidget::itemSelectionChanged,
             this, &HistoryPage::onSelectionChanged);
+    // 双击走 cellDoubleClicked；单击选中由 itemSelectionChanged 兜住
+    // （itemClicked 只有一个 QTableWidgetItem* 形参，和 onRowActivated 不匹配，
+    //  硬连会触发 moc 静态断言，不要再加回来）
     connect(table_, &QTableWidget::cellDoubleClicked,
             this, &HistoryPage::onRowActivated);
 }
 
+// 注意：本页刻意不重写 showEvent() 做自动刷新。
+// showEvent 在 offscreen 平台下不可靠（控件从未真正显示时收不到），
+// 用它刷新会让"切页看到新记录"在无头环境里静默失效。
+// 改为由 MainWindow 在两个明确时点直接调用 refresh()：
+//   1. 回答落库之后（onAnswerRecorded）；
+//   2. 导航切到本页时（onNavIndexChanged）。
 int HistoryPage::rowCount() const {
     return table_ ? table_->rowCount() : 0;
 }
