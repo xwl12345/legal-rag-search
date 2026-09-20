@@ -32,13 +32,28 @@ void setButtonRole(QPushButton* button, const char* role) {
     button->setProperty("role", QString::fromUtf8(role));
 }
 
+/// 结果倾向下拉项的显示文案（Unknown 显示"全部"以外的"—"，不显示空洞）
+QString tendencyFilterText(document::ResultTendency tendency) {
+    if (tendency == document::ResultTendency::Unknown) {
+        return QStringLiteral("—");
+    }
+    return QString::fromUtf8(document::resultTendencyLabel(tendency));
+}
+
 }  // namespace
 
-SearchPage::SearchPage(QWidget* parent)
+SearchPage::SearchPage(rag::Retriever* retriever, QWidget* parent)
     : QWidget(parent)
-    , retriever_(std::make_unique<rag::Retriever>())
+    , retriever_(retriever)
     , generator_(std::make_unique<rag::Generator>())
 {
+    // 未注入引擎时自建一个（仅独立构造本页的测试场景走到这里）；
+    // 正常运行时由 MainWindow 注入共享实例，本页只借用不拥有。
+    if (!retriever_) {
+        ownedRetriever_ = std::make_unique<rag::Retriever>();
+        retriever_ = ownedRetriever_.get();
+    }
+
     setupUi();
     loadApiKey();
     emitEngineStats();
@@ -136,8 +151,25 @@ void SearchPage::setupUi() {
     auto* yearLabel = new QLabel(QStringLiteral("年份"), this);
     yearLabel->setObjectName(QStringLiteral("fieldLabel"));
     yearFilter_ = new QComboBox(this);
+    yearFilter_->setObjectName(QStringLiteral("yearFilter"));
     yearFilter_->addItem(QStringLiteral("全部"));
     yearFilter_->setMinimumHeight(32);
+
+    // 第四维：裁判结果倾向（第 8 类元数据）。
+    // 选项顺序与 ResultTendency 枚举一致，靠 itemData 存枚举值比对，
+    // 避免拿界面上的中文标签做字符串匹配（改文案即坏筛选）。
+    auto* tendencyLabel = new QLabel(QStringLiteral("结果倾向"), this);
+    tendencyLabel->setObjectName(QStringLiteral("fieldLabel"));
+    tendencyFilter_ = new QComboBox(this);
+    tendencyFilter_->setObjectName(QStringLiteral("tendencyFilter"));
+    tendencyFilter_->addItem(QStringLiteral("全部"), QVariant::fromValue(-1));
+    for (int i = static_cast<int>(document::ResultTendency::Unknown);
+         i <= static_cast<int>(document::ResultTendency::Other); ++i) {
+        tendencyFilter_->addItem(
+            tendencyFilterText(static_cast<document::ResultTendency>(i)),
+            QVariant::fromValue(i));
+    }
+    tendencyFilter_->setMinimumHeight(32);
 
     filterLayout->addWidget(filterLabel);
     filterLayout->addSpacing(6);
@@ -147,6 +179,8 @@ void SearchPage::setupUi() {
     filterLayout->addWidget(courtLevelFilter_);
     filterLayout->addWidget(yearLabel);
     filterLayout->addWidget(yearFilter_);
+    filterLayout->addWidget(tendencyLabel);
+    filterLayout->addWidget(tendencyFilter_);
     filterLayout->addStretch();
     root->addLayout(filterLayout);
 
@@ -238,6 +272,8 @@ void SearchPage::setupUi() {
             this, &SearchPage::onFilterChanged);
     connect(yearFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &SearchPage::onFilterChanged);
+    connect(tendencyFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &SearchPage::onFilterChanged);
 
     // 点击结果列表中的项 → 查看全文片段
     connect(resultList_, &QListWidget::itemClicked, [this](QListWidgetItem* item) {
@@ -251,9 +287,8 @@ void SearchPage::setupUi() {
 void SearchPage::emitEngineStats() {
     // 注意：Retriever::docCount() 走的是 InvertedIndex::totalDocs()，
     // 而 totalDocs_ 是按 (docId, chunkIndex) 逐块累加的 —— 它实际是「文本块数」。
-    // 状态栏要显示真实文档数，须用 allDocIds().size()。
-    const int docs = static_cast<int>(retriever_->allDocIds().size());
-    emit engineStatsChanged(docs, retriever_->chunkCount());
+    // 状态栏要显示真实文档数，须用 documentCount()（等价于 allDocIds().size()）。
+    emit engineStatsChanged(retriever_->documentCount(), retriever_->chunkCount());
 }
 
 // ── API Key ──
@@ -328,7 +363,7 @@ void SearchPage::onSearch() {
     const QString query = searchInput_->text().trimmed();
     if (query.isEmpty()) return;
 
-    if (retriever_->docCount() == 0) {
+    if (retriever_->documentCount() == 0) {
         QMessageBox::information(this, QStringLiteral("提示"),
                                  QStringLiteral("请先导入文档再搜索！"));
         return;
@@ -617,17 +652,15 @@ void SearchPage::onClearIndex() {
     const auto reply = QMessageBox::question(
         this,
         QStringLiteral("确认清空"),
-        QStringLiteral("确定要清空所有已导入的文档索引吗？此操作不可恢复。"),
+        QStringLiteral("确定要清空所有已导入的文档索引吗？此操作不可恢复。\n"
+                       "（落盘索引文件也会一并删除）"),
         QMessageBox::Yes | QMessageBox::No
     );
 
     if (reply == QMessageBox::Yes) {
-        // 重建 retriever，保留当前 API Key
-        const QString currentKey = apiKeyInput_->text().trimmed();
-        retriever_ = std::make_unique<rag::Retriever>();
-        if (generator_->isReady()) {
-            retriever_->setApiKey(currentKey.toStdString());
-        }
+        // 引擎实例由 MainWindow 持有、多页共享，这里只能清内容不能换对象。
+        // 同时删除落盘文件，避免下次启动把刚清掉的索引又恢复回来。
+        retriever_->clearAll(/*alsoDeletePersistedFile=*/true);
 
         cachedResults_.clear();
         resultList_->clear();
@@ -635,6 +668,20 @@ void SearchPage::onClearIndex() {
         statusLabel_->setText(QStringLiteral("索引已清空"));
 
         emitEngineStats();
+    }
+}
+
+// ── 索引被外部改动（文档库页删除/清空）──
+void SearchPage::invalidateIndexCache() {
+    // 缓存里的 SearchResult 对应的文本块可能已被删除，
+    // 此时若用户切回本页并改动筛选条件，会渲染出"已删文档的片段"。
+    cachedResults_.clear();
+    currentQuery_.clear();
+    if (resultList_) {
+        resultList_->clear();
+    }
+    if (statusLabel_) {
+        statusLabel_->setText(QStringLiteral("文档库已变更，请重新检索"));
     }
 }
 
@@ -669,9 +716,15 @@ std::vector<rag::SearchResult> SearchPage::getFilteredResults() {
     const QString courtLevel = courtLevelFilter_->currentText();
     const QString year = yearFilter_->currentText();
 
+    // 第四维用 itemData 里的枚举值判断，"全部"为 -1
+    const int tendencyValue = tendencyFilter_->currentData().toInt();
+    const bool tendencyFiltering = (tendencyValue >= 0);
+    const auto wantedTendency =
+        static_cast<document::ResultTendency>(tendencyValue);
+
     // 无筛选条件，直接返回全部
     if (caseType == QStringLiteral("全部") && courtLevel == QStringLiteral("全部")
-        && year == QStringLiteral("全部")) {
+        && year == QStringLiteral("全部") && !tendencyFiltering) {
         return cachedResults_;
     }
 
@@ -715,6 +768,16 @@ std::vector<rag::SearchResult> SearchPage::getFilteredResults() {
             }
             // 日期格式为 YYYY-MM-DD，取前 4 位
             if (meta->date.substr(0, 4) != year.toStdString()) {
+                continue;
+            }
+        }
+
+        // 结果倾向筛选（第 8 类）：取该文档的判定值精确比对。
+        // 选"—"即筛 Unknown（未能判定主文段的文书），便于人工复核。
+        if (tendencyFiltering) {
+            const auto docTendency = meta ? meta->tendency
+                                          : document::ResultTendency::Unknown;
+            if (docTendency != wantedTendency) {
                 continue;
             }
         }

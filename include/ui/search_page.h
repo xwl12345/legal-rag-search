@@ -15,11 +15,17 @@
 /// 检索问答页：保留重构前 MainWindow 的全部检索逻辑
 /// （导入 → 混合检索 → 元数据筛选 → SSE 流式回答），
 /// MainWindow 回收为纯骨架后由本页承载。
+///
+/// 解耦约定（开发工作计划·全局约束第 8 条）：
+///   本页是"插件"，只对 Retriever 做单向调用；Retriever 不感知本页存在。
+///   引擎实例由 MainWindow 集中创建并注入，本页**不拥有**它——
+///   这样文档库页与检索页看到的是同一份索引，且删除任意页面都不影响核心。
 class SearchPage : public QWidget {
     Q_OBJECT
 
 public:
-    explicit SearchPage(QWidget* parent = nullptr);
+    /// @param retriever 引擎实例（非拥有；为空时本页自建，仅供独立测试）
+    explicit SearchPage(rag::Retriever* retriever = nullptr, QWidget* parent = nullptr);
     ~SearchPage() override;
 
     /// 当前缓存（最近一次检索）的结果条数，供自动化测试断言
@@ -29,6 +35,10 @@ public slots:
     /// 导入给定路径的文档。与「导入文档」按钮走同一条代码路径，
     /// 区别仅在于文件由调用方给出（按钮内部弹 QFileDialog）。
     void importPaths(const QStringList& files);
+
+    /// 引擎内的文档集合被外部改动（如文档库页删除）后调用：
+    /// 清掉已失效的检索缓存与筛选器，避免展示已被删除文档的片段。
+    void invalidateIndexCache();
 
 signals:
     /// 索引规模变化（文档数 / 文本块数），供主窗口状态栏显示
@@ -60,7 +70,7 @@ private:
     std::vector<rag::SearchResult> applyFiltersAndDisplay();
     std::vector<rag::SearchResult> getFilteredResults();
 
-    /// 从结果中收集可用年份
+    /// 从全部已导入文档收集可用年份
     void populateYearFilter(const std::vector<rag::SearchResult>& results);
 
     /// 构建元数据摘要（供 AI prompt 使用）
@@ -69,8 +79,9 @@ private:
     /// 向主窗口广播当前索引规模
     void emitEngineStats();
 
-    // ── 核心引擎 ──
-    std::unique_ptr<rag::Retriever> retriever_;
+    // ── 核心引擎（retriever_ 非拥有；仅独立测试时才由本页自持）──
+    rag::Retriever* retriever_ = nullptr;
+    std::unique_ptr<rag::Retriever> ownedRetriever_;
     std::unique_ptr<rag::Generator> generator_;
 
     // ── UI 组件 ──
@@ -90,10 +101,11 @@ private:
     QLabel* statusLabel_ = nullptr;
     QProgressBar* progressBar_ = nullptr;
 
-    // ── 筛选控件 ──
+    // ── 筛选控件（四维：案件类型 / 法院级别 / 年份 / 结果倾向）──
     QComboBox* caseTypeFilter_ = nullptr;
     QComboBox* courtLevelFilter_ = nullptr;
     QComboBox* yearFilter_ = nullptr;
+    QComboBox* tendencyFilter_ = nullptr;
 
     // ── 缓存当前搜索结果（用于筛选）──
     std::vector<rag::SearchResult> cachedResults_;

@@ -26,6 +26,7 @@
 #include <vector>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <QApplication>
 #include <QDirIterator>
@@ -879,6 +880,494 @@ void test_e2e_failed_ocr_import_then_search() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 12: T1 —— 第 8 类元数据「裁判结果倾向」
+// ═══════════════════════════════════════════════════════════════
+void test_metadata_result_tendency() {
+    TEST("结果倾向：21 篇语料全量判定");
+    const auto files = listTxtFiles("test/data/legal_cases");
+    CHECK(files.size() == 21);
+
+    int judged = 0;          // 能判出倾向（非 Unknown）
+    int favorPlaintiff = 0;
+    int favorDefendant = 0;
+    int partial = 0;
+    int other = 0;
+
+    for (const auto& file : files) {
+        QFile f(QString::fromStdString(file));
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const std::string text = f.readAll().toStdString();
+        f.close();
+
+        const auto tendency = document::MetadataExtractor::extractResultTendency(text);
+        if (tendency != document::ResultTendency::Unknown) ++judged;
+        switch (tendency) {
+            case document::ResultTendency::FavorPlaintiff:  ++favorPlaintiff; break;
+            case document::ResultTendency::FavorDefendant:  ++favorDefendant; break;
+            case document::ResultTendency::PartialSupport:  ++partial; break;
+            case document::ResultTendency::Other:           ++other; break;
+            case document::ResultTendency::Unknown:         break;
+        }
+    }
+
+    std::cout << "    (利于原告 " << favorPlaintiff
+              << " / 部分支持 " << partial
+              << " / 利于被告 " << favorDefendant
+              << " / 其他 " << other << ") ";
+
+    // 21 篇全部落在某个确定分类里（无一 Unknown）——这是 T1 的验收口径
+    CHECK_EQ(judged, 21);
+    CHECK_EQ(favorPlaintiff + partial + favorDefendant + other, 21);
+    PASS();
+}
+
+void test_metadata_tendency_labels() {
+    TEST("结果倾向：标签与枚举往返一致");
+    using document::ResultTendency;
+    const ResultTendency all[] = {
+        ResultTendency::Unknown, ResultTendency::FavorPlaintiff,
+        ResultTendency::FavorDefendant, ResultTendency::PartialSupport,
+        ResultTendency::Other
+    };
+    for (auto t : all) {
+        const std::string label = document::resultTendencyLabel(t);
+        CHECK(!label.empty());
+        CHECK(document::resultTendencyFromLabel(label) == t);
+    }
+    // 未知标签必须落到 Unknown，不能瞎猜
+    CHECK(document::resultTendencyFromLabel("不存在的标签")
+          == ResultTendency::Unknown);
+    PASS();
+}
+
+void test_metadata_tendency_keyword_cases() {
+    TEST("结果倾向：判项措辞 → 分类");
+
+    // 给付类判项指向原告 + 尾项驳回 → 部分支持。
+    // 实测 case_civil_001（"被告…归还原告借款本金" + "驳回原告…其他诉讼请求"）
+    // 即落在此类，故此处按同一口径断言。
+    {
+        const std::string text =
+            "本院认为……\n判决如下：\n"
+            "一、被告李四于本判决生效之日起十日内向原告张三支付货款五万元；\n"
+            "二、驳回原告张三的其他诉讼请求。\n"
+            "如不服本判决，可在判决书送达之日起十五日内提起上诉。";
+        const auto t = document::MetadataExtractor::extractResultTendency(text);
+        CHECK(t == document::ResultTendency::PartialSupport);
+    }
+
+    // 仅驳回 → 利于被告
+    {
+        const std::string text =
+            "本院认为……\n判决如下：\n"
+            "驳回原告张三的全部诉讼请求。\n"
+            "如不服本判决，可在判决书送达之日起十五日内提起上诉。";
+        const auto t = document::MetadataExtractor::extractResultTendency(text);
+        CHECK(t == document::ResultTendency::FavorDefendant);
+    }
+
+    // 无驳回的纯给付判项 → 利于原告（对应 case_civil_002 的真实形态）
+    {
+        const std::string text =
+            "本院认为……\n判决如下：\n"
+            "一、被告李四向原告张三支付货款三万元；\n"
+            "二、被告李四支付自二〇二四年一月一日起的逾期付款违约金。\n"
+            "如不服本判决，可在判决书送达之日起十五日内提起上诉。";
+        const auto t = document::MetadataExtractor::extractResultTendency(text);
+        CHECK(t == document::ResultTendency::FavorPlaintiff);
+    }
+
+    // 驳回上诉 → 其他
+    {
+        const std::string text =
+            "本院认为……\n裁定如下：\n"
+            "驳回上诉，维持原判。\n"
+            "本裁定为终审裁定。";
+        const auto t = document::MetadataExtractor::extractResultTendency(text);
+        CHECK(t == document::ResultTendency::Other);
+    }
+
+    // 刑事文书 → 其他（不套民事给付口径）
+    {
+        const std::string text =
+            "××人民法院刑事判决书\n公诉机关××人民检察院。\n被告人王五。\n"
+            "本院认为……\n判决如下：\n"
+            "一、被告人王五犯盗窃罪，判处有期徒刑一年，并处罚金二千元；\n"
+            "二、责令被告人王五退赔被害人损失。\n"
+            "如不服本判决，可在判决书送达之日起十日内提起上诉。";
+        const auto t = document::MetadataExtractor::extractResultTendency(text);
+        CHECK(t == document::ResultTendency::Other);
+    }
+
+    // 二审驳回上诉 → 其他
+    {
+        const std::string text =
+            "本院认为……\n裁定如下：\n"
+            "驳回上诉，维持原判。\n"
+            "本裁定为终审裁定。";
+        const auto t = document::MetadataExtractor::extractResultTendency(text);
+        CHECK(t == document::ResultTendency::Other);
+    }
+
+    // 无主文段（如仅有"本院认为"）→ Unknown，不猜
+    {
+        const std::string text = "本院认为，原告提交的证据不足以证明其主张。";
+        const auto t = document::MetadataExtractor::extractResultTendency(text);
+        CHECK(t == document::ResultTendency::Unknown);
+    }
+
+    // 空文本 → Unknown
+    {
+        const auto t = document::MetadataExtractor::extractResultTendency("");
+        CHECK(t == document::ResultTendency::Unknown);
+    }
+
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 测试 13: T1 —— InvertedIndex 块级删除
+// ═══════════════════════════════════════════════════════════════
+void test_inverted_index_remove_chunk() {
+    TEST("倒排索引：按块删除并同步块计数");
+    search_index::InvertedIndex index;
+
+    // docA 两块；docB 一块。注意用互不相同的词，便于精确断言
+    // 哪个词项应当因"最后一个 posting 被摘除"而整体消失。
+    const std::vector<std::string> termsA0 = {"合同", "违约", "赔偿"};
+    const std::vector<std::string> termsA1 = {"合同", "履行"};
+    const std::vector<std::string> termsB0 = {"合同", "解除"};
+    index.addDocument("docA.txt", 0, termsA0);
+    index.addDocument("docA.txt", 1, termsA1);
+    index.addDocument("docB.txt", 0, termsB0);
+
+    CHECK_EQ(index.totalDocs(), 3);
+
+    // 删掉 docA 的第 0 块
+    const int removed = index.removeChunk("docA.txt", 0);
+    CHECK_EQ(removed, 3);              // 该块贡献 3 个 posting
+    CHECK_EQ(index.totalDocs(), 2);
+
+    // "违约" 与 "赔偿" 只存在于被删的块 → 整个词项应被摘除
+    CHECK(index.getPostings("违约") == nullptr);
+    CHECK(index.getPostings("赔偿") == nullptr);
+
+    // "合同" 仍应保留 docA 的第 1 块与 docB 的第 0 块
+    const auto* postings = index.getPostings("合同");
+    CHECK(postings != nullptr);
+    CHECK_EQ(static_cast<int>(postings->size()), 2);
+
+    // 其余词项不受影响
+    CHECK(index.getPostings("履行") != nullptr);
+    CHECK(index.getPostings("解除") != nullptr);
+
+    // 被删块的长度记录必须移除（否则 avgDocLength 会被幽灵块拉偏）
+    CHECK_EQ(index.docLength("docA.txt", 0), 0);
+    CHECK(index.docLength("docA.txt", 1) > 0);
+
+    // 幂等：再次删同一块不报错、不再影响计数
+    CHECK_EQ(index.removeChunk("docA.txt", 0), 0);
+    CHECK_EQ(index.totalDocs(), 2);
+
+    // 不存在的块同样幂等
+    CHECK_EQ(index.removeChunk("nope.txt", 9), 0);
+    CHECK_EQ(index.totalDocs(), 2);
+
+    // 删光全部块后，索引应回到空状态
+    index.removeChunk("docA.txt", 1);
+    index.removeChunk("docB.txt", 0);
+    CHECK_EQ(index.totalDocs(), 0);
+    CHECK(index.getPostings("合同") == nullptr);
+
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 测试 14: T1 —— Retriever 文档级视图与删除
+// ═══════════════════════════════════════════════════════════════
+void test_retriever_document_view() {
+    TEST("Retriever：文档级只读视图（documentInfos / 全文 / 块）");
+    rag::Retriever retriever;
+    for (const auto& file : listTxtFiles("test/data/legal_cases")) {
+        retriever.addDocument(file);
+    }
+
+    // 文档数与块数是两个量：21 篇 / 118 块
+    CHECK_EQ(retriever.documentCount(), 21);
+    CHECK_EQ(retriever.chunkCount(), 118);
+    // docCount() 返回块数——这是有意的历史语义，此处显式钉住防回归
+    CHECK_EQ(retriever.docCount(), retriever.chunkCount());
+
+    const auto infos = retriever.documentInfos();
+    CHECK_EQ(static_cast<int>(infos.size()), 21);
+
+    // 按 docId 升序，稳定可复现
+    for (size_t i = 1; i < infos.size(); ++i) {
+        CHECK(infos[i - 1].docId < infos[i].docId);
+    }
+
+    int totalChunks = 0;
+    int withFullText = 0;
+    for (const auto& info : infos) {
+        CHECK(!info.docId.empty());
+        CHECK(info.chunkCount > 0);
+        CHECK(!info.importedAt.empty());   // 导入时间必须落上
+        totalChunks += info.chunkCount;
+
+        // 整篇原文必须留存（T10 全文阅读页的数据源）
+        std::string full;
+        if (retriever.getFullText(info.docId, full) && !full.empty()) {
+            ++withFullText;
+            CHECK(info.byteSize == static_cast<std::uint64_t>(full.size()));
+        }
+
+        // 第 0 块可读
+        std::string chunk;
+        CHECK(retriever.getChunk(info.docId, 0, chunk));
+        CHECK(!chunk.empty());
+
+        // 越界块必须返回 false 而不是空串糊过去
+        std::string outOfRange;
+        CHECK(!retriever.getChunk(info.docId, info.chunkCount, outOfRange));
+    }
+
+    CHECK_EQ(totalChunks, 118);
+    CHECK_EQ(withFullText, 21);   // 21 篇全部保留全文
+
+    // 单篇查询
+    rag::DocumentInfo one;
+    CHECK(retriever.getDocumentInfo(infos[0].docId, one));
+    CHECK(one.docId == infos[0].docId);
+    CHECK(!retriever.getDocumentInfo("不存在的文档.txt", one));
+
+    // allDocIds 与 documentInfos 同源同序
+    const auto ids = retriever.allDocIds();
+    CHECK_EQ(static_cast<int>(ids.size()), 21);
+    CHECK(ids[0] == infos[0].docId);
+    CHECK(ids[20] == infos[20].docId);
+
+    PASS();
+}
+
+void test_retriever_remove_document() {
+    TEST("Retriever：单篇删除（倒排 / 块 / 元数据 / 全文同步清理）");
+    rag::Retriever retriever;
+    for (const auto& file : listTxtFiles("test/data/legal_cases")) {
+        retriever.addDocument(file);
+    }
+    CHECK_EQ(retriever.documentCount(), 21);
+
+    const auto ids = retriever.allDocIds();
+    const std::string victim = ids[0];
+
+    rag::DocumentInfo victimInfo;
+    CHECK(retriever.getDocumentInfo(victim, victimInfo));
+    const int victimChunks = victimInfo.chunkCount;
+
+    // 删除前：该文档在检索中可见
+    const std::string victimKeyword = "本院认为";
+    (void)victimKeyword;
+
+    const int removed = retriever.removeDocument(victim);
+    CHECK_EQ(removed, victimChunks);
+
+    // 三处计数同步收敛
+    CHECK_EQ(retriever.documentCount(), 20);
+    CHECK_EQ(retriever.chunkCount(), 118 - victimChunks);
+    CHECK_EQ(retriever.docCount(), 118 - victimChunks);
+
+    // 只读视图里也没有了
+    rag::DocumentInfo after;
+    CHECK(!retriever.getDocumentInfo(victim, after));
+    std::string full;
+    CHECK(!retriever.getFullText(victim, full));
+    std::string chunk;
+    CHECK(!retriever.getChunk(victim, 0, chunk));
+
+    // 其余文档的检索能力未受影响
+    auto results = retriever.search("合同 履行", 5);
+    CHECK(results.size() >= 1);
+    for (const auto& r : results) {
+        CHECK(r.docId != victim);   // 已删文档不得再被命中
+    }
+
+    // 幂等：重复删同一篇返回 0，不改变计数
+    CHECK_EQ(retriever.removeDocument(victim), 0);
+    CHECK_EQ(retriever.documentCount(), 20);
+
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 测试 15: T1 —— 索引持久化（落盘 → 恢复 → 一致）
+// ═══════════════════════════════════════════════════════════════
+void test_persistence_roundtrip() {
+    TEST("持久化：落盘后恢复，文档/块/元数据/检索结果一致");
+    const std::string indexPath = "build/test_rag_index.dat";
+
+    // ── 第一次会话：导入 → 落盘 ──
+    rag::Retriever writer;
+    writer.setIndexFilePath(indexPath);
+    for (const auto& file : listTxtFiles("test/data/legal_cases")) {
+        writer.addDocument(file);
+    }
+    CHECK_EQ(writer.documentCount(), 21);
+    CHECK_EQ(writer.chunkCount(), 118);
+
+    const auto saveResult = writer.saveIndex();
+    CHECK(saveResult.ok);
+    CHECK_EQ(saveResult.documentCount, 21);
+    CHECK_EQ(saveResult.chunkCount, 118);
+    CHECK(saveResult.bytes > 0);
+    CHECK(writer.hasPersistedIndex());
+
+    // 落盘前后检索结果必须一致（证明索引没被写坏）
+    auto beforeHits = writer.search("民间借贷 交付凭证", 5);
+    CHECK(beforeHits.size() >= 1);
+    const std::string topBefore = beforeHits[0].docId;
+
+    // ── 第二次会话：全新实例 → 恢复 ──
+    rag::Retriever reader;
+    reader.setIndexFilePath(indexPath);
+    CHECK_EQ(reader.documentCount(), 0);   // 恢复前是空的
+
+    const auto loadResult = reader.loadIndex();
+    CHECK(loadResult.ok);
+    CHECK_EQ(loadResult.documentCount, 21);
+    CHECK_EQ(loadResult.chunkCount, 118);
+    CHECK(loadResult.elapsedMs >= 0);
+    CHECK(reader.restoredFromDisk());
+    CHECK(reader.lastLoadMs() >= 0);
+
+    // 规模与首次会话完全一致
+    CHECK_EQ(reader.documentCount(), 21);
+    CHECK_EQ(reader.chunkCount(), 118);
+    CHECK_EQ(reader.docCount(), 118);
+
+    // 检索能力（纯 BM25 降级路径）一致
+    auto afterHits = reader.search("民间借贷 交付凭证", 5);
+    CHECK(afterHits.size() >= 1);
+    CHECK(afterHits[0].docId == topBefore);
+
+    // 元数据（含第 8 类结果倾向）跨会话保留
+    const auto idsBefore = writer.allDocIds();
+    const auto idsAfter = reader.allDocIds();
+    CHECK(idsBefore.size() == idsAfter.size());
+    for (size_t i = 0; i < idsBefore.size(); ++i) {
+        CHECK(idsBefore[i] == idsAfter[i]);
+
+        const auto* metaBefore = writer.getMetadata(idsBefore[i]);
+        const auto* metaAfter = reader.getMetadata(idsAfter[i]);
+        CHECK((metaBefore == nullptr) == (metaAfter == nullptr));
+        if (metaBefore && metaAfter) {
+            CHECK(metaBefore->caseNumber == metaAfter->caseNumber);
+            CHECK(metaBefore->court == metaAfter->court);
+            CHECK(metaBefore->date == metaAfter->date);
+            CHECK(metaBefore->caseType == metaAfter->caseType);
+            CHECK(metaBefore->tendency == metaAfter->tendency);
+        }
+    }
+
+    // 全文与块内容逐字节还原（T10 依赖此项）
+    for (const auto& id : idsAfter) {
+        std::string fullBefore, fullAfter;
+        CHECK(writer.getFullText(id, fullBefore));
+        CHECK(reader.getFullText(id, fullAfter));
+        CHECK(fullBefore == fullAfter);
+
+        rag::DocumentInfo infoAfter;
+        CHECK(reader.getDocumentInfo(id, infoAfter));
+        for (int c = 0; c < infoAfter.chunkCount; ++c) {
+            std::string chunkBefore, chunkAfter;
+            CHECK(writer.getChunk(id, c, chunkBefore));
+            CHECK(reader.getChunk(id, c, chunkAfter));
+            CHECK(chunkBefore == chunkAfter);
+        }
+    }
+
+    // 导入时间与来源路径也一并还原
+    rag::DocumentInfo wInfo, rInfo;
+    CHECK(writer.getDocumentInfo(idsBefore[0], wInfo));
+    CHECK(reader.getDocumentInfo(idsAfter[0], rInfo));
+    CHECK(wInfo.importedAt == rInfo.importedAt);
+    CHECK(wInfo.sourcePath == rInfo.sourcePath);
+    CHECK(wInfo.ocr == rInfo.ocr);
+
+    // 收尾：删掉测试索引文件，别污染工作目录
+    reader.clearAll(/*alsoDeletePersistedFile=*/true);
+    CHECK(!reader.hasPersistedIndex());
+
+    PASS();
+}
+
+void test_persistence_ocr_flag_no_rerun() {
+    TEST("持久化：OCR 标记跨会话保留（扫描件不重跑识别）");
+    const std::string indexPath = "build/test_rag_index_ocr.dat";
+
+    rag::Retriever writer;
+    writer.setIndexFilePath(indexPath);
+    for (const auto& file : listTxtFiles("test/data/legal_cases")) {
+        writer.addDocument(file);
+    }
+    CHECK(writer.saveIndex().ok);
+
+    rag::Retriever reader;
+    reader.setIndexFilePath(indexPath);
+    CHECK(reader.loadIndex().ok);
+
+    const auto infos = reader.documentInfos();
+    CHECK_EQ(static_cast<int>(infos.size()), 21);
+    // 语料全是 .txt 文本文件 → 无一应被标记为 OCR，
+    // 否则恢复后会对纯文本重跑识别（错误行为的护栏）
+    for (const auto& info : infos) {
+        CHECK(!info.ocr);
+    }
+
+    reader.clearAll(true);
+    PASS();
+}
+
+void test_persistence_missing_file() {
+    TEST("持久化：文件不存在时如实失败，不静默当空库");
+    rag::Retriever retriever;
+    retriever.setIndexFilePath("build/definitely_not_here.dat");
+
+    CHECK(!retriever.hasPersistedIndex());
+
+    const auto result = retriever.loadIndex();
+    CHECK(!result.ok);                 // 必须报告失败
+    CHECK(!result.diagnostic.empty()); // 且给出原因
+    CHECK(!retriever.restoredFromDisk());
+    CHECK_EQ(retriever.documentCount(), 0);
+
+    PASS();
+}
+
+void test_persistence_corrupt_file() {
+    TEST("持久化：损坏文件被 CRC 拦下，不读成半套索引");
+    const std::string indexPath = "build/test_rag_index_corrupt.dat";
+
+    // 造一个"魔数不对"的文件
+    {
+        std::ofstream out(indexPath, std::ios::binary);
+        out << "NOT_A_VALID_RAG_INDEX_FILE_HEADER_0123456789";
+    }
+
+    rag::Retriever retriever;
+    retriever.setIndexFilePath(indexPath);
+
+    const auto result = retriever.loadIndex();
+    CHECK(!result.ok);
+    CHECK(!result.diagnostic.empty());
+    CHECK_EQ(retriever.documentCount(), 0);
+    CHECK_EQ(retriever.chunkCount(), 0);
+    CHECK(!retriever.restoredFromDisk());
+
+    std::remove(indexPath.c_str());
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -954,6 +1443,24 @@ void run_all_tests() {
     test_e2e_legal_prompt_detection();
     test_e2e_performance_stress();
     test_e2e_failed_ocr_import_then_search();
+
+    std::cout << "\n── T1: 第 8 类元数据（裁判结果倾向）──" << std::endl;
+    test_metadata_result_tendency();
+    test_metadata_tendency_labels();
+    test_metadata_tendency_keyword_cases();
+
+    std::cout << "\n── T1: 块级删除 ──" << std::endl;
+    test_inverted_index_remove_chunk();
+
+    std::cout << "\n── T1: 文档级视图与删除 ──" << std::endl;
+    test_retriever_document_view();
+    test_retriever_remove_document();
+
+    std::cout << "\n── T1: 索引持久化 ──" << std::endl;
+    test_persistence_roundtrip();
+    test_persistence_ocr_flag_no_rerun();
+    test_persistence_missing_file();
+    test_persistence_corrupt_file();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

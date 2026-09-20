@@ -29,10 +29,12 @@
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QStringList>
+#include <QTableWidget>
 #include <QTimer>
 
 #include "ui/main_window.h"
 #include "ui/search_page.h"
+#include "ui/library_page.h"
 
 namespace {
 
@@ -165,6 +167,162 @@ int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) 
     return g_failures;
 }
 
+/// T1 文档库页 E2E：导入后列表可见 → 查看详情 → 删除单篇 → 计数同步
+int runLibraryE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) {
+    SearchPage* searchPage = window.findChild<SearchPage*>();
+    LibraryPage* libPage = window.findChild<LibraryPage*>();
+    QTableWidget* table = window.findChild<QTableWidget*>("libraryTable");
+    QLineEdit* searchInput = window.findChild<QLineEdit*>("searchInput");
+
+    if (!searchPage || !libPage || !table || !searchInput) {
+        check(false, QStringLiteral("文档库页控件齐全"), QStringLiteral("存在控件未找到"));
+        return g_failures;
+    }
+
+    const QStringList corpus = collectCorpus(corpusDir);
+    if (corpus.isEmpty()) {
+        check(false, QStringLiteral("语料目录可访问"));
+        return g_failures;
+    }
+
+    // 先经检索页导入，验证"共享引擎"——导入的文档文档库页应立刻看到
+    searchPage->importPaths(corpus);
+    QApplication::processEvents();
+    libPage->refresh();
+    QApplication::processEvents();
+
+    check(libPage->rowCount() == corpus.size(),
+          QStringLiteral("导入后文档库列表同步"),
+          QStringLiteral("%1 行").arg(libPage->rowCount()));
+
+    check(table->columnCount() == 6, QStringLiteral("文档库 6 列"),
+          QStringLiteral("实际 %1 列").arg(table->columnCount()));
+
+    // 结果倾向列（第 5 列，下标 4）应已填充，不应为空
+    int filledTendency = 0;
+    for (int r = 0; r < table->rowCount(); ++r) {
+        QTableWidgetItem* item = table->item(r, 4);
+        if (item && !item->text().isEmpty()) ++filledTendency;
+    }
+    check(filledTendency == table->rowCount(),
+          QStringLiteral("结果倾向列全部填充"),
+          QStringLiteral("%1 / %2").arg(filledTendency).arg(table->rowCount()));
+
+    window.grab().save(outDir + QStringLiteral("/08-library.png"));
+
+    // ── 删除单篇：检索页的陈旧缓存必须被清掉 ──
+    // 先真的跑一次检索，让检索页有缓存可作废（只 setText 不会填充缓存）
+    QPushButton* searchBtn = window.findChild<QPushButton*>("searchBtn");
+    if (searchBtn) {
+        searchInput->setText(QStringLiteral("合同 履行"));
+        searchBtn->click();
+        pump(2000);
+    }
+    const int cachedBefore = searchPage->lastResultCount();
+    check(cachedBefore > 0, QStringLiteral("删除前检索页已有缓存"),
+          QStringLiteral("%1 条").arg(cachedBefore));
+
+    const QString victim = table->item(0, 0)->text();
+    const bool removed = libPage->removeDocumentById(victim, /*confirm=*/false);
+    QApplication::processEvents();
+
+    check(removed, QStringLiteral("删除单篇成功"), victim);
+    check(libPage->rowCount() == corpus.size() - 1,
+          QStringLiteral("删除后列表行数 -1"),
+          QStringLiteral("%1 行").arg(libPage->rowCount()));
+    check(searchPage->lastResultCount() == 0,
+          QStringLiteral("删除后检索页缓存被作废"),
+          QStringLiteral("%1 条").arg(searchPage->lastResultCount()));
+
+    window.grab().save(outDir + QStringLiteral("/09-library-after-delete.png"));
+
+    return g_failures;
+}
+
+/// T1 持久化 E2E：落盘 → 销毁窗口 → 重建窗口 → 索引自动恢复
+/// 直接验证"关闭程序再打开，文档库还在"这条 T1 核心验收标准。
+///
+/// 说明：MainWindow 走生产默认路径（config::INDEX_FILE，即工作目录下的
+/// rag_index.dat），这里不做路径注入——真实验证的就是上线那条代码路径。
+/// 跑完把文件删掉，避免污染工作目录。
+int runPersistenceE2E(const QString& corpusDir, const QString& outDir) {
+    const QString indexPath = QStringLiteral("rag_index.dat");
+
+    // 先清掉可能存在的旧索引，保证"会话 1 从空库起"这个前提成立
+    QFile::remove(indexPath);
+
+    // ── 第一次会话：导入并落盘 ──
+    int docsBefore = 0;
+    {
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        SearchPage* page = window.findChild<SearchPage*>();
+        LibraryPage* libPage = window.findChild<LibraryPage*>();
+        if (!page || !libPage) {
+            check(false, QStringLiteral("会话 1 页面就绪"));
+            return g_failures;
+        }
+
+        page->importPaths(collectCorpus(corpusDir));
+        QApplication::processEvents();
+        libPage->refresh();
+        QApplication::processEvents();
+
+        docsBefore = libPage->rowCount();
+        check(docsBefore > 0, QStringLiteral("会话 1 导入成功"),
+              QStringLiteral("%1 篇").arg(docsBefore));
+
+        // 关闭窗口触发 closeEvent → saveIndex()
+        window.close();
+        QApplication::processEvents();
+    }
+
+    check(QFile::exists(indexPath), QStringLiteral("索引文件已落盘"), indexPath);
+
+    // ── 第二次会话：全新窗口，启动时应自动恢复 ──
+    {
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        LibraryPage* libPage = window.findChild<LibraryPage*>();
+        QTableWidget* table = window.findChild<QTableWidget*>("libraryTable");
+
+        if (!libPage || !table) {
+            check(false, QStringLiteral("会话 2 页面就绪"));
+            return g_failures;
+        }
+
+        check(libPage->rowCount() == docsBefore,
+              QStringLiteral("重启后文档库自动恢复"),
+              QStringLiteral("%1 篇（会话 1 为 %2）")
+                  .arg(libPage->rowCount()).arg(docsBefore));
+
+        // 恢复出的列表内容也要可用：结果倾向列仍有值
+        int filled = 0;
+        for (int r = 0; r < table->rowCount(); ++r) {
+            QTableWidgetItem* item = table->item(r, 4);
+            if (item && !item->text().isEmpty()) ++filled;
+        }
+        check(filled == table->rowCount(),
+              QStringLiteral("恢复后元数据完整（结果倾向列）"),
+              QStringLiteral("%1 / %2").arg(filled).arg(table->rowCount()));
+
+        window.grab().save(outDir + QStringLiteral("/10-library-restored.png"));
+
+        // 关闭时会把恢复出来的索引再写一遍——正常，符合生产行为
+        window.close();
+        QApplication::processEvents();
+    }
+
+    QFile::remove(indexPath);
+    return g_failures;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -231,6 +389,12 @@ int main(int argc, char* argv[]) {
     if (parser.isSet(e2eOption)) {
         qInfo().noquote() << QStringLiteral("── 检索问答页 E2E（导入 → 检索 → 筛选）──");
         runE2E(window, parser.value(e2eOption), outDirPath);
+
+        qInfo().noquote() << QStringLiteral("── 文档库页 E2E（共享引擎 → 详情 → 删除）──");
+        runLibraryE2E(window, parser.value(e2eOption), outDirPath);
+
+        qInfo().noquote() << QStringLiteral("── 索引持久化 E2E（落盘 → 重启 → 自动恢复）──");
+        runPersistenceE2E(parser.value(e2eOption), outDirPath);
     }
 
     qInfo().noquote() << (g_failures == 0
