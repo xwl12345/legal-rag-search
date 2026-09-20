@@ -8,6 +8,7 @@
 #include <QHBoxLayout>
 #include <QMessageBox>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSplitter>
@@ -15,6 +16,7 @@
 #include <QVBoxLayout>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <iomanip>
 #include <set>
 #include <sstream>
@@ -508,19 +510,51 @@ void SearchPage::importPaths(const QStringList& files) {
     statusLabel_->setText(
         QStringLiteral("正在导入文档...（扫描件 OCR 逐页识别，可能需要数分钟，请耐心等待）"));
 
+    // 模态进度对话框：OCR 等待期间事件循环仍在泵输入，用模态对话框阻挡
+    // 主窗口（防重入），并给出可交互的取消出口——避免长时间识别期间
+    // “点击无反应”的假死体验。
+    QProgressDialog progress(
+        QStringLiteral("准备导入…"), QStringLiteral("取消"), 0, 0, this);
+    progress.setWindowTitle(QStringLiteral("导入文档"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.show();
+
+    const std::function<bool()> cancelledQuery = [&progress]() {
+        return progress.wasCanceled();
+    };
+    const std::function<void(int, int)> onPage = [&progress](int page, int totalPages) {
+        progress.setLabelText(
+            QStringLiteral("OCR 逐页识别中：第 %1 / %2 页（每页约 5-10 秒）…")
+                .arg(page).arg(totalPages));
+    };
+
     int imported = 0;
     int chunksAdded = 0;
     int ocrImported = 0;
+    bool userCancelled = false;
     QStringList errors;
     for (int i = 0; i < files.size(); ++i) {
+        if (cancelledQuery()) {
+            userCancelled = true;
+            break;
+        }
+        progress.setLabelText(
+            QStringLiteral("正在导入（%1 / %2）：\n%3")
+                .arg(i + 1).arg(files.size())
+                .arg(QFileInfo(files[i]).fileName()));
         try {
-            const auto result = retriever_->addDocument(files[i].toStdString());
+            const auto result = retriever_->addDocument(
+                files[i].toStdString(), cancelledQuery, onPage);
             if (result.imported) {
                 ++imported;
                 chunksAdded += result.chunksAdded;
                 if (result.source == document::ParseSource::Ocr) {
                     ++ocrImported;
                 }
+            } else if (result.cancelled) {
+                userCancelled = true;
+                break;
             } else {
                 const QString name = QFileInfo(files[i]).fileName();
                 const QString reason = result.diagnostic.empty()
@@ -535,9 +569,14 @@ void SearchPage::importPaths(const QStringList& files) {
         progressBar_->setValue(i + 1);
         QApplication::processEvents();
     }
+    progress.reset();
 
     progressBar_->setVisible(false);
-    if (errors.isEmpty()) {
+    if (userCancelled) {
+        statusLabel_->setText(
+            QStringLiteral("已取消导入：%1 个文档成功，新增 %2 个文本块")
+                .arg(imported).arg(chunksAdded));
+    } else if (errors.isEmpty()) {
         QString message = QStringLiteral("✓ 已导入 %1 个文档，新增 %2 个文本块")
                               .arg(imported)
                               .arg(chunksAdded);

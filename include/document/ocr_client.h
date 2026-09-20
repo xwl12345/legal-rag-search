@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <optional>
+#include <functional>
 
 namespace document {
 
@@ -11,6 +12,7 @@ enum class OcrStatus {
     PythonNotFound,
     PythonStartFailed,
     TimedOut,
+    Cancelled,
     ProcessFailed,
     NoText
 };
@@ -30,12 +32,20 @@ struct OcrResult {
 class OcrClient {
 public:
     /// 对 PDF 文件执行 OCR
+    ///
+    /// 等待期间会泵界面事件（窗口可重绘、模态进度对话框可交互），因此
+    /// 调用方应配合模态 QProgressDialog 阻挡主窗口输入，避免重入。
+    ///
     /// @param pdfPath  PDF 文件路径
     /// @param timeoutMs 超时时间（毫秒），默认 10 分钟
     ///                  扫描件逐页识别约 5–10 秒/页，需为大页数扫描件留出余量
+    /// @param cancelled 每约 200ms 轮询一次，返回 true 时终止子进程并取消识别
+    /// @param onPage    每页识别完成时回调（当前页号、总页号），可用于进度展示
     /// @return 识别文本及失败原因
     static OcrResult extractText(const std::string& pdfPath,
-                                 int timeoutMs = 600000);
+                                 int timeoutMs = 600000,
+                                 const std::function<bool()>& cancelled = {},
+                                 const std::function<void(int, int)>& onPage = {});
 
     /// 检查 OCR 环境是否可用（Python + PyMuPDF）
     static bool isAvailable();

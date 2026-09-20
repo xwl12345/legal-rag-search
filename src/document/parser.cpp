@@ -26,7 +26,9 @@ size_t previousUtf8Boundary(std::string_view text, size_t position) {
 
 namespace document {
 
-ParseResult DocumentParser::parseWithResult(const std::string& filePath) {
+ParseResult DocumentParser::parseWithResult(const std::string& filePath,
+                                            const std::function<bool()>& cancelled,
+                                            const std::function<void(int, int)>& onPage) {
     // 使用 QFileInfo 而非 std::filesystem::path
     // — MinGW 的 std::filesystem::path 不能正确处理 UTF-8 中文路径
     QFileInfo fileInfo(QString::fromStdString(filePath));
@@ -51,7 +53,10 @@ ParseResult DocumentParser::parseWithResult(const std::string& filePath) {
             source = ParseSource::NativePdf;
         } else {
             // 文本层为空 → 可能是扫描件，回退到 OCR
-            const auto ocrResult = OcrClient::extractText(filePath);
+            const auto ocrResult = OcrClient::extractText(filePath, 600000, cancelled, onPage);
+            if (ocrResult.status == OcrStatus::Cancelled) {
+                return {ParseStatus::OcrCancelled, source, {}, ocrResult.diagnostic};
+            }
             if (!ocrResult.isSuccess()) {
                 return {ParseStatus::OcrFailed, source, {}, ocrResult.diagnostic};
             }

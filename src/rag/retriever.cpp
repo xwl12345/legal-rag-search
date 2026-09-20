@@ -46,15 +46,18 @@ void Retriever::setApiKey(const std::string& key) {
     embedding_.setApiKey(key);
 }
 
-ImportResult Retriever::addDocument(const std::string& filePath) {
+ImportResult Retriever::addDocument(const std::string& filePath,
+                                    const std::function<bool()>& cancelled,
+                                    const std::function<void(int, int)>& onPage) {
     // 使用 DocumentParser::parseWithResult() 统一处理所有文件类型
     // — 文本文件：直接读取
     // — PDF：PdfExtractor 提取文本层 → OCR 回退（扫描件）
     document::DocumentParser parser;
-    auto parseResult = parser.parseWithResult(filePath);
+    auto parseResult = parser.parseWithResult(filePath, cancelled, onPage);
 
     if (!parseResult.isSuccess()) {
-        return {false, "", 0, parseResult.source, parseResult.diagnostic};
+        const bool userCancelled = parseResult.status == document::ParseStatus::OcrCancelled;
+        return {false, "", 0, parseResult.source, parseResult.diagnostic, userCancelled};
     }
 
     auto& chunks = parseResult.chunks;

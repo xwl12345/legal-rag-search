@@ -74,6 +74,7 @@ def _ocr_rapidocr(pdf_path: str) -> str:
 
             if page_lines:
                 all_text.append("\n".join(page_lines))
+            print(f"[OCR] Page {page_idx + 1}/{total_pages} done", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[OCR] Page {page_idx + 1} error: {e}", file=sys.stderr)
             continue
@@ -133,6 +134,7 @@ def _ocr_tesseract(pdf_path: str) -> str:
             text = text.strip()
             if text:
                 all_text.append(text)
+            print(f"[OCR] Page {page_idx + 1}/{total_pages} done", file=sys.stderr, flush=True)
         except Exception as e:
             # 可能缺少中文语言包
             if "chi_sim" in str(e):
@@ -188,6 +190,7 @@ def _ocr_paddleocr(pdf_path: str) -> str:
 
             if page_lines:
                 all_text.append("\n".join(page_lines))
+            print(f"[OCR] Page {page_idx + 1}/{total_pages} done", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[OCR] Page {page_idx + 1} error: {e}", file=sys.stderr)
             continue

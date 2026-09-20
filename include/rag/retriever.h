@@ -6,6 +6,7 @@
 #include "document/tokenizer.h"
 #include "document/parser.h"
 #include "document/metadata.h"
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -28,6 +29,7 @@ struct ImportResult {
     int chunksAdded = 0;
     document::ParseSource source = document::ParseSource::None;
     std::string diagnostic;
+    bool cancelled = false;   // 用户主动取消（区别于失败）
 };
 
 /// RAG 检索器：混合 BM25 + 向量检索
@@ -36,7 +38,11 @@ public:
     Retriever();
 
     /// 向检索引擎添加文档，返回实际索引结果
-    ImportResult addDocument(const std::string& filePath);
+    /// @param cancelled 每约 200ms 轮询一次，返回 true 时取消 OCR 回退流程
+    /// @param onPage    OCR 逐页识别的进度回调（当前页号、总页号）
+    ImportResult addDocument(const std::string& filePath,
+                             const std::function<bool()>& cancelled = {},
+                             const std::function<void(int, int)>& onPage = {});
     void addText(const std::string& text, const std::string& docId);
 
     /// 混合检索：BM25 + 向量

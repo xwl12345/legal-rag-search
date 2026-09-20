@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <string_view>
+#include <functional>
 
 namespace document {
 
@@ -27,7 +28,8 @@ enum class ParseStatus {
     FileOpenFailed,
     InvalidPdf,
     NoTextExtracted,
-    OcrFailed
+    OcrFailed,
+    OcrCancelled
 };
 
 /// 文档解析结果，包含文本块和失败诊断。
@@ -44,7 +46,11 @@ struct ParseResult {
 class DocumentParser {
 public:
     /// 读取文件、提取文本并切分为文本块，同时返回诊断结果
-    ParseResult parseWithResult(const std::string& filePath);
+    /// @param cancelled 每约 200ms 轮询一次，返回 true 时取消 OCR 回退流程
+    /// @param onPage    OCR 逐页识别的进度回调（当前页号、总页号）
+    ParseResult parseWithResult(const std::string& filePath,
+                                const std::function<bool()>& cancelled = {},
+                                const std::function<void(int, int)>& onPage = {});
 
     /// 读取文件并切分成文本块（兼容旧调用方）
     std::vector<TextChunk> parse(const std::string& filePath);

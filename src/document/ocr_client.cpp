@@ -5,6 +5,7 @@
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QDebug>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTimer>
 #include <vector>
@@ -129,7 +130,10 @@ bool OcrClient::isAvailable() {
 // 主入口
 // ═══════════════════════════════════════════════════════════════
 
-OcrResult OcrClient::extractText(const std::string& pdfPath, int timeoutMs) {
+OcrResult OcrClient::extractText(const std::string& pdfPath,
+                                 int timeoutMs,
+                                 const std::function<bool()>& cancelled,
+                                 const std::function<void(int, int)>& onPage) {
     const QString pdfPathQt = QString::fromStdString(pdfPath);
     const auto python = findPython();
     const std::string script = findOcrScript();
@@ -163,8 +167,9 @@ OcrResult OcrClient::extractText(const std::string& pdfPath, int timeoutMs) {
     }
 
     // 用事件循环等待子进程结束：OCR 逐页识别可能持续数分钟，期间持续泵
-    // 界面绘制事件，避免主窗口被系统标记“未响应”。
-    // ExcludeUserInputEvents：屏蔽输入事件，防止等待期间触发与导入冲突的操作。
+    // 界面事件，避免主窗口被系统标记“未响应”。不屏蔽输入事件——调用方
+    // （界面层）以模态进度对话框阻挡主窗口，使等待期间仅对话框可交互
+    // （取消按钮），既消除“点击无反应”的假死感，又避免主界面重入。
     QEventLoop loop;
     QTimer timer;
     timer.setSingleShot(true);
@@ -174,18 +179,49 @@ OcrResult OcrClient::extractText(const std::string& pdfPath, int timeoutMs) {
     // write 上永不退出，父进程只能白等满超时——必须在等待期间异步排空。
     QString stdoutText;
     QString stderrText;
+    const QRegularExpression pageProgress{R"(\[OCR\] Page (\d+)/(\d+) done)"};
     QObject::connect(&proc, &QProcess::readyReadStandardOutput, &loop, [&]() {
         stdoutText += QString::fromUtf8(proc.readAllStandardOutput());
     });
     QObject::connect(&proc, &QProcess::readyReadStandardError, &loop, [&]() {
-        stderrText += QString::fromUtf8(proc.readAllStandardError());
+        const QString delta = QString::fromUtf8(proc.readAllStandardError());
+        stderrText += delta;
+        // 从新增的 stderr 里提取最后一条页进度，向调用方汇报识别进度
+        if (onPage) {
+            QRegularExpressionMatch match;
+            auto it = pageProgress.globalMatch(delta);
+            while (it.hasNext()) match = it.next();
+            if (match.hasMatch()) {
+                onPage(match.captured(1).toInt(), match.captured(2).toInt());
+            }
+        }
+    });
+
+    // 取消轮询：每约 200ms 询问一次调用方是否要求终止
+    bool userCancelled = false;
+    QTimer poll;
+    poll.setInterval(200);
+    QObject::connect(&poll, &QTimer::timeout, &loop, [&]() {
+        if (cancelled && cancelled()) {
+            userCancelled = true;
+            loop.quit();
+        }
     });
 
     QObject::connect(&proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                      &loop, &QEventLoop::quit);
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
     timer.start(timeoutMs);
-    loop.exec(QEventLoop::ExcludeUserInputEvents);
+    poll.start();
+    loop.exec();
+    poll.stop();
+
+    if (userCancelled) {
+        qInfo() << "[OCR] Cancelled by user, killing process";
+        proc.kill();
+        proc.waitForFinished(5000);
+        return {OcrStatus::Cancelled, "", "已取消 OCR 识别"};
+    }
 
     if (!timer.isActive()) {  // 超时触发退出
         qWarning() << "[OCR] Timeout after" << timeoutMs << "ms, killing process";
