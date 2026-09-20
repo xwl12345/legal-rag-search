@@ -37,53 +37,59 @@ namespace document {
 // ═══════════════════════════════════════════════════════════════
 
 std::optional<std::string> OcrClient::findPython() {
-    const QString appDir = QCoreApplication::applicationDirPath();
-    const std::vector<QString> localCandidates = {
-        appDir + "/venv/Scripts/python.exe",
-        appDir + "/.venv/Scripts/python.exe",
-        appDir + "/../venv/Scripts/python.exe",
-        appDir + "/../.venv/Scripts/python.exe",
-        "D:/python/Anaconda3/python.exe",
-    };
+    // 进程级缓存：探测每个候选需启动一个 python -c "import fitz" 子进程
+    // （waitFor* 阻塞式等待，单个候选最长约 15 秒），且 OCR 环境在进程生命周期内
+    // 不会变化——isAvailable() 与 extractText() 各探测一次纯属浪费，必须缓存。
+    static const std::optional<std::string> cached = []() -> std::optional<std::string> {
+        const QString appDir = QCoreApplication::applicationDirPath();
+        const std::vector<QString> localCandidates = {
+            appDir + "/venv/Scripts/python.exe",
+            appDir + "/.venv/Scripts/python.exe",
+            appDir + "/../venv/Scripts/python.exe",
+            appDir + "/../.venv/Scripts/python.exe",
+            "D:/python/Anaconda3/python.exe",
+        };
 
-    for (const auto& candidate : localCandidates) {
-        if (QFileInfo(candidate).isFile() && canImportFitz(candidate)) {
-            return candidate.toStdString();
-        }
-    }
-
-    // 官方安装器 / winget 的标准安装位置（Python 310–313，版本号倒序优先）。
-    // 放在 PATH 探测之前：PATH 上的 python.exe 可能是 Windows 商店占位程序，
-    // 会导致真实安装的 Python 永远探测不到。
-    const QStringList installBases = {
-        QDir::homePath() + "/AppData/Local/Programs/Python",  // 每用户安装
-        "C:/Program Files/Python",                            // 全机安装
-    };
-    for (const auto& base : installBases) {
-        const QDir baseDir(base);
-        if (!baseDir.exists()) continue;
-        const auto versions = baseDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot,
-                                                QDir::Name | QDir::Reversed);
-        for (const auto& ver : versions) {
-            if (!ver.startsWith("Python")) continue;
-            const QString candidate = base + "/" + ver + "/python.exe";
+        for (const auto& candidate : localCandidates) {
             if (QFileInfo(candidate).isFile() && canImportFitz(candidate)) {
                 return candidate.toStdString();
             }
         }
-    }
 
-    const QStringList pathCandidates = {
-        QStandardPaths::findExecutable("python.exe"),
-        QStandardPaths::findExecutable("python3.exe"),
-    };
-    for (const auto& candidate : pathCandidates) {
-        if (!candidate.isEmpty() && canImportFitz(candidate)) {
-            return candidate.toStdString();
+        // 官方安装器 / winget 的标准安装位置（Python 310–313，版本号倒序优先）。
+        // 放在 PATH 探测之前：PATH 上的 python.exe 可能是 Windows 商店占位程序，
+        // 会导致真实安装的 Python 永远探测不到。
+        const QStringList installBases = {
+            QDir::homePath() + "/AppData/Local/Programs/Python",  // 每用户安装
+            "C:/Program Files/Python",                            // 全机安装
+        };
+        for (const auto& base : installBases) {
+            const QDir baseDir(base);
+            if (!baseDir.exists()) continue;
+            const auto versions = baseDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot,
+                                                    QDir::Name | QDir::Reversed);
+            for (const auto& ver : versions) {
+                if (!ver.startsWith("Python")) continue;
+                const QString candidate = base + "/" + ver + "/python.exe";
+                if (QFileInfo(candidate).isFile() && canImportFitz(candidate)) {
+                    return candidate.toStdString();
+                }
+            }
         }
-    }
 
-    return std::nullopt;
+        const QStringList pathCandidates = {
+            QStandardPaths::findExecutable("python.exe"),
+            QStandardPaths::findExecutable("python3.exe"),
+        };
+        for (const auto& candidate : pathCandidates) {
+            if (!candidate.isEmpty() && canImportFitz(candidate)) {
+                return candidate.toStdString();
+            }
+        }
+
+        return std::nullopt;
+    }();
+    return cached;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -162,6 +168,19 @@ OcrResult OcrClient::extractText(const std::string& pdfPath, int timeoutMs) {
     QEventLoop loop;
     QTimer timer;
     timer.setSingleShot(true);
+
+    // 持续读走子进程的 stdout/stderr：管道缓冲区有限，若识别文本（20 页
+    // 扫描件可达数十 KB）或诊断输出塞满缓冲而父进程不读，子进程会阻塞在
+    // write 上永不退出，父进程只能白等满超时——必须在等待期间异步排空。
+    QString stdoutText;
+    QString stderrText;
+    QObject::connect(&proc, &QProcess::readyReadStandardOutput, &loop, [&]() {
+        stdoutText += QString::fromUtf8(proc.readAllStandardOutput());
+    });
+    QObject::connect(&proc, &QProcess::readyReadStandardError, &loop, [&]() {
+        stderrText += QString::fromUtf8(proc.readAllStandardError());
+    });
+
     QObject::connect(&proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                      &loop, &QEventLoop::quit);
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
@@ -176,18 +195,18 @@ OcrResult OcrClient::extractText(const std::string& pdfPath, int timeoutMs) {
     }
     timer.stop();
 
-    const QString stderrText = QString::fromUtf8(proc.readAllStandardError()).trimmed();
+    const QString trimmedStderr = stderrText.trimmed();
     if (proc.exitCode() != 0) {
-        QString detail = stderrText;
+        QString detail = trimmedStderr;
         if (detail.size() > 300) detail = detail.left(300) + "...";
         const std::string diagnostic = detail.isEmpty()
             ? "PDF OCR 识别失败（Python 进程异常退出）"
             : "PDF OCR 识别失败：" + detail.toStdString();
-        qWarning() << "[OCR] Failed (exit code" << proc.exitCode() << "):" << stderrText;
+        qWarning() << "[OCR] Failed (exit code" << proc.exitCode() << "):" << trimmedStderr;
         return {OcrStatus::ProcessFailed, "", diagnostic};
     }
 
-    const std::string text = proc.readAllStandardOutput().toStdString();
+    const std::string text = stdoutText.toStdString();
     if (QString::fromStdString(text).trimmed().isEmpty()) {
         return {OcrStatus::NoText, "", "未能从 PDF 中识别出可检索文本"};
     }
