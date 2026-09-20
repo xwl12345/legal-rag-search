@@ -40,9 +40,12 @@ run.bat
 *.pdf
 !test/data/*.pdf
 docs/defense/pptx_render/
-.zcode/
 
 # ── ZCode 会话目录 ──
+.zcode/
+
+# ── AI 编码助手本地会话（不入库）──
+.claude/
 
 # ── 个人材料 / 答辩材料（仅本地，不入库 2026-09-17）──
 .vs/
