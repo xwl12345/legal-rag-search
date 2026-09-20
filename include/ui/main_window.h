@@ -12,9 +12,15 @@ class QStackedWidget;
 class NavigationBar;
 class SearchPage;
 class LibraryPage;
+class HistoryPage;
 
 namespace rag {
 class Retriever;
+}
+
+namespace history {
+struct HistoryRecord;
+class HistoryStore;
 }
 
 /// 主窗口骨架：左侧导航 + 中央多页容器 + 底部状态栏。
@@ -35,6 +41,10 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+    /// 问答历史存储层（供 ui_smoke 构造历史记录做端到端断言；
+    /// 生产代码里本窗口之外的调用者不存在，页面一律靠构造参数注入）
+    history::HistoryStore* historyStore() const { return historyStore_.get(); }
+
 protected:
     /// 全局 Ctrl+滚轮：调整界面字体缩放
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -48,6 +58,8 @@ private slots:
     void onApiKeyStateChanged(bool ready);
     /// 文档库发生增删/清空后，同步状态栏与检索页的缓存
     void onLibraryChanged();
+    /// 检索问答页一个回合结束：落盘到问答历史库（T2）
+    void onAnswerRecorded(const history::HistoryRecord& record);
 
 private:
     void setupUi();
@@ -70,9 +82,13 @@ private:
     // ── 引擎实例（全应用唯一，由本窗口持有；页面只持裸指针借用）──
     std::unique_ptr<rag::Retriever> retriever_;
 
+    // ── 问答历史存储实例（T2：同样集中在本窗口创建，历史页只借用）──
+    std::unique_ptr<history::HistoryStore> historyStore_;
+
     // ── 业务页（占位页在 buildPages 里就地构造后交给 stack 托管）──
     SearchPage* searchPage_ = nullptr;
     LibraryPage* libraryPage_ = nullptr;
+    HistoryPage* historyPage_ = nullptr;
 
     // ── 状态栏 ──
     QLabel* statusEngine_ = nullptr;

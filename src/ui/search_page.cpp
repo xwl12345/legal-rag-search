@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDateTime>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -39,6 +40,9 @@ QString tendencyFilterText(document::ResultTendency tendency) {
     }
     return QString::fromUtf8(document::resultTendencyLabel(tendency));
 }
+
+/// 历史记录里来源片段的预览长度（原则：够回溯即可，不做全文副本）
+constexpr int kRecordSnippetChars = 160;
 
 }  // namespace
 
@@ -456,6 +460,12 @@ void SearchPage::onSearch() {
             aiAnswerArea_->setHtml(
                 QStringLiteral("<b style='color:#14213D'>AI 正在生成回答...</b><br><br>"));
 
+            // 本回合的累计状态复位：流式增量与失败提示都算"用户实际看到的内容"，
+            // 落库时以它为准（见 T2 任务卡的「带状态保存」决策）。
+            answerBuffer_.clear();
+            answerInterrupted_ = false;
+            answerNote_.clear();
+
             try {
                 generator_->generate(
                     query.toStdString(),
@@ -468,6 +478,7 @@ void SearchPage::onSearch() {
                             cleaned.remove(QStringLiteral("**"));
                             cleaned.replace(QRegularExpression(QStringLiteral("(^|\\n)#{1,6}\\s+")),
                                             QStringLiteral("\\1"));
+                            answerBuffer_ += cleaned;
                             aiAnswerArea_->moveCursor(QTextCursor::End);
                             aiAnswerArea_->insertPlainText(cleaned);
                             aiAnswerArea_->moveCursor(QTextCursor::End);
@@ -476,9 +487,12 @@ void SearchPage::onSearch() {
                 );
             } catch (const std::exception& e) {
                 const std::string errStr = e.what();
+                // 生成异常终止：已有 content 仍要留痕，但要标清楚"这不是完整回答"
+                answerInterrupted_ = true;
                 if (errStr.find("no response") != std::string::npos ||
                     errStr.find("timeout") != std::string::npos ||
                     errStr.find("connection") != std::string::npos) {
+                    answerNote_ = QStringLiteral("网络连接异常或超时，回答未完成");
                     appendAiAnswer(
                         QStringLiteral("\n\n✕ 无法连接到 DeepSeek API\n\n"
                                        "可能原因：\n"
@@ -487,10 +501,15 @@ void SearchPage::onSearch() {
                                        "• 请求超时，请稍后重试\n\n"
                                        "技术细节：") + QString::fromStdString(errStr));
                 } else {
+                    answerNote_ = QStringLiteral("AI 生成失败，回答未完成");
                     appendAiAnswer(QStringLiteral("\n\n✕ AI 生成失败：")
                                    + QString::fromStdString(errStr));
                 }
             }
+
+            // 本回合结束 → 是否落库由 finishAnswerRound 判定并广播；
+            // 本页只发信号，不碰任何存储层（页面解耦第 8 条）。
+            finishAnswerRound(query, filtered);
         } else if (filtered.empty() && !cachedResults_.empty()) {
             aiAnswerArea_->setHtml(
                 QStringLiteral("<p style='color:#B7791F; font-weight:600;'>⚠ 筛选后无结果</p>"
@@ -859,7 +878,56 @@ std::string SearchPage::buildMetadataSummary(const std::vector<rag::SearchResult
 }
 
 void SearchPage::appendAiAnswer(const QString& text) {
+    // 界面上显示什么，历史里就记什么 —— 失败提示语也要留痕，
+    // 否则复盘时看不到"这次为什么没答出来"。
+    answerBuffer_ += text;
     aiAnswerArea_->moveCursor(QTextCursor::End);
     aiAnswerArea_->insertPlainText(text);
     aiAnswerArea_->moveCursor(QTextCursor::End);
+}
+
+history::HistoryRecord SearchPage::buildHistoryRecord(
+    const QString& query,
+    const std::vector<rag::SearchResult>& sources,
+    const QString& answer,
+    bool interrupted,
+    const QString& note) const
+{
+    history::HistoryRecord record;
+    record.createdAt = QDateTime::currentDateTime()
+                           .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                           .toStdString();
+    record.query = query.toStdString();
+    record.answer = answer.toStdString();
+    record.interrupted = interrupted;
+    record.note = note.toStdString();
+
+    record.sources.reserve(sources.size());
+    for (const auto& hit : sources) {
+        history::SourceItem item;
+        item.docId = hit.docId;
+        item.chunkIndex = hit.chunkIndex;
+        item.finalScore = hit.finalScore;
+
+        QString snippet = QString::fromStdString(hit.content);
+        snippet.replace(QLatin1Char('\n'), QLatin1Char(' '));
+        snippet.replace(QLatin1Char('\r'), QLatin1Char(' '));
+        if (snippet.size() > kRecordSnippetChars) {
+            snippet = snippet.left(kRecordSnippetChars) + QStringLiteral("…");
+        }
+        item.snippet = snippet.toStdString();
+        record.sources.push_back(std::move(item));
+    }
+    return record;
+}
+
+void SearchPage::finishAnswerRound(const QString& query,
+                                   const std::vector<rag::SearchResult>& sources) {
+    // 空内容回合不入库：一个字都没吐出来的记录不含任何信息，
+    // 塞进历史只会稀释真正有价值的记录 —— 这条规则写进 T2 任务卡的决策点。
+    if (answerBuffer_.trimmed().isEmpty()) {
+        return;
+    }
+    emit answerFinished(
+        buildHistoryRecord(query, sources, answerBuffer_, answerInterrupted_, answerNote_));
 }

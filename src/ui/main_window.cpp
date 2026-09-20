@@ -16,6 +16,8 @@
 #include "ui/placeholder_page.h"
 #include "ui/search_page.h"
 #include "ui/library_page.h"
+#include "ui/history_page.h"
+#include "history/history_store.h"
 #include "rag/retriever.h"
 
 MainWindow::MainWindow(QWidget* parent)
@@ -68,6 +70,14 @@ void MainWindow::buildPages() {
     // 反过来文档库删掉的文档，检索页也不会再命中。
     retriever_ = std::make_unique<rag::Retriever>();
 
+    // ── 问答历史存储：同样集中在这里创建并打开，历史页只借用指针 ──
+    historyStore_ = std::make_unique<history::HistoryStore>();
+    if (!historyStore_->open()) {
+        // 打不开就如实说：历史页会显示"历史库不可用"（共 0 条也不会误导），
+        // 检索问答等其它功能不受影响 —— 不会因为落库失败连累核心链路。
+        qWarning("问答历史库打开失败：%s", historyStore_->lastError().c_str());
+    }
+
     // ── 第 1 页：检索问答 ──
     searchPage_ = new SearchPage(retriever_.get(), pageStack_);
     pageStack_->addWidget(searchPage_);
@@ -75,6 +85,9 @@ void MainWindow::buildPages() {
             this, &MainWindow::onEngineStatsChanged);
     connect(searchPage_, &SearchPage::apiKeyStateChanged,
             this, &MainWindow::onApiKeyStateChanged);
+    // 一个问答回合结束 → 本窗口负责落库（两页互不认识）
+    connect(searchPage_, &SearchPage::answerFinished,
+            this, &MainWindow::onAnswerRecorded);
 
     // ── 第 2 页：文档库（T1）──
     // 插件式接入：只注入引擎裸指针，删掉本页只需去掉这两行 + 删页面文件。
@@ -83,15 +96,13 @@ void MainWindow::buildPages() {
     connect(libraryPage_, &LibraryPage::libraryChanged,
             this, &MainWindow::onLibraryChanged);
 
-    // ── 第 3–5 页：占位（T2–T4 逐个替换）──
-    pageStack_->addWidget(new PlaceholderPage(
-        QStringLiteral("问答历史"),
-        QStringLiteral("全程可回溯的检索问答记录"),
-        QStringLiteral("T2"),
-        QStringLiteral("每次回答自动落库（问题 / 回答 / 命中来源 / 命中块数），"
-                       "支持关键词检索、详情查看、删除与 Markdown 导出。"),
-        pageStack_));
+    // ── 第 3 页：问答历史（T2）──
+    // 同样是插件式接入：只注入存储层指针，本页不知道回答是谁产生的，
+    // 检索页也不知道历史页存在。删掉本页 = 去掉这几行 + 删页面文件。
+    historyPage_ = new HistoryPage(historyStore_.get(), pageStack_);
+    pageStack_->addWidget(historyPage_);
 
+    // ── 第 4–5 页：占位（T4 / T3 逐个替换）──
     pageStack_->addWidget(new PlaceholderPage(
         QStringLiteral("检索质量分析"),
         QStringLiteral("同一查询 · 四路并列对比 · 可靠性验证"),
@@ -211,6 +222,27 @@ void MainWindow::onLibraryChanged() {
         searchPage_->invalidateIndexCache();
     }
     refreshEngineStats();
+}
+
+// ── 问答回合结束 → 落库（T2）──
+// 检索页只发信号、历史页只读列表，"谁把它写进库"由本窗口负责 ——
+// 页面之间因此不需要互相 include。
+void MainWindow::onAnswerRecorded(const history::HistoryRecord& record) {
+    if (!historyStore_ || !historyStore_->isOpen()) {
+        return;
+    }
+
+    const long long id = historyStore_->append(record);
+    if (id <= 0) {
+        // 落库失败不弹窗打断用户（回答已经显示在界面上了），
+        // 但必须留下可追查的痕迹。
+        qWarning("问答历史落库失败：%s", historyStore_->lastError().c_str());
+        return;
+    }
+
+    if (historyPage_) {
+        historyPage_->refresh();
+    }
 }
 
 // ── 关闭前落盘 ──

@@ -42,6 +42,7 @@
 #include "document/pdf_extractor.h"
 #include "rag/retriever.h"
 #include "rag/generator.h"
+#include "history/history_store.h"
 #include <algorithm>
 
 // ── 列出目录下 .txt 文件 ──
@@ -1368,6 +1369,270 @@ void test_persistence_corrupt_file() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 16: T2 —— 问答历史持久层（SQLite）
+// ═══════════════════════════════════════════════════════════════
+namespace {
+
+const std::string kTestHistoryDb = "build/test_history.db";
+
+/// 测试前清掉上一轮残留（Windows 上打开着的 sqlite 文件删不掉，故按"先删后用"处理）
+void removeTestHistoryDb() {
+    QFile::remove(QString::fromStdString(kTestHistoryDb));
+}
+
+/// 造一条来源齐全的样例记录（中文 + 小数 + 块号，覆盖最容易出错的编码与类型转换）
+history::HistoryRecord makeSampleRecord(const std::string& query, const std::string& answer,
+                                        bool interrupted = false) {
+    history::HistoryRecord record;
+    record.createdAt = "2026-09-21 10:30:00";
+    record.query = query;
+    record.answer = answer;
+    record.sources.push_back({"case_civil_001.txt", 2, 0.8765,
+                              "本院认为，借款人应当按照约定的期限返还借款……"});
+    record.sources.push_back({"case_civil_007.txt", 0, 0.5120,
+                              "被告辩称其已归还部分本金，应予扣除……"});
+    record.interrupted = interrupted;
+    record.note = interrupted ? "生成过程被中断（网络异常）" : "";
+    return record;
+}
+
+}  // namespace
+
+void test_history_append_and_get() {
+    TEST("问答历史：落库后读回，字段逐项一致");
+    removeTestHistoryDb();
+    CHECK(!QFile::exists(QString::fromStdString(kTestHistoryDb)));
+
+    const auto sample = makeSampleRecord(
+        "民间借贷纠纷中交付凭证如何认定？",
+        "应当结合转账记录、收条与当事人陈述综合认定，不能仅凭单一证据定案。");
+
+    {
+        history::HistoryStore store(kTestHistoryDb);
+        CHECK(store.open());
+        CHECK(store.isOpen());
+        CHECK_EQ(store.count(), 0);
+
+        const long long id = store.append(sample);
+        CHECK(id > 0);
+        CHECK_EQ(store.count(), 1);
+
+        history::HistoryRecord back;
+        CHECK(store.get(id, back));
+        CHECK_EQ(back.id, id);
+        CHECK(back.createdAt == sample.createdAt);
+        CHECK(back.query == sample.query);
+        CHECK(back.answer == sample.answer);
+        CHECK_EQ(static_cast<int>(back.sources.size()), 2);
+        CHECK_EQ(back.hitCount(), 2);
+
+        // 来源 JSON 往返：docId / 块号 / 得分 / 中文片段
+        CHECK(back.sources[0].docId == "case_civil_001.txt");
+        CHECK_EQ(back.sources[0].chunkIndex, 2);
+        CHECK_CLOSE(back.sources[0].finalScore, 0.8765, 1e-6);
+        CHECK(back.sources[0].snippet == sample.sources[0].snippet);
+        CHECK(back.sources[1].docId == "case_civil_007.txt");
+        CHECK_EQ(back.sources[1].chunkIndex, 0);
+        CHECK_CLOSE(back.sources[1].finalScore, 0.5120, 1e-6);
+
+        CHECK(!back.interrupted);
+        CHECK(back.note.empty());
+
+        // 不存在的 id 必须如实返回 false，而不是给条空记录
+        history::HistoryRecord none;
+        CHECK(!store.get(id + 1, none));
+    }
+
+    removeTestHistoryDb();
+    PASS();
+}
+
+void test_history_persistence_restart() {
+    TEST("问答历史：模拟重启（新实例）后记录仍在");
+    removeTestHistoryDb();
+
+    long long written = 0;
+    {
+        history::HistoryStore session1(kTestHistoryDb);
+        CHECK(session1.open());
+        written = session1.append(makeSampleRecord("房屋租赁合同纠纷如何处理？",
+                                                   "先看出租方是否履行适租义务，再看租金支付凭证。"));
+        CHECK(written > 0);
+    }
+
+    {
+        // 全新实例 = 重启后的第二次会话
+        history::HistoryStore session2(kTestHistoryDb);
+        CHECK(session2.open());
+        CHECK_EQ(session2.count(), 1);
+
+        const auto records = session2.recent();
+        CHECK_EQ(static_cast<int>(records.size()), 1);
+        CHECK(records[0].id == written);
+        CHECK(records[0].query == "房屋租赁合同纠纷如何处理？");
+        CHECK(records[0].answer == "先看出租方是否履行适租义务，再看租金支付凭证。");
+        CHECK_EQ(records[0].hitCount(), 2);
+        CHECK(records[0].sources[0].docId == "case_civil_001.txt");
+    }
+
+    removeTestHistoryDb();
+    PASS();
+}
+
+void test_history_keyword_search() {
+    TEST("问答历史：关键词命中问题与回答，通配符不误伤");
+    removeTestHistoryDb();
+
+    {
+        history::HistoryStore store(kTestHistoryDb);
+        CHECK(store.open());
+
+        store.append(makeSampleRecord("民间借贷里的交付凭证怎么认定", "回答 A"));
+        store.append(makeSampleRecord("劳动争议的诉讼时效是多久", "回答 B"));
+        // 关键词只出现在回答里 —— 证实"回答"字段也进索引
+        store.append(makeSampleRecord("再问一个问题", "这里提到交付凭证作为补充说明"));
+        CHECK_EQ(store.count(), 3);
+
+        CHECK_EQ(static_cast<int>(store.search("交付凭证").size()), 2);
+        CHECK_EQ(static_cast<int>(store.search("劳动争议").size()), 1);
+        CHECK_EQ(static_cast<int>(store.search("凭空捏造的词").size()), 0);
+
+        // 通配符必须被转义：输入 % 若当成通配符就会命中全部 3 条
+        CHECK_EQ(static_cast<int>(store.search("%").size()), 0);
+        CHECK_EQ(static_cast<int>(store.search("_").size()), 0);
+
+        // 空关键词退化为"列出全部"，不是返回空列表
+        CHECK_EQ(static_cast<int>(store.search("").size()), 3);
+    }
+
+    removeTestHistoryDb();
+    PASS();
+}
+
+void test_history_delete() {
+    TEST("问答历史：删除单条 / 重复删除幂等 / 清空");
+    removeTestHistoryDb();
+
+    {
+        history::HistoryStore store(kTestHistoryDb);
+        CHECK(store.open());
+
+        const long long first = store.append(makeSampleRecord("问题一", "回答一"));
+        const long long second = store.append(makeSampleRecord("问题二", "回答二"));
+        CHECK(first > 0);
+        CHECK(second > 0);
+        CHECK(second > first);
+        CHECK_EQ(store.count(), 2);
+
+        CHECK(store.remove(first));
+        CHECK_EQ(store.count(), 1);
+        history::HistoryRecord gone;
+        CHECK(!store.get(first, gone));
+
+        // 重复删除返回 false（幂等），不会把别的记录删掉
+        CHECK(!store.remove(first));
+        CHECK_EQ(store.count(), 1);
+        CHECK(store.search("问题二").size() == 1);
+
+        CHECK_EQ(store.removeAll(), 1);
+        CHECK_EQ(store.count(), 0);
+        CHECK_EQ(store.removeAll(), 0);   // 空表再清空也是幂等
+    }
+
+    removeTestHistoryDb();
+    PASS();
+}
+
+void test_history_interrupted_flag() {
+    TEST("问答历史：中断标记与原因短语往返一致");
+    removeTestHistoryDb();
+
+    {
+        history::HistoryStore store(kTestHistoryDb);
+        CHECK(store.open());
+
+        const long long okId = store.append(makeSampleRecord("正常收尾的提问", "完整回答", false));
+        const long long badId = store.append(makeSampleRecord("中途断掉的提问", "半截回答", true));
+        CHECK(okId > 0);
+        CHECK(badId > 0);
+
+        history::HistoryRecord okBack;
+        history::HistoryRecord badBack;
+        CHECK(store.get(okId, okBack));
+        CHECK(store.get(badId, badBack));
+
+        CHECK(!okBack.interrupted);
+        CHECK(okBack.note.empty());
+        CHECK(badBack.interrupted);
+        CHECK(badBack.note == "生成过程被中断（网络异常）");
+        CHECK(badBack.answer == "半截回答");
+    }
+
+    removeTestHistoryDb();
+    PASS();
+}
+
+void test_history_markdown_export() {
+    TEST("问答历史：Markdown 导出内容完整且中文 UTF-8 无损");
+    removeTestHistoryDb();
+
+    const std::string mdPath = "build/test_history_export.md";
+
+    {
+        history::HistoryStore store(kTestHistoryDb);
+        CHECK(store.open());
+        const long long id = store.append(makeSampleRecord(
+            "交通事故认定的依据是什么？", "依据现场勘验笔录、监控视频与鉴定意见综合认定。"));
+        CHECK(id > 0);
+
+        history::HistoryRecord record;
+        CHECK(store.get(id, record));
+
+        const std::string md = history::HistoryStore::toMarkdown(record);
+        CHECK(!md.empty());
+        CHECK(md.find("# 检索问答记录") == 0);
+        CHECK(md.find("提问时间：2026-09-21 10:30:00") != std::string::npos);
+        CHECK(md.find("命中块数：2") != std::string::npos);
+        CHECK(md.find("回答状态：完整") != std::string::npos);
+        CHECK(md.find("交通事故认定的依据是什么？") != std::string::npos);
+        CHECK(md.find("依据现场勘验笔录、监控视频与鉴定意见综合认定。") != std::string::npos);
+        CHECK(md.find("case_civil_001.txt") != std::string::npos);
+        CHECK(md.find("| 1 |") != std::string::npos);
+
+        // 多记录合并导出（历史页批量导出走这条）
+        auto all = store.recent();
+        CHECK_EQ(static_cast<int>(all.size()), 1);
+        const std::string bulk = history::HistoryStore::toMarkdownAll(all);
+        CHECK(bulk.find("共 1 条记录") != std::string::npos);
+
+        QString error;
+        CHECK(history::HistoryStore::writeMarkdownFile(QString::fromStdString(mdPath), md, &error));
+
+        // 写到一个不存在的目录 → 如实失败并给原因（不崩溃）
+        QString badCase;
+        CHECK(!history::HistoryStore::writeMarkdownFile(
+            QStringLiteral("build/no_such_dir_xyz/export.md"), md, &badCase));
+        CHECK(!badCase.isEmpty());
+    }
+
+    // 回读：BOM + UTF-8 往返后中文必须原样
+    QFile file(QString::fromStdString(mdPath));
+    CHECK(file.open(QIODevice::ReadOnly));
+    const QByteArray raw = file.readAll();
+    file.close();
+    CHECK(raw.size() > 3);
+    CHECK(raw.startsWith(QByteArray("\xEF\xBB\xBF")));   // UTF-8 BOM（防记事本乱码）
+
+    const std::string content(raw.constData() + 3, static_cast<size_t>(raw.size() - 3));
+    CHECK(content.find("交通事故认定的依据是什么？") != std::string::npos);
+    CHECK(content.find("case_civil_007.txt") != std::string::npos);
+
+    QFile::remove(QString::fromStdString(mdPath));
+    removeTestHistoryDb();
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -1461,6 +1726,14 @@ void run_all_tests() {
     test_persistence_ocr_flag_no_rerun();
     test_persistence_missing_file();
     test_persistence_corrupt_file();
+
+    std::cout << "\n── T2: 问答历史持久层 ──" << std::endl;
+    test_history_append_and_get();
+    test_history_persistence_restart();
+    test_history_keyword_search();
+    test_history_delete();
+    test_history_interrupted_flag();
+    test_history_markdown_export();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

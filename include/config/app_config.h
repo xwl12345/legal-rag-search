@@ -25,6 +25,10 @@ constexpr const char* DB_PATH = "rag_index.db";
 // 免去每次重开都要重新导入语料。
 constexpr const char* INDEX_FILE = "rag_index.dat";
 
+// ── 问答历史持久化（T2）──
+// SQLite 库文件，同样位于工作目录；与 rag_index.dat 同属运行期产物，不入库。
+constexpr const char* HISTORY_DB = "rag_history.db";
+
 // ── 请求超时 (秒) ──
 constexpr int HTTP_TIMEOUT = 30;
 

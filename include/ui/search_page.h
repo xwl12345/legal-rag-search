@@ -9,6 +9,7 @@
 #include <QComboBox>
 #include <memory>
 #include <vector>
+#include "history/history_record.h"
 #include "rag/retriever.h"
 #include "rag/generator.h"
 
@@ -47,6 +48,14 @@ signals:
     /// 生成服务可用性变化（是否配置了 API Key）
     void apiKeyStateChanged(bool ready);
 
+    /// 一个问答回合结束，携带完整记录交由上层持久化（T2）。
+    ///
+    /// 本页**自己不落库**：历史怎么存由 MainWindow 决定，符合"页面不互相引用"——
+    /// 检索页不知道历史页是否存在，历史页也不知道回答从哪来。
+    /// 落库规则见开发工作计划 T2：有内容就存（含中断的残卷，标 interrupted），
+    /// 一个字都没吐出来的回合不入库。
+    void answerFinished(const history::HistoryRecord& record);
+
 private slots:
     void onSearch();
     void onPickImportFiles();
@@ -78,6 +87,23 @@ private:
 
     /// 向主窗口广播当前索引规模
     void emitEngineStats();
+
+    /// 把本次回合组装成一条历史记录（问题 / 回答 / 命中来源 / 是否中断）
+    history::HistoryRecord buildHistoryRecord(
+        const QString& query,
+        const std::vector<rag::SearchResult>& sources,
+        const QString& answer,
+        bool interrupted,
+        const QString& note) const;
+
+    /// 回答流收尾的统一出口：决定是否落库并发出 answerFinished
+    void finishAnswerRound(const QString& query,
+                           const std::vector<rag::SearchResult>& sources);
+
+    // ── 本回合的回答累计状态（流式增量 + 失败提示都算"用户看到的内容"）──
+    QString answerBuffer_;
+    bool answerInterrupted_ = false;
+    QString answerNote_;
 
     // ── 核心引擎（retriever_ 非拥有；仅独立测试时才由本页自持）──
     rag::Retriever* retriever_ = nullptr;

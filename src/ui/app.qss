@@ -298,18 +298,22 @@ QTableWidget#libraryTable {
     color: #1F2937;
     gridline-color: #F0F3F7;
 }
-QTableWidget#libraryTable::item {
+QTableWidget#libraryTable::item,
+QTableWidget#historyTable::item {
     padding: 6px 8px;
     border-bottom: 1px solid #F0F3F7;
 }
-QTableWidget#libraryTable::item:hover {
+QTableWidget#libraryTable::item:hover,
+QTableWidget#historyTable::item:hover {
     background: #FDF6EC;
 }
-QTableWidget#libraryTable::item:selected {
+QTableWidget#libraryTable::item:selected,
+QTableWidget#historyTable::item:selected {
     background: #FDF6EC;
     color: #14213D;
 }
-QTableWidget#libraryTable QHeaderView::section {
+QTableWidget#libraryTable QHeaderView::section,
+QTableWidget#historyTable QHeaderView::section {
     background: #FAFBFD;
     border: none;
     border-bottom: 1px solid #E2E7EE;
