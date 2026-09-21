@@ -330,13 +330,17 @@ int runPersistenceE2E(const QString& corpusDir, const QString& outDir) {
 /// T2 问答历史 E2E：真实检索 + 回答收尾 → 自动落库 → 列表 / 关键词 / 删除 / 导出 → 重启仍在
 ///
 /// 说明：本组验证走的是 MainWindow 默认路径（config::HISTORY_DB，即工作目录下的
-/// rag_history.db），跑完删掉，不与用户手工留下的数据混淆。
+/// rag_history.db），跑完清空记录，不与用户手工留下的数据混淆。
 /// 回答文本由 SearchPage::simulateAnswer 给出（本机通常没有 DEEPSEEK_API_KEY），
 /// 但"命中来源"是真实检索出来的文本块 —— 详见该函数头部的说明。
-int runHistoryE2E(const QString& corpusDir, const QString& outDir,
-                  bool deleteDbAfter = true) {
+///
+/// ⚠️ 清状态一律走 SQL 层（removeAll），**不要试图 QFile::remove 库文件**：
+/// 本进程里 main() 的主窗口全程存活，SQLite 连接一直开着，
+/// Windows 不允许删掉被打开的文件 —— 删除必然失败，
+/// 于是上一轮残留的记录会被下一轮读进来，整套断言级联假失败。
+/// 用行级清理则不依赖文件系统状态，连跑多少次都从 0 条起步。
+int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
     const QString dbPath = QStringLiteral("rag_history.db");
-    QFile::remove(dbPath);   // 从空历史起步，保证可复现
 
     const QString exportPath = outDir + QStringLiteral("/11-history-export.md");
     QFile::remove(exportPath);
@@ -373,7 +377,13 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir,
 
         check(store->isOpen(), QStringLiteral("问答历史库打开成功"),
               QString::fromStdString(store->lastError()));
-        check(store->count() == 0, QStringLiteral("起始历史为空"));
+
+        // 从空历史起步：清前现状记进详情里，将来若失败一眼能看出是残留还是写入异常
+        const long long beforeCount = store->count();
+        store->removeAll();
+        QApplication::processEvents();
+        check(store->count() == 0, QStringLiteral("起始历史为空（已清空历史数据）"),
+              QStringLiteral("清理前 %1 条 → 清理后 %2 条").arg(beforeCount).arg(store->count()));
 
         // 真实的一半：导入 + 检索，命中结果作为落库来源
         searchPage->importPaths(corpus);
@@ -538,8 +548,13 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir,
         QApplication::processEvents();
     }
 
-    if (deleteDbAfter) {
-        QFile::remove(dbPath);
+    // 收尾：清空本轮产生的记录，别在用户自己的历史库里留测试数据。
+    // 同样只用 SQL 清理（会话 2 的窗口析构后新建一条短连接即可），不删文件。
+    {
+        history::HistoryStore cleanup(dbPath.toStdString());
+        if (cleanup.open()) {
+            cleanup.removeAll();
+        }
     }
     return g_failures;
 }
@@ -617,10 +632,10 @@ int main(int argc, char* argv[]) {
         qInfo().noquote() << QStringLiteral("── 索引持久化 E2E（落盘 → 重启 → 自动恢复）──");
         runPersistenceE2E(parser.value(e2eOption), outDirPath);
 
-        // 历史库的删除必须放在下面这个 window 析构之后 ——
-        // Windows 上 SQLite 连接还开着时删不掉文件，会污染下一轮运行。
+        // 历史库不能用删文件的方式清理（本进程主窗口的连接一直开着），
+        // runHistoryE2E 内部改为行级清理，跑完不留测试数据。
         qInfo().noquote() << QStringLiteral("── 问答历史 E2E（落库 → 列表 → 关键词 → 导出 → 重启仍在）──");
-        runHistoryE2E(parser.value(e2eOption), outDirPath, /*deleteDbAfter=*/false);
+        runHistoryE2E(parser.value(e2eOption), outDirPath);
     }
 
     qInfo().noquote() << (g_failures == 0
@@ -629,10 +644,5 @@ int main(int argc, char* argv[]) {
 
     window.close();
     QApplication::processEvents();
-
-    // 主窗口已析构、SQLite 连接已归还，此刻才能真的删掉历史库
-    if (parser.isSet(e2eOption)) {
-        QFile::remove(QStringLiteral("rag_history.db"));
-    }
     return g_failures == 0 ? 0 : 1;
 }
