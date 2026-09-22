@@ -180,6 +180,33 @@ objdump -p build/rag_search_engine.exe | grep "DLL Name"
 
 ---
 
+### 11. 双击启动弹「无法定位程序输入点 ??4QVariant@@…」（T2 后，2026-09-22）
+
+**现象**：
+```
+无法定位程序输入点 ??4QVariant@@QEAAAEAV0@AEBV0@@Z
+于动态链接库 D:\QT5.15.2\5.15.2\msvc2015_64\bin\Qt5Sql.dll 上。
+```
+
+**根因**：三件事叠加——
+1. exe 是 **MinGW** 构建；T2 接上 SQLite 后新增了 `Qt5Sql.dll` 依赖（T0/T1 不用它，所以这颗雷埋了很久）；
+2. build 目录早期只手动拷过 `Qt5Core/Gui/Widgets/Network` 四个 Qt DLL，**唯独没有 Qt5Sql.dll**；
+3. Windows 找 DLL 的顺序是「exe 所在目录 → 系统 → PATH」。exe 目录没有，PATH 命中了
+   **MSVC 版**的 `Qt5Sql.dll`——MSVC 的符号修饰名（`??4QVariant@@…`）和 MinGW 期望的
+   `_Z…` 名完全对不上，加载器绑定失败 → 弹「无法定位程序输入点」。
+
+**修复**（CMakeLists.txt 末尾）：构建后自动把 `Qt5Core/Gui/Widgets/Network/Sql` 五个
+MinGW 版 Qt DLL + `libgcc_s_seh-1/libstdc++-6/libwinpthread-1` 复制到 exe 同目录
+（exe 目录命中后 PATH 里是什么就无关紧要了），三个 target 都覆盖。
+重新 `mingw32-make -C build` 即自动补齐，无需手动拷。
+
+**通用教训**：本机装了多个 Qt 套件（mingw81_64 / msvc2015_64 / …）时，
+**凡是 MinGW 构建都别依赖 PATH 找 Qt DLL**——PATH 里混着哪个套件不受你控制。
+判断是不是这类问题最快的方法：看弹窗里的 DLL 路径属于哪个套件目录，
+再 `objdump -p <exe> | grep "DLL Name"` 对照「build 目录里实际有哪个」。
+
+---
+
 ## 逻辑问题
 
 ### 11. 文档导入时重复分块

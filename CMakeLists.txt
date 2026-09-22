@@ -319,3 +319,34 @@ if(EXISTS "${QT_SQLITE_PLUGIN}")
 else()
     message(WARNING "未找到 SQLite 驱动插件（${QT_SQLITE_PLUGIN}），问答历史落库将报 Driver not loaded")
 endif()
+
+# ── Qt 运行 DLL 部署（T2 补）──
+# exe 目录里的 DLL 优先于 PATH 命中。build 目录原本只手动拷过 Core/Gui/Widgets/Network，
+# T2 接上 Qt5::Sql 后加载器沿 PATH 找 Qt5Sql.dll，会命中 msvc2015_64\bin 下的 MSVC 版——
+# 修饰名不兼容 MinGW exe，弹「无法定位程序输入点 ??4QVariant@@…」。自动部署后与 PATH 无关。
+if(WIN32 AND NOT Qt6_FOUND)
+    set(QT_BIN_DIR "${QT_INSTALL_PREFIX}/bin")
+    get_filename_component(MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(QT_RUNTIME_DLLS
+        "${QT_BIN_DIR}/Qt5Core.dll"
+        "${QT_BIN_DIR}/Qt5Gui.dll"
+        "${QT_BIN_DIR}/Qt5Widgets.dll"
+        "${QT_BIN_DIR}/Qt5Network.dll"
+        "${QT_BIN_DIR}/Qt5Sql.dll"
+        "${MINGW_BIN_DIR}/libgcc_s_seh-1.dll"
+        "${MINGW_BIN_DIR}/libstdc++-6.dll"
+        "${MINGW_BIN_DIR}/libwinpthread-1.dll")
+    foreach(_dll ${QT_RUNTIME_DLLS})
+        if(EXISTS "${_dll}")
+            get_filename_component(_dll_name "${_dll}" NAME)
+            foreach(_target ${PROJECT_NAME} run_tests ui_smoke)
+                add_custom_command(TARGET ${_target} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${_dll}" "$<TARGET_FILE_DIR:${_target}>/${_dll_name}")
+            endforeach()
+        else()
+            message(WARNING "Qt 运行库缺失（${_dll}），双击启动可能报「无法定位程序输入点」")
+        endif()
+    endforeach()
+    message(STATUS "Qt runtime DLLs deploy from: ${QT_BIN_DIR}")
+endif()
