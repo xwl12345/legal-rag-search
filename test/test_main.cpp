@@ -43,6 +43,7 @@
 #include "rag/retriever.h"
 #include "rag/generator.h"
 #include "history/history_store.h"
+#include "config/app_settings.h"
 #include <algorithm>
 
 // ── 列出目录下 .txt 文件 ──
@@ -1633,6 +1634,210 @@ void test_history_markdown_export() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 17: T3 —— 检索参数配置中心
+// ═══════════════════════════════════════════════════════════════
+namespace {
+
+const std::string kTestSettingsFile = "build/test_settings.json";
+
+void removeTestSettingsFile() {
+    QFile::remove(QString::fromStdString(kTestSettingsFile));
+}
+
+/// 配置读写往返：save → load 全字段逐项一致
+void test_settings_roundtrip() {
+    TEST("检索配置：save → load 全字段往返一致");
+    removeTestSettingsFile();
+
+    config::AppSettings out;
+    CHECK(!config::AppSettings::load(kTestSettingsFile, out));   // 无文件 → 默认值 + false
+    CHECK_CLOSE(out.k1, 1.5, 1e-9);   // 默认值兜底，不读到 0
+    CHECK_CLOSE(out.b, 0.75, 1e-9);
+    CHECK(!out.embeddingApiKey.empty() == false);
+
+    config::AppSettings data;
+    data.k1 = 2.25;
+    data.b = 0.6;
+    data.bm25Weight = 0.7;
+    data.vectorWeight = 0.3;
+    data.topK = 33;
+    data.chunkSize = 256;
+    data.chunkOverlap = 32;
+    data.temperature = 0.85;
+    data.embeddingBaseUrl = "https://api.siliconflow.cn";
+    data.embeddingModel = "bge-large-zh-v1.5";
+    data.embeddingApiKey = "sk-test-1234567890abcdef";
+    std::string error;
+    CHECK(config::AppSettings::save(kTestSettingsFile, data, &error));
+
+    config::AppSettings loaded;
+    CHECK(config::AppSettings::load(kTestSettingsFile, loaded));
+    CHECK_CLOSE(loaded.k1, 2.25, 1e-9);
+    CHECK_CLOSE(loaded.b, 0.6, 1e-9);
+    CHECK_CLOSE(loaded.bm25Weight, 0.7, 1e-9);
+    CHECK_CLOSE(loaded.vectorWeight, 0.3, 1e-9);
+    CHECK_EQ(loaded.topK, 33);
+    CHECK_EQ(loaded.chunkSize, 256);
+    CHECK_EQ(loaded.chunkOverlap, 32);
+    CHECK_CLOSE(loaded.temperature, 0.85, 1e-9);
+    CHECK(loaded.embeddingBaseUrl == "https://api.siliconflow.cn");
+    CHECK(loaded.embeddingModel == "bge-large-zh-v1.5");
+    CHECK(loaded.embeddingApiKey == "sk-test-1234567890abcdef");
+
+    removeTestSettingsFile();
+    PASS();
+}
+
+/// 字段缺失 / 类型不对：缺失字段回落默认，其余字段照常生效，不崩溃
+void test_settings_missing_fields_fallback() {
+    TEST("检索配置：字段缺失/类型不对回落默认，其余照常生效");
+    removeTestSettingsFile();
+
+    // 只写两个字段（手改配置的典型场景）
+    {
+        QFile file(QString::fromStdString(kTestSettingsFile));
+        CHECK(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write("{\"k1\": 2.0, \"topK\": 40}");
+        file.close();
+    }
+
+    config::AppSettings out;
+    CHECK(config::AppSettings::load(kTestSettingsFile, out));
+    CHECK_CLOSE(out.k1, 2.0, 1e-9);        // 文件里的值生效
+    CHECK_EQ(out.topK, 40);
+    CHECK_CLOSE(out.b, 0.75, 1e-9);        // 缺失字段回落默认
+    CHECK_CLOSE(out.bm25Weight, 0.4, 1e-9);
+    CHECK_CLOSE(out.vectorWeight, 0.6, 1e-9);
+    CHECK_EQ(out.chunkSize, 512);
+    CHECK_EQ(out.chunkOverlap, 50);
+    CHECK_CLOSE(out.temperature, 0.3, 1e-9);
+    CHECK(out.embeddingModel == "text-embedding-3-small");
+
+    // 类型不对（topK 写成字符串）→ 该字段回落默认，其余照常
+    {
+        QFile file(QString::fromStdString(kTestSettingsFile));
+        CHECK(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write("{\"k1\": 2.0, \"topK\": \"四十\"}");
+        file.close();
+    }
+    config::AppSettings out2;
+    CHECK(config::AppSettings::load(kTestSettingsFile, out2));
+    CHECK_CLOSE(out2.k1, 2.0, 1e-9);
+    CHECK_EQ(out2.topK, 20);   // 类型不对 → 默认 20
+
+    removeTestSettingsFile();
+    PASS();
+}
+
+/// JSON 被改坏：整体回落默认值，load 返回 false，绝不崩溃
+void test_settings_corrupt_file() {
+    TEST("检索配置：JSON 损坏整体回落默认值，不崩溃");
+    removeTestSettingsFile();
+
+    {
+        QFile file(QString::fromStdString(kTestSettingsFile));
+        CHECK(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write("{ k1 = 这是坏掉的 JSON ！！！ [[[");
+        file.close();
+    }
+
+    config::AppSettings out;
+    const bool ok = config::AppSettings::load(kTestSettingsFile, out);
+    CHECK(!ok);
+    CHECK_CLOSE(out.k1, 1.5, 1e-9);        // 整体回落默认
+    CHECK_CLOSE(out.b, 0.75, 1e-9);
+    CHECK_EQ(out.topK, 20);
+    CHECK(out.embeddingBaseUrl == "https://api.deepseek.com");
+
+    removeTestSettingsFile();
+    PASS();
+}
+
+/// 卡面验收项：改 k1 后同一查询得分可观测变化（引擎热更新，不重建实例）
+void test_engine_hot_update_k1() {
+    TEST("引擎热更新：改 k1/b 后同一查询得分可观测变化（不重建实例）");
+    removeTestSettingsFile();
+
+    rag::Retriever retriever;
+    retriever.addText(
+        "本院认为，借款人应当按照约定的期限返还借款。"
+        "被告向原告借款并出具借条，双方形成民间借贷法律关系。"
+        "被告未按约定归还全部借款，已构成违约，应承担继续履行的违约责任。"
+        "判决如下：被告于本判决生效之日起十日内向原告偿还借款本金四十万元及利息。",
+        "hot_k1_case.txt");
+
+    const std::string query = "民间借贷 返还借款 违约责任";
+    const auto before = retriever.search(query, 5);
+    CHECK(!before.empty());
+    CHECK(before.front().docId == "hot_k1_case.txt");
+
+    // 热更新：k1 从 1.5 → 4.0，b 0.75 → 0.3，同一实例直接生效
+    retriever.setSearchParams(4.0, 0.3, 0.4, 0.6);
+    CHECK_CLOSE(retriever.k1(), 4.0, 1e-9);
+    CHECK_CLOSE(retriever.b(), 0.3, 1e-9);
+
+    const auto after = retriever.search(query, 5);
+    CHECK(!after.empty());
+    CHECK(after.front().docId == "hot_k1_case.txt");
+    // BM25 分数公式随 k1/b 变化，finalScore 必须可观测地不同
+    CHECK(std::fabs(before.front().finalScore - after.front().finalScore) > 1e-6);
+
+    // 融合权重同样热更新生效：权重换成 0.9/0.1（向量路未配置时回退 BM25，
+    // finalScore 等于 bm25 分数，此分支只验证 setter 数值被记住）
+    retriever.setSearchParams(1.5, 0.75, 0.9, 0.1);
+    CHECK_CLOSE(retriever.bm25Weight(), 0.9, 1e-9);
+    CHECK_CLOSE(retriever.vectorWeight(), 0.1, 1e-9);
+
+    PASS();
+}
+
+/// 分块参数语义：仅对之后导入的文档生效（卡面决策点 ①）
+void test_chunk_params_new_docs_only() {
+    TEST("分块参数：仅对之后导入的文档生效，既有索引不重切");
+    removeTestSettingsFile();
+
+    rag::Retriever retriever;
+    // 先按默认 512/50 导入一篇长文
+    std::string longText;
+    for (int i = 0; i < 40; ++i) {
+        longText += "本院认为，民事主体从事民事活动，应当遵循诚信原则，秉持诚实，恪守承诺。";
+    }
+    retriever.addText(longText, "chunk_default.txt");
+    const int defaultChunks = retriever.chunkCount();
+    CHECK(defaultChunks >= 4);   // 40 句 × 32 字 ≈ 1280 字 → 默认 512 切成 ≥3 块
+
+    // 改小分块 → 只影响之后导入的文档；已建的块不会重新切
+    retriever.setChunkParams(128, 16);
+    CHECK_EQ(retriever.chunkCount(), defaultChunks);   // 既有索引纹丝不动
+    retriever.addText(longText, "chunk_small.txt");
+
+    // 新文档的每一块都不得超过新块长（UTF-8 边界回退只会更短）
+    bool sawNewDoc = false;
+    for (const auto& info : retriever.documentInfos()) {
+        if (info.docId != "chunk_small.txt") continue;
+        sawNewDoc = true;
+        std::string chunkOut;
+        for (int i = 0; i < info.chunkCount; ++i) {
+            CHECK(retriever.getChunk(info.docId, i, chunkOut));
+            CHECK(static_cast<int>(chunkOut.size()) <= 128);
+        }
+    }
+    CHECK(sawNewDoc);
+
+    // 新文档块数应明显多于旧文档（同样的文本）
+    int smallDocChunks = -1, defaultDocChunks = -1;
+    for (const auto& info : retriever.documentInfos()) {
+        if (info.docId == "chunk_small.txt") smallDocChunks = info.chunkCount;
+        if (info.docId == "chunk_default.txt") defaultDocChunks = info.chunkCount;
+    }
+    CHECK(smallDocChunks > defaultDocChunks);
+
+    PASS();
+}
+
+}  // namespace
+
+// ═══════════════════════════════════════════════════════════════
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -1734,6 +1939,13 @@ void run_all_tests() {
     test_history_delete();
     test_history_interrupted_flag();
     test_history_markdown_export();
+
+    std::cout << "\n── T3: 检索参数配置中心 ──" << std::endl;
+    test_settings_roundtrip();
+    test_settings_missing_fields_fallback();
+    test_settings_corrupt_file();
+    test_engine_hot_update_k1();
+    test_chunk_params_new_docs_only();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

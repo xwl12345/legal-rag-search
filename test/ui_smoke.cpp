@@ -18,6 +18,7 @@
 #include <QComboBox>
 #include <QDebug>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -28,16 +29,22 @@
 #include <QMouseEvent>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTableWidget>
 #include <QTextEdit>
 #include <QTimer>
 
+#include <cmath>
+
 #include "ui/main_window.h"
 #include "ui/search_page.h"
 #include "ui/library_page.h"
 #include "ui/history_page.h"
+#include "ui/settings_page.h"
+#include "config/app_config.h"
+#include "config/app_settings.h"
 #include "history/history_store.h"
 
 namespace {
@@ -561,6 +568,159 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
 
 }  // namespace
 
+// ═══════════════════════════════════════════════════════════════
+// T3 设置 E2E：改参数 → 保存 → 检索得分可观测变化 → 重启保留 → 恢复默认
+// ═══════════════════════════════════════════════════════════════
+namespace {
+
+/// 解析结果列表第一项里的「相关度: X.XX」（displayResults 以 2 位小数固定格式输出）
+double firstRelevance(QListWidget* resultList, QString* debugText = nullptr) {
+    if (debugText) {
+        *debugText = QStringLiteral("count=%1")
+                         .arg(resultList ? resultList->count() : -1);
+        if (resultList && resultList->count() > 0) {
+            *debugText += QStringLiteral(" 首项[%1]")
+                              .arg(resultList->item(0)->text().left(60));
+        }
+    }
+    if (!resultList || resultList->count() == 0) return -1.0;
+    const QString text = resultList->item(0)->text();
+    const int pos = text.indexOf(QStringLiteral("相关度: "));
+    if (pos < 0) return -1.0;
+    // QString::toDouble 要求整串均为数字，先截出 "10.96" 这一段
+    const QString token = text.mid(pos + 5).split(QLatin1Char(' '),
+                                                  Qt::SkipEmptyParts).value(0);
+    bool ok = false;
+    const double value = token.toDouble(&ok);
+    return ok ? value : -1.0;
+}
+
+int runSettingsE2E(const QString& corpusDir) {
+    const QString settingsPath = QStringLiteral("rag_settings.json");
+    QFile::remove(settingsPath);   // 从默认配置起步（文件无进程占用，可安全删除）
+
+    const QStringList corpus = collectCorpus(corpusDir);
+    if (corpus.isEmpty()) {
+        check(false, QStringLiteral("语料目录可访问"));
+        return g_failures;
+    }
+
+    // ── 会话 1：默认起步 → 改 k1 → 保存 → 得分可观测变化 ──
+    double scoreBefore = -1.0, scoreAfter = -1.0;
+    {
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        SearchPage* searchPage = window.findChild<SearchPage*>();
+        SettingsPage* settingsPage = window.findChild<SettingsPage*>();
+        QDoubleSpinBox* k1Spin = window.findChild<QDoubleSpinBox*>("settingsK1");
+        QListWidget* resultList = window.findChild<QListWidget*>("resultList");
+        QLineEdit* searchInput = window.findChild<QLineEdit*>("searchInput");
+        QPushButton* searchBtn = window.findChild<QPushButton*>("searchBtn");
+        QPushButton* saveBtn = window.findChild<QPushButton*>("settingsSaveBtn");
+        QListWidget* navList = window.findChild<QListWidget*>("navList");
+
+        if (!searchPage || !settingsPage || !k1Spin || !resultList || !searchInput
+            || !searchBtn || !saveBtn || !navList) {
+            check(false, QStringLiteral("设置页控件齐全"), QStringLiteral("存在控件未找到"));
+            return g_failures;
+        }
+
+        check(!QFile::exists(settingsPath), QStringLiteral("起点：无配置文件（默认值起步）"));
+        check(std::fabs(k1Spin->value() - 1.5) < 1e-9,
+              QStringLiteral("设置页表单回填默认 k1=1.5"),
+              QStringLiteral("实际 %1").arg(k1Spin->value()));
+
+        // 首次检索（默认 k1=1.5）
+        searchPage->importPaths(corpus);
+        QApplication::processEvents();
+        searchInput->setText(QStringLiteral("民间借贷 交付凭证"));
+        searchBtn->click();
+        pump(2500);
+        QString dbg;
+        scoreBefore = firstRelevance(resultList, &dbg);
+        check(scoreBefore > 0, QStringLiteral("默认参数下检索有得分"),
+              QStringLiteral("相关度 %1 (%2)").arg(scoreBefore).arg(dbg));
+
+        // 改 k1 1.5 → 4.0 并保存（走完整链路：写盘 → 信号 → 引擎热更新）
+        k1Spin->setValue(4.0);
+        clickNavItem(navList, 4);
+        QApplication::processEvents();
+        saveBtn->click();
+        QApplication::processEvents();
+
+        check(QFile::exists(settingsPath), QStringLiteral("保存后配置文件已落盘"));
+        {
+            QFile file(settingsPath);
+            file.open(QIODevice::ReadOnly);
+            const QByteArray raw = file.readAll();
+            file.close();
+            check(raw.contains("\"k1\": 4"), QStringLiteral("配置文件内容 k1=4"),
+                  QString::fromUtf8(raw.left(40)));
+        }
+
+        // 同一查询再检索：k1 变了，相关度必须可观测地不同
+        clickNavItem(navList, 0);
+        QApplication::processEvents();
+        searchBtn->click();
+        pump(2500);
+        scoreAfter = firstRelevance(resultList);
+        check(scoreAfter > 0 && std::fabs(scoreBefore - scoreAfter) > 0.005,
+              QStringLiteral("改 k1 后同查询得分可观测变化"),
+              QStringLiteral("%1 → %2").arg(scoreBefore).arg(scoreAfter));
+
+        // 截图留证（T3 新证据）
+        clickNavItem(navList, 4);
+        QApplication::processEvents();
+        window.grab().save(QStringLiteral("docs/screenshots/13-settings-modified.png"));
+    }
+
+    // ── 会话 2：重启 → 配置保留 → 恢复默认 ──
+    {
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        QDoubleSpinBox* k1Spin = window.findChild<QDoubleSpinBox*>("settingsK1");
+        SettingsPage* settingsPage = window.findChild<SettingsPage*>();
+        QPushButton* saveBtn = window.findChild<QPushButton*>("settingsSaveBtn");
+        QPushButton* defaultsBtn = window.findChild<QPushButton*>("settingsDefaultsBtn");
+        QListWidget* navList = window.findChild<QListWidget*>("navList");
+
+        if (!k1Spin || !settingsPage || !saveBtn || !defaultsBtn || !navList) {
+            check(false, QStringLiteral("会话 2 设置页控件齐全"));
+            return g_failures;
+        }
+
+        check(std::fabs(k1Spin->value() - 4.0) < 1e-9,
+              QStringLiteral("重启程序后配置保留（表单 k1=4.0）"),
+              QStringLiteral("实际 %1").arg(k1Spin->value()));
+
+        // 恢复默认值 → 保存 → 文件回到 1.5（防误触设计：先回填再保存）
+        clickNavItem(navList, 4);
+        QApplication::processEvents();
+        defaultsBtn->click();
+        QApplication::processEvents();
+        saveBtn->click();
+        QApplication::processEvents();
+
+        config::AppSettings reloaded;
+        config::AppSettings::load(config::SETTINGS_FILE, reloaded);
+        check(std::fabs(reloaded.k1 - 1.5) < 1e-9 && reloaded.topK == 20,
+              QStringLiteral("恢复默认并保存后配置回到 k1=1.5 / TopK=20"),
+              QStringLiteral("k1=%1 topK=%2").arg(reloaded.k1).arg(reloaded.topK));
+    }
+
+    // 收尾：不留配置文件，避免污染后续轮次与用户目录
+    QFile::remove(settingsPath);
+    return g_failures;
+}
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
 
@@ -636,6 +796,9 @@ int main(int argc, char* argv[]) {
         // runHistoryE2E 内部改为行级清理，跑完不留测试数据。
         qInfo().noquote() << QStringLiteral("── 问答历史 E2E（落库 → 列表 → 关键词 → 导出 → 重启仍在）──");
         runHistoryE2E(parser.value(e2eOption), outDirPath);
+
+        qInfo().noquote() << QStringLiteral("── 设置 E2E（改参数 → 保存 → 得分变化 → 重启保留 → 恢复默认）──");
+        runSettingsE2E(parser.value(e2eOption));
     }
 
     qInfo().noquote() << (g_failures == 0

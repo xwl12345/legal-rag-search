@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 
+#include <QMetaType>
+
 namespace config {
 
 /// 检索参数配置（T3 配置中心）
@@ -58,3 +60,5 @@ struct AppSettings {
 };
 
 } // namespace config
+
+Q_DECLARE_METATYPE(config::AppSettings)
