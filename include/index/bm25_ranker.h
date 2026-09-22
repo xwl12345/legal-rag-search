@@ -20,6 +20,11 @@ public:
     /// b:  文档长度归一化参数 (默认 0.75)
     BM25Ranker(double k1 = 1.5, double b = 0.75);
 
+    /// 运行时热更新参数（T3 配置中心）：查询期参数，改后立即生效、无需重建索引
+    void setParams(double k1, double b) { k1_ = k1; b_ = b; }
+    double k1() const { return k1_; }
+    double b() const { return b_; }
+
     /// 计算查询与所有文档的 BM25 得分，返回 TopK
     std::vector<RankedResult> search(const std::vector<std::string>& queryTerms,
                                      const InvertedIndex& index,

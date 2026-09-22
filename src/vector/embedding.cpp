@@ -29,7 +29,7 @@ std::vector<std::vector<double>> EmbeddingService::embedBatch(
 
     // Build JSON request body
     QJsonObject body;
-    body["model"] = QString::fromStdString("text-embedding-3-small");
+    body["model"] = QString::fromStdString(model_);
 
     QJsonArray inputs;
     for (const auto& t : texts) {
@@ -41,7 +41,8 @@ std::vector<std::vector<double>> EmbeddingService::embedBatch(
     QByteArray data = doc.toJson(QJsonDocument::Compact);
 
     // Setup HTTPS request
-    QNetworkRequest request(QUrl("https://api.deepseek.com/v1/embeddings"));
+    QNetworkRequest request(
+        QUrl(QString::fromStdString(apiBaseUrl_) + QStringLiteral("/v1/embeddings")));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setRawHeader("Authorization", ("Bearer " + apiKey_).c_str());
     // 30 秒无数据传输视为失败，避免网络异常时批量嵌入无限等待

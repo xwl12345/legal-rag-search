@@ -72,6 +72,7 @@ set(SOURCES
     src/main.cpp
     ${SRC_ENGINE}
     ${SRC_STORE}
+    ${SRC_CONFIG}
     ${SRC_UI}
 )
 
@@ -131,7 +132,7 @@ if(WIN32)
 endif()
 
 # ── Executable ──
-add_executable(${PROJECT_NAME} src/main.cpp ${SRC_ENGINE} ${SRC_STORE} ${SRC_UI} ${HEADERS} ${RESOURCES})
+add_executable(${PROJECT_NAME} src/main.cpp ${SRC_ENGINE} ${SRC_STORE} ${SRC_CONFIG} ${SRC_UI} ${HEADERS} ${RESOURCES})
 
 # OCR helper is deployed next to the executable so the PDF fallback works
 # outside the source-tree working directory.
@@ -237,6 +238,7 @@ set(TEST_SOURCES
     src/rag/retriever.cpp
     src/rag/generator.cpp
     ${SRC_STORE}
+    ${SRC_CONFIG}
 )
 
 add_executable(run_tests ${TEST_SOURCES})

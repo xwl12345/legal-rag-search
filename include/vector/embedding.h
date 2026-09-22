@@ -11,6 +11,15 @@ public:
     /// 设置 API Key
     void setApiKey(const std::string& key) { apiKey_ = key; }
 
+    /// 运行时配置服务地址与模型名（T3 配置中心，T4 消费）。
+    /// baseUrl 形如 https://api.deepseek.com（不带 /v1/embeddings 尾巴）。
+    void setEndpoint(const std::string& baseUrl, const std::string& model) {
+        if (!baseUrl.empty()) apiBaseUrl_ = baseUrl;
+        if (!model.empty()) model_ = model;
+    }
+    std::string apiBaseUrl() const { return apiBaseUrl_; }
+    std::string model() const { return model_; }
+
     /// 将单个文本转为向量
     std::vector<double> embed(const std::string& text);
 
@@ -23,6 +32,7 @@ public:
 private:
     std::string apiKey_;
     std::string apiBaseUrl_ = "https://api.deepseek.com";
+    std::string model_ = "text-embedding-3-small";
 };
 
 } // namespace vector_engine

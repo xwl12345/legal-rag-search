@@ -42,7 +42,7 @@ std::string Generator::generate(const std::string& query,
     messages.append(userMsg);
 
     body["messages"] = messages;
-    body["temperature"] = 0.3;
+    body["temperature"] = temperature_;
     body["max_tokens"] = 2048;
 
     QJsonDocument doc(body);

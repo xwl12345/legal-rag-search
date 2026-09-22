@@ -90,6 +90,26 @@ public:
     /// 设置 API Key（用于 embedding）
     void setApiKey(const std::string& key);
 
+    // ── T3 配置中心：运行时热更新参数 ──
+    // 约定：k1/b/权重/TopK 是查询期参数，改后立即生效、无需重建索引；
+    // 分块参数（setChunkParams）只影响**之后导入**的文档——已建索引的块边界
+    // 在建块时已固定，改小不会让现有文本块重新切（设置页有同样标注）。
+
+    /// 查询期参数：BM25 k1/b 与混合融合权重（改后下一次 search 即生效）
+    void setSearchParams(double k1, double b, double bm25Weight, double vectorWeight);
+
+    /// 当前查询期参数（供设置页回显 / 测试断言）
+    double k1() const { return bm25_.k1(); }
+    double b() const { return bm25_.b(); }
+    double bm25Weight() const { return bm25Weight_; }
+    double vectorWeight() const { return vectorWeight_; }
+
+    /// 分块参数：仅对之后导入的文档生效
+    void setChunkParams(int maxSize, int overlap);
+
+    /// Embedding 服务地址与模型名（T4 消费；T3 仅可配置并转发到服务）
+    void setEmbeddingEndpoint(const std::string& baseUrl, const std::string& model);
+
     /// ⚠️ 注意：本函数走 InvertedIndex::totalDocs()，而 totalDocs_ 是按
     /// (docId, chunkIndex) 逐块累加的——**它返回的是文本块数，不是文档数**。
     /// 需要真实文档数请用 allDocIds().size() 或 documentCount()。
@@ -182,6 +202,16 @@ private:
     std::unique_ptr<index_store::IndexStore> store_;
     bool restoredFromDisk_ = false;
     long long lastLoadMs_ = -1;
+
+    // ── T3：混合融合权重（查询期，可热更新）──
+    // 默认值取 config:: 常量；改用成员是为了让设置页能在运行时热更新，
+    // 不必重建 Retriever（重建 = 重新导入全部文档，禁用）。
+    double bm25Weight_ = 0.4;
+    double vectorWeight_ = 0.6;
+
+    // ── T3：分块参数（仅影响之后导入的文档）──
+    int chunkMaxSize_ = 512;
+    int chunkOverlap_ = 50;
 };
 
 } // namespace rag

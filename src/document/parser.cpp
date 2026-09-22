@@ -92,7 +92,7 @@ std::vector<TextChunk> DocumentParser::parse(const std::string& filePath) {
 std::vector<TextChunk> DocumentParser::parseText(std::string_view text,
                                                   const std::string& docId) {
     std::vector<TextChunk> chunks;
-    auto rawChunks = splitChunks(text);
+    auto rawChunks = splitChunks(text, chunkMaxSize_, chunkOverlap_);
 
     int startPos = 0;
     for (size_t i = 0; i < rawChunks.size(); ++i) {

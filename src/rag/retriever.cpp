@@ -53,6 +53,24 @@ void Retriever::setApiKey(const std::string& key) {
     embedding_.setApiKey(key);
 }
 
+// ── T3 配置中心：运行时热更新 ──
+
+void Retriever::setSearchParams(double k1, double b,
+                                double bm25Weight, double vectorWeight) {
+    bm25_.setParams(k1, b);
+    bm25Weight_ = bm25Weight;
+    vectorWeight_ = vectorWeight;
+}
+
+void Retriever::setChunkParams(int maxSize, int overlap) {
+    chunkMaxSize_ = maxSize;
+    chunkOverlap_ = overlap;
+}
+
+void Retriever::setEmbeddingEndpoint(const std::string& baseUrl, const std::string& model) {
+    embedding_.setEndpoint(baseUrl, model);
+}
+
 // ────────────────────────────────────────────────────────────────
 // 索引写入（导入与落盘恢复共用）
 // ────────────────────────────────────────────────────────────────
@@ -75,6 +93,7 @@ ImportResult Retriever::addDocument(const std::string& filePath,
     // — 文本文件：直接读取
     // — PDF：PdfExtractor 提取文本层 → OCR 回退（扫描件）
     document::DocumentParser parser;
+    parser.setChunkParams(chunkMaxSize_, chunkOverlap_);   // T3：分块参数仅对本次导入生效
     auto parseResult = parser.parseWithResult(filePath, cancelled, onPage);
 
     if (!parseResult.isSuccess()) {
@@ -130,6 +149,7 @@ void Retriever::addText(const std::string& text, const std::string& docId) {
 
     // 使用已有的 parser 来分块
     document::DocumentParser parser;
+    parser.setChunkParams(chunkMaxSize_, chunkOverlap_);   // T3：分块参数仅对本次导入生效
     auto chunks = parser.parseText(text, docId);
 
     StoredDocument doc;
@@ -243,8 +263,8 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
                 for (const auto& key : allKeys) {
                     double bm25Norm = bm25Max > 0 ? (bm25Scores[key] / bm25Max) : 0.0;
                     double vecNorm = vecMax > 0 ? (vectorScores[key] / vecMax) : 0.0;
-                    double finalScore = config::BM25_WEIGHT * bm25Norm +
-                                        config::VECTOR_WEIGHT * vecNorm;
+                    double finalScore = bm25Weight_ * bm25Norm +
+                                        vectorWeight_ * vecNorm;
                     scored.emplace_back(key, finalScore);
                 }
 

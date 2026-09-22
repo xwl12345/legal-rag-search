@@ -66,3 +66,6 @@ build/*.db
 
 # ── T2 导出的 Markdown（本地临时产物）──
 docs/screenshots/*.md
+
+# ── 运行期产物：检索参数配置（T3，用户可手改，含 API Key，绝不入库）──
+rag_settings.json

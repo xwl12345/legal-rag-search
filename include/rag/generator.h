@@ -14,6 +14,10 @@ public:
     /// 设置 API Key
     void setApiKey(const std::string& key) { apiKey_ = key; }
 
+    /// 运行时热更新采样温度（T3 配置中心）；默认 0.3，合法范围 (0, 2]
+    void setTemperature(double t) { temperature_ = t; }
+    double temperature() const { return temperature_; }
+
     /// 基于检索到的上下文 + 用户问题，调用 LLM 生成答案
     /// @param query    用户问题
     /// @param context  检索到的上下文（由 Retriever::buildContext 生成）
@@ -53,6 +57,7 @@ private:
     std::string apiKey_;
     std::string apiBaseUrl_ = "https://api.deepseek.com";
     std::string metaContext_;  // 文档元数据摘要
+    double temperature_ = 0.3;  // 采样温度（T3 配置中心）
 };
 
 } // namespace rag

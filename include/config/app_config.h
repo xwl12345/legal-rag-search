@@ -29,6 +29,11 @@ constexpr const char* INDEX_FILE = "rag_index.dat";
 // SQLite 库文件，同样位于工作目录；与 rag_index.dat 同属运行期产物，不入库。
 constexpr const char* HISTORY_DB = "rag_history.db";
 
+// ── 检索参数配置文件（T3）──
+// JSON 格式，位于工作目录；可手工编辑，字段缺失/损坏一律回落默认值。
+// 因可含 API Key，绝不入库（.gitignore）。
+constexpr const char* SETTINGS_FILE = "rag_settings.json";
+
 // ── 请求超时 (秒) ──
 constexpr int HTTP_TIMEOUT = 30;
 

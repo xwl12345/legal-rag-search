@@ -45,6 +45,14 @@ struct ParseResult {
 /// 文档解析器：支持 .txt / .md / .pdf 文件
 class DocumentParser {
 public:
+    /// 运行时配置分块参数（T3 配置中心）。
+    /// ⚠️ 只影响**之后解析**的文档：已建索引的块边界在建块时已固定，
+    /// 改参数不会让现有文本块重新切（设置页有同样标注）。
+    void setChunkParams(int maxSize, int overlap) {
+        chunkMaxSize_ = maxSize;
+        chunkOverlap_ = overlap;
+    }
+
     /// 读取文件、提取文本并切分为文本块，同时返回诊断结果
     /// @param cancelled 每约 200ms 轮询一次，返回 true 时取消 OCR 回退流程
     /// @param onPage    OCR 逐页识别的进度回调（当前页号、总页号）
@@ -63,6 +71,9 @@ private:
     static std::vector<std::string> splitChunks(std::string_view text,
                                                  int maxSize = 512,
                                                  int overlap = 50);
+
+    int chunkMaxSize_ = 512;   // T3：可配置分块上限（默认与原行为一致）
+    int chunkOverlap_ = 50;    // T3：可配置重叠字符数
 };
 
 } // namespace document
