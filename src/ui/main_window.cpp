@@ -17,6 +17,8 @@
 #include "ui/search_page.h"
 #include "ui/library_page.h"
 #include "ui/history_page.h"
+#include "ui/settings_page.h"
+#include "config/app_config.h"
 #include "history/history_store.h"
 #include "rag/retriever.h"
 
@@ -70,6 +72,10 @@ void MainWindow::buildPages() {
     // 反过来文档库删掉的文档，检索页也不会再命中。
     retriever_ = std::make_unique<rag::Retriever>();
 
+    // ── 配置中心（T3）：先读参数再建页，引擎带着用户参数起步 ──
+    // 文件缺失/损坏时 load 已回落默认值，不会读到 0。
+    loadSettingsAndApply();
+
     // ── 问答历史存储：同样集中在这里创建并打开，历史页只借用指针 ──
     historyStore_ = std::make_unique<history::HistoryStore>();
     if (!historyStore_->open()) {
@@ -88,6 +94,8 @@ void MainWindow::buildPages() {
     // 一个问答回合结束 → 本窗口负责落库（两页互不认识）
     connect(searchPage_, &SearchPage::answerFinished,
             this, &MainWindow::onAnswerRecorded);
+    // T3：启动时把配置里的 TopK / temperature 下发给检索页
+    searchPage_->applySettings(appSettings_);
 
     // ── 第 2 页：文档库（T1）──
     // 插件式接入：只注入引擎裸指针，删掉本页只需去掉这两行 + 删页面文件。
@@ -102,7 +110,7 @@ void MainWindow::buildPages() {
     historyPage_ = new HistoryPage(historyStore_.get(), pageStack_);
     pageStack_->addWidget(historyPage_);
 
-    // ── 第 4–5 页：占位（T4 / T3 逐个替换）──
+    // ── 第 4 页：检索质量分析（T4，暂为占位）──
     pageStack_->addWidget(new PlaceholderPage(
         QStringLiteral("检索质量分析"),
         QStringLiteral("同一查询 · 四路并列对比 · 可靠性验证"),
@@ -112,13 +120,13 @@ void MainWindow::buildPages() {
                        "输出 Hit@5、R@10、MRR 指标卡——语料或模型变更后重新验证检索可靠性。"),
         pageStack_));
 
-    pageStack_->addWidget(new PlaceholderPage(
-        QStringLiteral("设置"),
-        QStringLiteral("检索参数与 Embedding 服务地址"),
-        QStringLiteral("T3"),
-        QStringLiteral("BM25 k1 / b、融合权重、TopK、分块参数、temperature "
-                       "以及 Embedding 服务地址与模型名均可配置并持久化。"),
-        pageStack_));
+    // ── 第 5 页：设置（T3）──
+    // 插件式接入：本页只读写配置层，不碰 Retriever——保存后发 settingsChanged，
+    // 由本窗口中转给引擎（热更新）与检索页（检索宽度/温度），两页互不引用。
+    settingsPage_ = new SettingsPage(pageStack_);
+    pageStack_->addWidget(settingsPage_);
+    connect(settingsPage_, &SettingsPage::settingsChanged,
+            this, &MainWindow::onSettingsChanged);
 }
 
 void MainWindow::restoreIndexOnStartup() {
@@ -242,6 +250,42 @@ void MainWindow::onAnswerRecorded(const history::HistoryRecord& record) {
 
     if (historyPage_) {
         historyPage_->refresh();
+    }
+}
+
+// ── T3 配置中心 ──
+
+void MainWindow::loadSettingsAndApply() {
+    const bool loaded = config::AppSettings::load(config::SETTINGS_FILE, appSettings_);
+    if (!loaded) {
+        // 首次运行（文件不存在）或配置被改坏：静默用默认值，不打扰启动流程。
+        // AppSettings::load 已保证 out 处于默认值状态，不读到 0。
+        qInfo("检索参数配置未加载（首次运行或文件损坏），使用默认值");
+    }
+    applySettingsToEngine();
+}
+
+void MainWindow::applySettingsToEngine() {
+    if (!retriever_) {
+        return;
+    }
+    const auto& s = appSettings_;
+    // 查询期参数：k1/b/权重，下一次 search 即生效，无需重建索引
+    retriever_->setSearchParams(s.k1, s.b, s.bm25Weight, s.vectorWeight);
+    // 分块参数：只影响之后导入的文档（设置页与配置头文件均有标注）
+    retriever_->setChunkParams(s.chunkSize, s.chunkOverlap);
+    // Embedding 服务（T4 消费；此处先转发，向量路未配置 Key 时仍是降级 BM25）
+    retriever_->setEmbeddingEndpoint(s.embeddingBaseUrl, s.embeddingModel);
+    if (!s.embeddingApiKey.empty()) {
+        retriever_->setApiKey(s.embeddingApiKey);
+    }
+}
+
+void MainWindow::onSettingsChanged(const config::AppSettings& settings) {
+    appSettings_ = settings;
+    applySettingsToEngine();
+    if (searchPage_) {
+        searchPage_->applySettings(settings);
     }
 }
 

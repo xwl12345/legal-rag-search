@@ -6,6 +6,8 @@
 
 #include <memory>
 
+#include "config/app_settings.h"
+
 class QLabel;
 class QStackedWidget;
 
@@ -13,6 +15,7 @@ class NavigationBar;
 class SearchPage;
 class LibraryPage;
 class HistoryPage;
+class SettingsPage;
 
 namespace rag {
 class Retriever;
@@ -60,11 +63,18 @@ private slots:
     void onLibraryChanged();
     /// 检索问答页一个回合结束：落盘到问答历史库（T2）
     void onAnswerRecorded(const history::HistoryRecord& record);
+    /// 设置页保存并生效（T3）：写盘已由页面完成，这里转发给引擎与各页
+    void onSettingsChanged(const config::AppSettings& settings);
 
 private:
     void setupUi();
     void setupStatusBar();
     void buildPages();
+
+    /// 启动时加载配置文件并把参数下发到引擎（缺文件/损坏回落默认值）
+    void loadSettingsAndApply();
+    /// 把 appSettings_ 应用到引擎热更新 setter（供启动与设置变更共用）
+    void applySettingsToEngine();
 
     /// 启动时尝试从磁盘恢复索引，并把结果写进状态栏
     void restoreIndexOnStartup();
@@ -89,6 +99,10 @@ private:
     SearchPage* searchPage_ = nullptr;
     LibraryPage* libraryPage_ = nullptr;
     HistoryPage* historyPage_ = nullptr;
+    SettingsPage* settingsPage_ = nullptr;
+
+    // ── 检索参数配置（T3：启动时从 rag_settings.json 加载，设置页保存后更新）──
+    config::AppSettings appSettings_;
 
     // ── 状态栏 ──
     QLabel* statusEngine_ = nullptr;

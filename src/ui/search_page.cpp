@@ -15,6 +15,7 @@
 #include <QSplitter>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -383,7 +384,7 @@ void SearchPage::onSearch() {
     // 异步执行检索 + 生成
     QTimer::singleShot(100, this, [this, query]() {
         // Step 1: 检索（多取一些结果用于筛选）
-        auto results = retriever_->search(query.toStdString(), 20);
+        auto results = retriever_->search(query.toStdString(), searchWidth_);
         cachedResults_ = results;
         currentQuery_ = query;
 
@@ -414,7 +415,7 @@ void SearchPage::onSearch() {
             if (isAggregate) {
                 // ── 聚合模式 ──
                 // 1. 用更大的 topK 重新检索，并在 UI 层做文档去重
-                auto wideResults = retriever_->search(qstr, 50);
+                auto wideResults = retriever_->search(qstr, wideSearchWidth_);
                 std::vector<rag::SearchResult> deduped;
                 constexpr int perDocLimit = 2;
                 std::unordered_map<std::string, int> docCount;
@@ -930,6 +931,13 @@ void SearchPage::simulateAnswer(const QString& query, const QString& answer, boo
     aiAnswerArea_->clear();
     appendAiAnswer(answer);
     finishAnswerRound(query, cachedResults_);
+}
+
+void SearchPage::applySettings(const config::AppSettings& settings) {
+    // 检索宽度与聚合宽检索按 2.5 倍联动：默认 20 → 50，与历史行为一致
+    searchWidth_ = std::max(1, settings.topK);
+    wideSearchWidth_ = std::max(searchWidth_, searchWidth_ * 5 / 2);
+    generator_->setTemperature(settings.temperature);
 }
 
 void SearchPage::finishAnswerRound(const QString& query,

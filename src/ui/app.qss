@@ -142,6 +142,38 @@ QLineEdit#searchInput {
     border-radius: 9px;
 }
 
+/* ── T3 设置页：数值输入与卡片内表单 ──────────────────────────────────── */
+
+QSpinBox, QDoubleSpinBox {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 9px;
+    padding: 6px 10px;
+    font-size: 13px;
+    color: #1F2937;
+    selection-background-color: #B7791F;
+    selection-color: #FFFFFF;
+}
+QSpinBox:focus, QDoubleSpinBox:focus {
+    border: 1px solid #B7791F;
+}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    width: 18px;
+    border: none;
+    background: transparent;
+}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+    background: #F1F4F8;
+    border-radius: 4px;
+}
+
+QLabel#settingsStatus {
+    font-size: 12px;
+    color: #64748B;
+}
+
 /* ── 下拉筛选 ──────────────────────────────────────────────────────────────*/
 QComboBox {
     background: #FFFFFF;

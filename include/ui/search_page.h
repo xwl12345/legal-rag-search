@@ -12,6 +12,7 @@
 #include "history/history_record.h"
 #include "rag/retriever.h"
 #include "rag/generator.h"
+#include "config/app_settings.h"
 
 /// 检索问答页：保留重构前 MainWindow 的全部检索逻辑
 /// （导入 → 混合检索 → 元数据筛选 → SSE 流式回答），
@@ -78,6 +79,12 @@ private:
     void appendAiAnswer(const QString& text);
     void loadApiKey();
 
+public slots:
+    /// 应用 T3 设置页下发的配置：检索条数与生成温度（由 MainWindow 中转，
+    /// 本页不知道设置页存在）
+    void applySettings(const config::AppSettings& settings);
+
+private:
     /// 校验 API Key 格式：sk- 开头，长度 ≥ 20
     static bool validateApiKeyFormat(const QString& key, QString* errorMsg = nullptr);
 
@@ -113,6 +120,12 @@ private:
     QString answerBuffer_;
     bool answerInterrupted_ = false;
     QString answerNote_;
+
+    // ── T3 配置中心下发的检索参数 ──
+    // 检索宽度默认 20 / 聚合宽检索 50，与历史行为一致；设置页改 TopK 后经
+    // MainWindow 转发到这里热更新（宽检索 = 基准宽度的 2.5 倍，同比例联动）。
+    int searchWidth_ = 20;
+    int wideSearchWidth_ = 50;
 
     // ── 核心引擎（retriever_ 非拥有；仅独立测试时才由本页自持）──
     rag::Retriever* retriever_ = nullptr;

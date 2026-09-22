@@ -57,6 +57,11 @@ set(SRC_STORE
     src/history/history_store.cpp
 )
 
+# 配置层（T3：检索参数配置中心；只依赖 QtCore，测试目标复用）
+set(SRC_CONFIG
+    src/config/app_settings.cpp
+)
+
 # Qt UI 层（T0 起统一由此三块组成：主题 / 组件 / 页面）
 set(SRC_UI
     src/ui/app_theme.cpp
@@ -65,6 +70,7 @@ set(SRC_UI
     src/ui/search_page.cpp
     src/ui/library_page.cpp
     src/ui/history_page.cpp
+    src/ui/settings_page.cpp
     src/ui/main_window.cpp
 )
 
@@ -95,7 +101,9 @@ set(HEADERS
     include/ui/search_page.h
     include/ui/library_page.h
     include/ui/history_page.h
+    include/ui/settings_page.h
     include/config/app_config.h
+    include/config/app_settings.h
     include/history/history_record.h
     include/history/history_store.h
 )
@@ -105,6 +113,7 @@ add_executable(ui_smoke
     test/ui_smoke.cpp
     ${SRC_ENGINE}
     ${SRC_STORE}
+    ${SRC_CONFIG}
     ${SRC_UI}
     ${HEADERS}
     ${RESOURCES}
