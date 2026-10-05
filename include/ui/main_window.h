@@ -75,6 +75,9 @@ private:
     void loadSettingsAndApply();
     /// 把 appSettings_ 应用到引擎热更新 setter（供启动与设置变更共用）
     void applySettingsToEngine();
+    /// 按引擎真实状态刷新状态栏两行服务标签（Embedding 行读 retriever，
+    /// LLM 行读 apiReady_ —— 两条服务的 Key 来源不同，不能共用一个 ready）
+    void refreshServiceStatus();
 
     /// 启动时尝试从磁盘恢复索引，并把结果写进状态栏
     void restoreIndexOnStartup();

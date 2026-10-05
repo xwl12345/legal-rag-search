@@ -279,6 +279,8 @@ void MainWindow::applySettingsToEngine() {
     if (!s.embeddingApiKey.empty()) {
         retriever_->setApiKey(s.embeddingApiKey);
     }
+    // 服务状态可能因配置而变（如首次配上 Key），状态栏两行同步刷新
+    refreshServiceStatus();
 }
 
 void MainWindow::onSettingsChanged(const config::AppSettings& settings) {
@@ -313,10 +315,20 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::onApiKeyStateChanged(bool ready) {
+    // 该信号只携带 LLM（generator）的 Key 状态——T4 起检索页的 Key 只管
+    // 生成路，Embedding 的 Key 归设置页管，两条路不能再共用一个 ready。
     apiReady_ = ready;
-    statusEmbedding_->setText(apiReady_
-        ? QStringLiteral("Embedding：DeepSeek text-embedding-3-small")
-        : QStringLiteral("Embedding：未配置（自动降级纯 BM25）"));
+    refreshServiceStatus();
+}
+
+void MainWindow::refreshServiceStatus() {
+    if (retriever_ && retriever_->embeddingReady()) {
+        statusEmbedding_->setText(QStringLiteral("Embedding：%1@%2")
+                                      .arg(QString::fromStdString(retriever_->embeddingModel()),
+                                           QString::fromStdString(retriever_->embeddingHost())));
+    } else {
+        statusEmbedding_->setText(QStringLiteral("Embedding：未配置（自动降级纯 BM25）"));
+    }
     statusLlm_->setText(apiReady_
         ? QStringLiteral("LLM：deepseek-chat")
         : QStringLiteral("LLM：未配置"));

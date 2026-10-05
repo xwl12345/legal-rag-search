@@ -110,6 +110,12 @@ public:
     /// Embedding 服务地址与模型名（T4 消费；T3 仅可配置并转发到服务）
     void setEmbeddingEndpoint(const std::string& baseUrl, const std::string& model);
 
+    /// Embedding 服务状态（只读，供状态栏 / 质量页展示）：
+    /// ready = Key 已配置；host() 取展示用域名；model() 取当前模型名
+    bool embeddingReady() const { return embedding_.isReady(); }
+    std::string embeddingHost() const;
+    std::string embeddingModel() const { return embedding_.model(); }
+
     /// ⚠️ 注意：本函数走 InvertedIndex::totalDocs()，而 totalDocs_ 是按
     /// (docId, chunkIndex) 逐块累加的——**它返回的是文本块数，不是文档数**。
     /// 需要真实文档数请用 allDocIds().size() 或 documentCount()。

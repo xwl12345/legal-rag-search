@@ -108,7 +108,7 @@ void SearchPage::setupUi() {
     auto* apiKeyLayout = new QHBoxLayout();
     apiKeyLayout->setSpacing(10);
 
-    auto* apiKeyLabel = new QLabel(QStringLiteral("DeepSeek API Key"), this);
+    auto* apiKeyLabel = new QLabel(QStringLiteral("LLM API Key（DeepSeek，仅用于 AI 回答）"), this);
     apiKeyLabel->setObjectName(QStringLiteral("fieldLabel"));
 
     apiKeyInput_ = new QLineEdit(this);
@@ -297,11 +297,14 @@ void SearchPage::emitEngineStats() {
 }
 
 // ── API Key ──
+// ⚠️ 本页的 Key 只管 LLM 生成（generator_）。Embedding 与 LLM 是两路独立服务，
+// T4 起不再"一个 Key 灌两处"——embedding_ 的 Key 由 MainWindow 从设置页配置
+// （env DEEPSEEK_API_KEY 兜底）统一下发，本页不得触碰，否则用户在检索页填
+// DeepSeek Key 会把硅基流动的 Embedding Key 覆盖成 401。
 void SearchPage::loadApiKey() {
     const char* key = std::getenv("DEEPSEEK_API_KEY");
     if (key && std::strlen(key) > 0) {
         const QString qkey = QString::fromStdString(key);
-        retriever_->setApiKey(key);
         generator_->setApiKey(key);
         apiKeyInput_->setText(qkey);
         updateApiKeyStatus(true, QStringLiteral("● 已从环境变量加载"));
@@ -314,8 +317,7 @@ void SearchPage::loadApiKey() {
 void SearchPage::onSetApiKey() {
     const QString key = apiKeyInput_->text().trimmed();
     if (key.isEmpty()) {
-        // 清空 API Key
-        retriever_->setApiKey("");
+        // 清空 API Key（仅 LLM 路；Embedding 归设置页管，此处不碰）
         generator_->setApiKey("");
         updateApiKeyStatus(false, QStringLiteral("● 未设置"));
         emit apiKeyStateChanged(false);
@@ -329,9 +331,7 @@ void SearchPage::onSetApiKey() {
         return;
     }
 
-    const std::string keyStr = key.toStdString();
-    retriever_->setApiKey(keyStr);
-    generator_->setApiKey(keyStr);
+    generator_->setApiKey(key.toStdString());
     updateApiKeyStatus(true, QStringLiteral("● 已设置"));
     emit apiKeyStateChanged(true);
 }
@@ -529,7 +529,7 @@ void SearchPage::onSearch() {
         } else if (!generator_->isReady()) {
             aiAnswerArea_->setHtml(
                 QStringLiteral("<p style='color:#B7791F; font-weight:600;'>🔑 未配置 API Key</p>"
-                               "<p style='color:#64748B;'>请在上方输入框中填写 DeepSeek API Key（sk- 开头），</p>"
+                               "<p style='color:#64748B;'>请在上方输入框中填写 LLM API Key（sk- 开头），</p>"
                                "<p style='color:#64748B;'>点击「设置」后即可启用 AI 智能回答功能。</p>"
                                "<p style='color:#94A3B8; font-size:11px;'>获取 Key："
                                "<a href='https://platform.deepseek.com'>platform.deepseek.com</a></p>"));

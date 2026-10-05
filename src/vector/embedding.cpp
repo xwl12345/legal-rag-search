@@ -12,6 +12,21 @@
 
 namespace vector_engine {
 
+std::string EmbeddingService::normalizedBaseUrl() const {
+    std::string base = apiBaseUrl_;
+    // 剥掉全部尾部 '/'（用户可能手填 https://xxx.cn/ 甚至 https://xxx.cn//）
+    while (!base.empty() && base.back() == '/') {
+        base.pop_back();
+    }
+    // 剥掉尾部 '/v1'（用户看到文档里的 /v1/embeddings 会顺手带上）
+    const std::string v1 = "/v1";
+    if (base.size() > v1.size() &&
+        base.compare(base.size() - v1.size(), v1.size(), v1) == 0) {
+        base.erase(base.size() - v1.size());
+    }
+    return base;
+}
+
 std::vector<double> EmbeddingService::embed(const std::string& text) {
     auto batch = embedBatch({text});
     if (batch.empty()) {
@@ -42,7 +57,7 @@ std::vector<std::vector<double>> EmbeddingService::embedBatch(
 
     // Setup HTTPS request
     QNetworkRequest request(
-        QUrl(QString::fromStdString(apiBaseUrl_) + QStringLiteral("/v1/embeddings")));
+        QUrl(QString::fromStdString(normalizedBaseUrl()) + QStringLiteral("/v1/embeddings")));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setRawHeader("Authorization", ("Bearer " + apiKey_).c_str());
     // 30 秒无数据传输视为失败，避免网络异常时批量嵌入无限等待

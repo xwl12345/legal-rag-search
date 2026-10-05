@@ -39,6 +39,7 @@
 #include "index/inverted_index.h"
 #include "index/bm25_ranker.h"
 #include "vector/similarity.h"
+#include "vector/embedding.h"
 #include "document/pdf_extractor.h"
 #include "rag/retriever.h"
 #include "rag/generator.h"
@@ -1835,6 +1836,46 @@ void test_chunk_params_new_docs_only() {
     PASS();
 }
 
+/// URL 规范化：带尾部 / 或 /v1 的服务地址都落到同一个拼接基座（T4 第 0 期修复②）
+void test_embedding_url_normalize() {
+    TEST("Embedding URL：尾部 / 与 /v1 规范化");
+    vector_engine::EmbeddingService svc;
+
+    svc.setEndpoint("https://api.siliconflow.cn", "m");
+    CHECK(svc.normalizedBaseUrl() == "https://api.siliconflow.cn");
+    svc.setEndpoint("https://api.siliconflow.cn/", "m");
+    CHECK(svc.normalizedBaseUrl() == "https://api.siliconflow.cn");
+    svc.setEndpoint("https://api.siliconflow.cn/v1", "m");
+    CHECK(svc.normalizedBaseUrl() == "https://api.siliconflow.cn");
+    svc.setEndpoint("https://api.siliconflow.cn/v1/", "m");
+    CHECK(svc.normalizedBaseUrl() == "https://api.siliconflow.cn");
+    // 默认值（deepseek，不带尾巴）原样保留
+    svc.setEndpoint("https://api.deepseek.com", "m");
+    CHECK(svc.normalizedBaseUrl() == "https://api.deepseek.com");
+
+    PASS();
+}
+
+/// embeddingHost：从服务地址取展示用域名（状态栏 Embedding 行消费）
+void test_embedding_host_display() {
+    TEST("Embedding 状态：host 域名提取与 ready 判定");
+    vector_engine::EmbeddingService svc;
+    CHECK(!svc.isReady());   // 未配 Key
+
+    svc.setApiKey("sk-test-key-0000000000");
+    CHECK(svc.isReady());
+    svc.setEndpoint("https://api.siliconflow.cn/", "BAAI/bge-large-zh-v1.5");
+    CHECK(svc.model() == "BAAI/bge-large-zh-v1.5");
+
+    rag::Retriever retriever;
+    retriever.setApiKey("sk-test-key-0000000000");
+    retriever.setEmbeddingEndpoint("https://api.siliconflow.cn", "BAAI/bge-large-zh-v1.5");
+    CHECK(retriever.embeddingReady());
+    CHECK(retriever.embeddingHost() == "api.siliconflow.cn");
+
+    PASS();
+}
+
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════
@@ -1946,6 +1987,10 @@ void run_all_tests() {
     test_settings_corrupt_file();
     test_engine_hot_update_k1();
     test_chunk_params_new_docs_only();
+
+    std::cout << "\n── T4 第 0 期: Embedding 服务配置 ──" << std::endl;
+    test_embedding_url_normalize();
+    test_embedding_host_display();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

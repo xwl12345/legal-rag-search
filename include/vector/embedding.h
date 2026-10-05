@@ -12,7 +12,8 @@ public:
     void setApiKey(const std::string& key) { apiKey_ = key; }
 
     /// 运行时配置服务地址与模型名（T3 配置中心，T4 消费）。
-    /// baseUrl 形如 https://api.deepseek.com（不带 /v1/embeddings 尾巴）。
+    /// baseUrl 形如 https://api.siliconflow.cn —— 带 / 或 /v1 结尾也可以，
+    /// 程序会先规范化（剥掉尾部 / 与 /v1）再拼 /v1/embeddings，不会双写。
     void setEndpoint(const std::string& baseUrl, const std::string& model) {
         if (!baseUrl.empty()) apiBaseUrl_ = baseUrl;
         if (!model.empty()) model_ = model;
@@ -28,6 +29,11 @@ public:
 
     /// 检查 API 是否已配置
     bool isReady() const { return !apiKey_.empty(); }
+
+    /// 规范化服务地址：剥掉尾部 '/' 与 '/v1'，供拼 /v1/embeddings 使用。
+    /// 用户手填 https://api.siliconflow.cn/ 或 .../v1 都能落到同一个 URL。
+    /// 公开以便单测直接断言（纯函数，无副作用）。
+    std::string normalizedBaseUrl() const;
 
 private:
     std::string apiKey_;

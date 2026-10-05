@@ -71,6 +71,20 @@ void Retriever::setEmbeddingEndpoint(const std::string& baseUrl, const std::stri
     embedding_.setEndpoint(baseUrl, model);
 }
 
+std::string Retriever::embeddingHost() const {
+    // 展示用：从规范化后的服务地址取域名部分（https://api.siliconflow.cn → api.siliconflow.cn）
+    std::string host = embedding_.apiBaseUrl();
+    const std::string scheme = "://";
+    const auto pos = host.find(scheme);
+    if (pos != std::string::npos) {
+        host = host.substr(pos + scheme.size());
+    }
+    while (!host.empty() && host.back() == '/') {
+        host.pop_back();
+    }
+    return host;
+}
+
 // ────────────────────────────────────────────────────────────────
 // 索引写入（导入与落盘恢复共用）
 // ────────────────────────────────────────────────────────────────

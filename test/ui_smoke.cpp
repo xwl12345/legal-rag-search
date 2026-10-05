@@ -597,7 +597,20 @@ double firstRelevance(QListWidget* resultList, QString* debugText = nullptr) {
 
 int runSettingsE2E(const QString& corpusDir) {
     const QString settingsPath = QStringLiteral("rag_settings.json");
-    QFile::remove(settingsPath);   // 从默认配置起步（文件无进程占用，可安全删除）
+    const QString backupPath = settingsPath + QStringLiteral(".e2e_backup");
+    // T4：rag_settings.json 现在含用户真实 Key，绝不能删——先备份，跑完还原。
+    // 工作文件照旧删除（保证从默认值起步的断言语义不变），用户数据零风险。
+    // 若上一轮异常中断留下备份，先还原再重新备份。
+    if (QFile::exists(backupPath)) {
+        QFile::remove(settingsPath);
+        QFile::copy(backupPath, settingsPath);
+        QFile::remove(backupPath);
+    }
+    const bool hadUserSettings = QFile::exists(settingsPath);
+    if (hadUserSettings) {
+        check(QFile::copy(settingsPath, backupPath),
+              QStringLiteral("用户配置已备份（含 Key，不出仓库不出日志）"));
+    }
 
     const QStringList corpus = collectCorpus(corpusDir);
     if (corpus.isEmpty()) {
@@ -714,8 +727,12 @@ int runSettingsE2E(const QString& corpusDir) {
               QStringLiteral("k1=%1 topK=%2").arg(reloaded.k1).arg(reloaded.topK));
     }
 
-    // 收尾：不留配置文件，避免污染后续轮次与用户目录
+    // 收尾：删掉测试期间写出的工作配置，还原用户自己的配置（如有）
     QFile::remove(settingsPath);
+    if (hadUserSettings && QFile::exists(backupPath)) {
+        QFile::copy(backupPath, settingsPath);
+        QFile::remove(backupPath);
+    }
     return g_failures;
 }
 
