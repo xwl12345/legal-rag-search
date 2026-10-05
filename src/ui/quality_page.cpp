@@ -146,6 +146,8 @@ void QualityPage::setupUi() {
         evalStatus_->setObjectName(QStringLiteral("qualityEvalStatus"));
         evalStatus_->setWordWrap(true);
         evalBody->addWidget(evalStatus_);
+
+        connect(evalBtn_, &QPushButton::clicked, this, &QualityPage::onBatchEval);
     }
 
     serviceHint_ = new QLabel(this);

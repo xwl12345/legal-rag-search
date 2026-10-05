@@ -277,6 +277,7 @@ endif()
 
 # ── 检索质量量化评测 ──
 add_executable(eval_retrieval test/eval_retrieval.cpp
+    src/config/app_settings.cpp
     src/document/parser.cpp
     src/document/tokenizer.cpp
     src/document/pdf_extractor.cpp

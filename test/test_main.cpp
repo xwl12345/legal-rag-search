@@ -43,6 +43,7 @@
 #include "document/pdf_extractor.h"
 #include "rag/retriever.h"
 #include "rag/generator.h"
+#include "rag/eval_metrics.h"
 #include "history/history_store.h"
 #include "config/app_settings.h"
 #include <algorithm>
@@ -1876,6 +1877,106 @@ void test_embedding_host_display() {
     PASS();
 }
 
+/// RRF：合成排名直接断言（k=60，rank 从 1 计；两路都命中的文档分数相加）
+void test_rrf_fuse() {
+    TEST("RRF：名次融合合成排名");
+    using P = std::pair<std::string, double>;
+    // BM25 路：a > b > c；向量路：b > d（a 未召回）
+    std::vector<P> bm25 = {{"a", 10.0}, {"b", 8.0}, {"c", 6.0}};
+    std::vector<P> vec  = {{"b", 0.9},  {"d", 0.8}};
+
+    auto fused = rag::Retriever::rrfFuse(bm25, vec, 10);
+
+    // a = 1/61 = 0.016393...；b = 1/62 + 1/61 = 0.032588...（两路相加，应排第一）
+    // c = 1/63；d = 1/62
+    CHECK(fused.size() == 4);
+    CHECK(fused[0].first == "b");
+    CHECK(std::fabs(fused[0].second - (1.0 / 62 + 1.0 / 61)) < 1e-12);
+    CHECK(fused[1].first == "a");
+    CHECK(std::fabs(fused[1].second - 1.0 / 61) < 1e-12);
+    // d（向量第 2 名 1/62）应排在 c（BM25 第 3 名 1/63）前面
+    CHECK(fused[2].first == "d");
+    CHECK(fused[3].first == "c");
+
+    // topK 截断
+    auto fused2 = rag::Retriever::rrfFuse(bm25, vec, 2);
+    CHECK(fused2.size() == 2);
+    CHECK(fused2[0].first == "b");
+
+    PASS();
+}
+
+/// 评测指标：文档级去重排名 + P@5 / Hit@5 / R@10 / MRR 逐项核算
+void test_eval_metrics() {
+    TEST("评测指标：文档级排名与四项指标核算");
+    // 块级序列：docB 出现两次（块 3、块 0），只保留最高名次 1
+    std::vector<std::string> chunkDocs = {
+        "docB", "docX", "docA", "docB", "docY", "docA", "docZ", "docW", "docV", "docU", "docT"
+    };
+    auto ranking = rag::docLevelRanking(chunkDocs);
+    CHECK(ranking.size() == 9);                       // docB/docA 去重
+    CHECK(ranking[0] == "docB" && ranking[1] == "docX" && ranking[2] == "docA");
+
+    // 相关集 {docB, docA}：名次 1 和 3
+    auto m = rag::computeQueryMetrics(ranking, {"docB", "docA"});
+    CHECK(std::fabs(m.p5 - 2.0 / 5) < 1e-12);         // Top-5 命中 2 个
+    CHECK(std::fabs(m.hit5 - 1.0) < 1e-12);
+    CHECK(std::fabs(m.r10 - 1.0) < 1e-12);            // Top-10 全命中
+    CHECK(std::fabs(m.mrr - 1.0 / 1) < 1e-12);        // 首命中名次 1
+    CHECK(m.firstRank == 1);
+
+    // 未命中场景
+    auto m0 = rag::computeQueryMetrics(ranking, {"docQ"});
+    CHECK(m0.hit5 == 0.0 && m0.r10 == 0.0 && m0.mrr == 0.0 && m0.firstRank == 0);
+
+    // 宏平均：两条，一条全 1 一条全 0 → 各 0.5
+    auto avg = rag::averageMetrics({m, m0});
+    CHECK(std::fabs(avg.hit5 - 0.5) < 1e-12);
+    CHECK(std::fabs(avg.mrr - 0.5) < 1e-12);
+
+    PASS();
+}
+
+/// 四路降级语义（Embedding 未配置）：VectorOnly 空、其余三路与 BM25 排序一致
+void test_search_modes_degraded() {
+    TEST("四路检索：Embedding 未配置时降级语义");
+    removeTestSettingsFile();
+
+    rag::Retriever retriever;   // 不配 Key → 向量路不可用
+    retriever.setIndexFilePath("build/test_modes_index.dat");
+    retriever.addText("民间借贷纠纷案 原告请求判令被告偿还借款本金及利息", "m1");
+    retriever.addText("借款合同纠纷 逾期利息计算标准", "m2");
+    retriever.addText("劳动合同 拖欠工资 劳动仲裁", "m3");
+    CHECK(!retriever.embeddingReady());
+
+    auto bm25 = retriever.searchWithMode("借贷纠纷", 5, rag::SearchMode::Bm25Only);
+    auto vec  = retriever.searchWithMode("借贷纠纷", 5, rag::SearchMode::VectorOnly);
+    auto w    = retriever.searchWithMode("借贷纠纷", 5, rag::SearchMode::WeightedFusion);
+    auto rrf  = retriever.searchWithMode("借贷纠纷", 5, rag::SearchMode::RrfFusion);
+
+    // ① BM25 有结果；② VectorOnly 返回空（不伪装成 BM25）
+    CHECK(!bm25.empty());
+    CHECK(vec.empty());
+    // ③④ 降级 = BM25 的排序（序列完全一致）
+    CHECK(!w.empty());
+    CHECK(!rrf.empty());
+    CHECK(w.size() == bm25.size());
+    CHECK(rrf.size() == bm25.size());
+    bool sameW = true, sameR = true;
+    for (size_t i = 0; i < bm25.size(); ++i) {
+        sameW = sameW && w[i].docId == bm25[i].docId
+                && w[i].chunkIndex == bm25[i].chunkIndex;
+        sameR = sameR && rrf[i].docId == bm25[i].docId
+                && rrf[i].chunkIndex == bm25[i].chunkIndex;
+    }
+    CHECK(sameW);
+    CHECK(sameR);
+    CHECK(std::fabs(w[0].finalScore - bm25[0].finalScore) < 1e-12);
+
+    QFile::remove(QStringLiteral("build/test_modes_index.dat"));
+    PASS();
+}
+
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════
@@ -1991,6 +2092,11 @@ void run_all_tests() {
     std::cout << "\n── T4 第 0 期: Embedding 服务配置 ──" << std::endl;
     test_embedding_url_normalize();
     test_embedding_host_display();
+
+    std::cout << "\n── T4: 四路检索与评测指标 ──" << std::endl;
+    test_rrf_fuse();
+    test_eval_metrics();
+    test_search_modes_degraded();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

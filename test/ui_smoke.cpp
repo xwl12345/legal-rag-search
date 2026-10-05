@@ -610,6 +610,7 @@ int runSettingsE2E(const QString& corpusDir) {
     if (hadUserSettings) {
         check(QFile::copy(settingsPath, backupPath),
               QStringLiteral("用户配置已备份（含 Key，不出仓库不出日志）"));
+        QFile::remove(settingsPath);   // 工作文件照旧删除：保证从默认值起步（无 Key 纯 BM25）
     }
 
     const QStringList corpus = collectCorpus(corpusDir);
@@ -736,6 +737,135 @@ int runSettingsE2E(const QString& corpusDir) {
     return g_failures;
 }
 
+/// T4 质量分析 E2E：四路并列对比 → 降级语义（无 Key）→ 批量评测出表。
+/// 无 Key 环境下全量断言（确定性）；有 Key 时本组只做真实调用的冒烟
+/// （向量列非空即过），批量评测不做数值断言——避免消耗大量代金券。
+int runQualityE2E(const QString& corpusDir) {
+    // 起步清掉工作目录残留索引，保证从语料全量导入（此刻无窗口持有该文件，安全）
+    QFile::remove(QStringLiteral("rag_index.dat"));
+
+    MainWindow window;
+    window.resize(1180, 760);
+    window.show();
+    QApplication::processEvents();
+
+    SearchPage* searchPage = window.findChild<SearchPage*>();
+    QListWidget* navList = window.findChild<QListWidget*>("navList");
+    QLineEdit* queryInput = window.findChild<QLineEdit*>("qualityQueryInput");
+    QPushButton* runBtn = window.findChild<QPushButton*>("qualityRunBtn");
+    QPushButton* evalBtn = window.findChild<QPushButton*>("qualityEvalBtn");
+    QListWidget* listBm25 = window.findChild<QListWidget*>("qualityListBm25");
+    QListWidget* listVector = window.findChild<QListWidget*>("qualityListVector");
+    QListWidget* listWeighted = window.findChild<QListWidget*>("qualityListWeighted");
+    QListWidget* listRrf = window.findChild<QListWidget*>("qualityListRrf");
+    QTableWidget* metricsTable = window.findChild<QTableWidget*>("qualityMetricsTable");
+    QLabel* serviceHint = window.findChild<QLabel*>("qualityServiceHint");
+
+    if (!searchPage || !navList || !queryInput || !runBtn || !evalBtn
+        || !listBm25 || !listVector || !listWeighted || !listRrf
+        || !metricsTable || !serviceHint) {
+        check(false, QStringLiteral("质量页控件齐全"), QStringLiteral("存在控件未找到"));
+        return g_failures;
+    }
+
+    clickNavItem(navList, 3);
+    QApplication::processEvents();
+
+    // 导入语料（引擎唯一，检索页导入 → 质量页立即可用）
+    const QStringList corpus = collectCorpus(corpusDir);
+    if (corpus.isEmpty()) {
+        check(false, QStringLiteral("语料目录可访问"));
+        return g_failures;
+    }
+    searchPage->importPaths(corpus);
+    QApplication::processEvents();
+
+    const bool vectorReady = !serviceHint->text().contains(QStringLiteral("未配置"));
+    if (!vectorReady) {
+        check(serviceHint->text().contains(QStringLiteral("降级")),
+              QStringLiteral("提示行：Embedding 未配置时明示降级语义"),
+              serviceHint->text());
+    }
+
+    // ── 单查询四路对比 ──
+    queryInput->setText(QStringLiteral("民间借贷 交付凭证"));
+    runBtn->click();
+    QApplication::processEvents();
+
+    check(listBm25->count() >= 1 && listWeighted->count() >= 1 && listRrf->count() >= 1,
+          QStringLiteral("四路对比：BM25 / 加权 / RRF 列有结果"),
+          QStringLiteral("%1/%2/%3").arg(listBm25->count())
+              .arg(listWeighted->count()).arg(listRrf->count()));
+
+    if (!vectorReady) {
+        // ② 向量列显示降级说明而非冒充结果
+        bool vectorDegraded = false;
+        for (int i = 0; i < listVector->count(); ++i) {
+            if (listVector->item(i)->text().contains(QStringLiteral("未配置"))) {
+                vectorDegraded = true;
+            }
+        }
+        check(vectorDegraded, QStringLiteral("四路对比：向量列明示「未配置」而非伪装结果"));
+
+        // ③④ 降级 = ① 的排序（文本逐行一致）
+        const int n = listBm25->count();
+        bool sameW = listWeighted->count() == n;
+        bool sameR = listRrf->count() == n;
+        for (int i = 0; i < n && (sameW || sameR); ++i) {
+            const QString t = listBm25->item(i)->text();
+            sameW = sameW && listWeighted->item(i)->text() == t;
+            sameR = sameR && listRrf->item(i)->text() == t;
+        }
+        check(sameW, QStringLiteral("降级下加权融合列与 BM25 列逐行一致"));
+        check(sameR, QStringLiteral("降级下 RRF 列与 BM25 列逐行一致"));
+    }
+
+    // ── 批量评测 ──
+    evalBtn->click();
+    QApplication::processEvents();
+
+    check(metricsTable->rowCount() == 4,
+          QStringLiteral("指标表 4 行（四路）"),
+          QStringLiteral("实际 %1 行").arg(metricsTable->rowCount()));
+
+    // 数值列可解析且在 [0,1]；无 Key 时 ③④ 的 Hit@5/R@10/MRR 应与 ① 相等
+    auto cell = [metricsTable](int row, int col) {
+        auto* item = metricsTable->item(row, col);
+        return item ? item->text().toDouble() : -1.0;
+    };
+    bool inRange = true;
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 1; col <= 4; ++col) {
+            const double v = cell(row, col);
+            inRange = inRange && v >= 0.0 && v <= 1.0;
+        }
+    }
+    check(inRange, QStringLiteral("指标表 12 个数值均可解析且在 [0,1]"));
+
+    if (!vectorReady) {
+        const bool degradedEqual =
+            std::fabs(cell(0, 2) - cell(2, 2)) < 1e-9 &&
+            std::fabs(cell(0, 3) - cell(2, 3)) < 1e-9 &&
+            std::fabs(cell(0, 4) - cell(2, 4)) < 1e-9 &&
+            std::fabs(cell(0, 2) - cell(3, 2)) < 1e-9 &&
+            std::fabs(cell(0, 3) - cell(3, 3)) < 1e-9 &&
+            std::fabs(cell(0, 4) - cell(3, 4)) < 1e-9;
+        check(degradedEqual,
+              QStringLiteral("降级下加权/RRF 的 Hit@5/R@10/MRR 与 BM25 路相等"),
+              QStringLiteral("① Hit@5=%1 ③=%2 ④=%3")
+                  .arg(cell(0, 2)).arg(cell(2, 2)).arg(cell(3, 2)));
+        check(cell(1, 2) == 0.0,
+              QStringLiteral("降级下向量路 Hit@5=0（无结果）"));
+    }
+
+    // 截图留证（T4 新证据：质量分析页 + 降级指标表）
+    window.grab().save(QStringLiteral("docs/screenshots/14-quality-page.png"));
+
+    // 收尾：不留测试期间写出的索引
+    QFile::remove(QStringLiteral("rag_index.dat"));
+    return g_failures;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -816,6 +946,9 @@ int main(int argc, char* argv[]) {
 
         qInfo().noquote() << QStringLiteral("── 设置 E2E（改参数 → 保存 → 得分变化 → 重启保留 → 恢复默认）──");
         runSettingsE2E(parser.value(e2eOption));
+
+        qInfo().noquote() << QStringLiteral("── 质量分析 E2E（四路对比 → 降级语义 → 批量评测）──");
+        runQualityE2E(parser.value(e2eOption));
     }
 
     qInfo().noquote() << (g_failures == 0
