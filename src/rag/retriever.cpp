@@ -194,14 +194,51 @@ void Retriever::addText(const std::string& text, const std::string& docId) {
 // ────────────────────────────────────────────────────────────────
 
 std::vector<SearchResult> Retriever::search(const std::string& query, int topK) {
-    // ── Step 1: BM25 关键词检索 ──
+    // 默认路 = 加权融合（T0 以来的行为；T4 起显式走 searchWithMode）
+    return searchWithMode(query, topK, SearchMode::WeightedFusion);
+}
+
+std::vector<std::pair<std::string, double>> Retriever::rrfFuse(
+    const std::vector<std::pair<std::string, double>>& bm25Ranking,
+    const std::vector<std::pair<std::string, double>>& vectorRanking,
+    int topK, int k)
+{
+    // 倒数排名融合：score(d) = Σ_paths 1/(k + rank)，rank 从 1 计。
+    // 只用名次不用分值——两路分数量纲不同（BM25 无上界 / 余弦 0~1），
+    // 名次融合对量纲天然免疫，这是它与加权融合并列为对照算法的原因。
+    std::unordered_map<std::string, double> rrf;
+    const auto addPath = [&rrf, k](const std::vector<std::pair<std::string, double>>& ranking) {
+        for (size_t i = 0; i < ranking.size(); ++i) {
+            rrf[ranking[i].first] += 1.0 / static_cast<double>(k + static_cast<int>(i) + 1);
+        }
+    };
+    addPath(bm25Ranking);
+    addPath(vectorRanking);
+
+    std::vector<std::pair<std::string, double>> scored(rrf.begin(), rrf.end());
+    const int keep = std::min(topK, static_cast<int>(scored.size()));
+    std::partial_sort(scored.begin(), scored.begin() + keep, scored.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+    scored.resize(keep);
+    return scored;
+}
+
+std::vector<SearchResult> Retriever::searchWithMode(const std::string& query, int topK,
+                                                    SearchMode mode)
+{
+    // ── Step 1: BM25 关键词检索（除 VectorOnly 外所有路都需要）──
     auto queryTerms = tokenizer_.cutForIndex(query);
     // 法律文书通常用“住所地”等字段表达地点，补充自然语言位置问法。
     expandLegalLocationTerms(query, queryTerms);
-    auto bm25Results = bm25_.search(queryTerms, index_, std::max(topK * 2, 10));
+    const int width = std::max(topK * 2, 10);
+    std::decay_t<decltype(bm25_.search(queryTerms, index_, width))> bm25Results{};
+    if (mode != SearchMode::VectorOnly) {
+        bm25Results = bm25_.search(queryTerms, index_, width);
+    }
 
-    // ── Step 2: 向量语义检索 ──
-    std::vector<SearchResult> combined;
+    // ── Step 2: 向量语义检索（未配置 / 异常 → available=false，由各路自行降级）──
+    bool vectorAvailable = false;
+    std::vector<vector_engine::VectorSearchResult> vectorResults;
 
     if (embedding_.isReady()) {
         try {
@@ -209,8 +246,9 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
 
             // 确保向量库和索引同步
             if (similarity_.size() != static_cast<size_t>(index_.totalDocs())) {
-                // 重建向量库（从 chunkStore 生成 embedding）
-                // 注意：这里简化处理，实际应该增量更新
+                // 重建向量库（从 chunkStore 批量生成 embedding，每批最多 20 条）
+                // 注意：懒计算——导入文档不调 API，首次向量检索才批量补算；
+                // 改 Key/模型后无需重新导入，下次检索自动按新配置重算（2026-10-05 实测）。
                 similarity_.clear();
                 vectorIndexMap_.clear();
 
@@ -226,7 +264,6 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
                 }
 
                 if (!allTexts.empty()) {
-                    // 批量获取 embeddings（每批最多 20 个）
                     for (size_t i = 0; i < allTexts.size(); i += 20) {
                         size_t batchEnd = std::min(i + 20, allTexts.size());
                         std::vector<std::string> batch(
@@ -242,78 +279,142 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
             }
 
             if (similarity_.size() > 0) {
-                auto vectorResults = similarity_.search(queryVec, std::max(topK * 2, 10));
-
-                // ── Step 3: 混合加权排序 ──
-                // 用 map 合并两种分数
-                std::unordered_map<std::string, double> bm25Scores;
-                std::unordered_map<std::string, double> vectorScores;
-
-                for (const auto& r : bm25Results) {
-                    std::string key = chunkKey(r.docId, r.chunkIndex);
-                    bm25Scores[key] = r.score;
-                }
-
-                for (const auto& r : vectorResults) {
-                    if (r.index >= 0 && static_cast<size_t>(r.index) < vectorIndexMap_.size()) {
-                        auto [docId, chunkIdx] = vectorIndexMap_[r.index];
-                        std::string key = chunkKey(docId, chunkIdx);
-                        vectorScores[key] = r.similarity;
-                    }
-                }
-
-                // 收集所有出现过的文档
-                std::unordered_set<std::string> allKeys;
-                for (const auto& [k, _] : bm25Scores) allKeys.insert(k);
-                for (const auto& [k, _] : vectorScores) allKeys.insert(k);
-
-                // 归一化并加权
-                // 先找最大最小值
-                double bm25Max = 0.0, vecMax = 0.0;
-                for (const auto& [_, s] : bm25Scores) bm25Max = std::max(bm25Max, s);
-                for (const auto& [_, s] : vectorScores) vecMax = std::max(vecMax, s);
-
-                std::vector<std::pair<std::string, double>> scored;
-                for (const auto& key : allKeys) {
-                    double bm25Norm = bm25Max > 0 ? (bm25Scores[key] / bm25Max) : 0.0;
-                    double vecNorm = vecMax > 0 ? (vectorScores[key] / vecMax) : 0.0;
-                    double finalScore = bm25Weight_ * bm25Norm +
-                                        vectorWeight_ * vecNorm;
-                    scored.emplace_back(key, finalScore);
-                }
-
-                std::partial_sort(
-                    scored.begin(),
-                    scored.begin() + std::min(topK, static_cast<int>(scored.size())),
-                    scored.end(),
-                    [](const auto& a, const auto& b) { return a.second > b.second; }
-                );
-
-                for (int i = 0; i < std::min(topK, static_cast<int>(scored.size())); ++i) {
-                    const auto& [key, finalScore] = scored[i];
-                    auto colonPos = key.rfind(':');
-                    SearchResult sr;
-                    sr.docId = key.substr(0, colonPos);
-                    sr.chunkIndex = std::stoi(key.substr(colonPos + 1));
-                    sr.finalScore = finalScore;
-                    sr.bm25Score = bm25Scores[key];
-                    sr.vectorScore = vectorScores[key];
-
-                    auto it = chunkStore_.find(key);
-                    if (it != chunkStore_.end()) {
-                        sr.content = it->second;
-                    }
-
-                    combined.push_back(sr);
-                }
+                vectorResults = similarity_.search(queryVec, width);
+                vectorAvailable = !vectorResults.empty();
             }
-        } catch (const std::exception& e) {
-            // embedding 失败时回退到纯 BM25
+        } catch (const std::exception&) {
+            // embedding 失败：vectorAvailable 保持 false，各路按降级语义处理
+            vectorAvailable = false;
         }
     }
 
-    // ── 回退：如果向量检索不可用，只用 BM25 ──
-    if (combined.empty()) {
+    // chunkKey → 原始分（向量路可用时填充，供各融合路回填展示分）
+    std::unordered_map<std::string, double> vectorScores;
+    if (vectorAvailable) {
+        for (const auto& r : vectorResults) {
+            if (r.index >= 0 && static_cast<size_t>(r.index) < vectorIndexMap_.size()) {
+                auto [docId, chunkIdx] = vectorIndexMap_[r.index];
+                vectorScores[chunkKey(docId, chunkIdx)] = r.similarity;
+            }
+        }
+    }
+
+    // 把 chunkKey 转成 SearchResult 的公共收尾
+    const auto makeResult = [this](const std::string& key) {
+        SearchResult sr;
+        auto colonPos = key.rfind(':');
+        sr.docId = key.substr(0, colonPos);
+        sr.chunkIndex = std::stoi(key.substr(colonPos + 1));
+        auto it = chunkStore_.find(key);
+        if (it != chunkStore_.end()) {
+            sr.content = it->second;
+        }
+        return sr;
+    };
+
+    std::vector<SearchResult> combined;
+
+    switch (mode) {
+    case SearchMode::Bm25Only:
+        for (const auto& r : bm25Results) {
+            SearchResult sr = makeResult(chunkKey(r.docId, r.chunkIndex));
+            sr.bm25Score = r.score;
+            sr.finalScore = r.score;
+            combined.push_back(sr);
+        }
+        break;
+
+    case SearchMode::VectorOnly:
+        // 未配置 / 异常 → 返回空（调用方据此提示「已降级」），不静默伪装成 BM25
+        for (const auto& [key, sim] : vectorScores) {
+            SearchResult sr = makeResult(key);
+            sr.vectorScore = sim;
+            sr.finalScore = sim;
+            combined.push_back(sr);
+        }
+        std::sort(combined.begin(), combined.end(),
+                  [](const SearchResult& a, const SearchResult& b) {
+                      return a.finalScore > b.finalScore;
+                  });
+        break;
+
+    case SearchMode::WeightedFusion: {
+        if (!vectorAvailable) {
+            break;   // 走下方统一的 BM25 降级（与 T0 以来行为一致）
+        }
+
+        // ── 加权融合：各路分数除以本路最大值归一化后线性加权 ──
+        std::unordered_map<std::string, double> bm25Scores;
+        for (const auto& r : bm25Results) {
+            bm25Scores[chunkKey(r.docId, r.chunkIndex)] = r.score;
+        }
+
+        // 收集所有出现过的文档
+        std::unordered_set<std::string> allKeys;
+        for (const auto& [k, _] : bm25Scores) allKeys.insert(k);
+        for (const auto& [k, _] : vectorScores) allKeys.insert(k);
+
+        double bm25Max = 0.0, vecMax = 0.0;
+        for (const auto& [_, s] : bm25Scores) bm25Max = std::max(bm25Max, s);
+        for (const auto& [_, s] : vectorScores) vecMax = std::max(vecMax, s);
+
+        std::vector<std::pair<std::string, double>> scored;
+        for (const auto& key : allKeys) {
+            double bm25Norm = bm25Max > 0 ? (bm25Scores[key] / bm25Max) : 0.0;
+            double vecNorm = vecMax > 0 ? (vectorScores[key] / vecMax) : 0.0;
+            double finalScore = bm25Weight_ * bm25Norm + vectorWeight_ * vecNorm;
+            scored.emplace_back(key, finalScore);
+        }
+
+        const int keep = std::min(topK, static_cast<int>(scored.size()));
+        std::partial_sort(scored.begin(), scored.begin() + keep, scored.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+
+        for (int i = 0; i < keep; ++i) {
+            const auto& [key, finalScore] = scored[i];
+            SearchResult sr = makeResult(key);
+            sr.bm25Score = bm25Scores[key];
+            sr.vectorScore = vectorScores[key];
+            sr.finalScore = finalScore;
+            combined.push_back(sr);
+        }
+        break;
+    }
+
+    case SearchMode::RrfFusion: {
+        if (!vectorAvailable) {
+            break;   // 走下方统一的 BM25 降级
+        }
+
+        std::vector<std::pair<std::string, double>> bm25Ranking;
+        for (const auto& r : bm25Results) {
+            bm25Ranking.emplace_back(chunkKey(r.docId, r.chunkIndex), r.score);
+        }
+        std::vector<std::pair<std::string, double>> vectorRanking;
+        for (const auto& r : vectorResults) {
+            if (r.index >= 0 && static_cast<size_t>(r.index) < vectorIndexMap_.size()) {
+                auto [docId, chunkIdx] = vectorIndexMap_[r.index];
+                vectorRanking.emplace_back(chunkKey(docId, chunkIdx), r.similarity);
+            }
+        }
+
+        for (const auto& [key, rrfScore] : rrfFuse(bm25Ranking, vectorRanking, topK)) {
+            SearchResult sr = makeResult(key);
+            auto bm = std::find_if(bm25Ranking.begin(), bm25Ranking.end(),
+                                   [&](const auto& p) { return p.first == key; });
+            auto ve = std::find_if(vectorRanking.begin(), vectorRanking.end(),
+                                   [&](const auto& p) { return p.first == key; });
+            sr.bm25Score = bm != bm25Ranking.end() ? bm->second : 0.0;
+            sr.vectorScore = ve != vectorRanking.end() ? ve->second : 0.0;
+            sr.finalScore = rrfScore;
+            combined.push_back(sr);
+        }
+        break;
+    }
+    }
+
+    // ── 降级：融合路向量不可用 / 融合结果为空时，只用 BM25 ──
+    if (combined.empty() && mode != SearchMode::VectorOnly) {
         for (const auto& r : bm25Results) {
             SearchResult sr;
             sr.docId = r.docId;
@@ -332,6 +433,10 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
         if (static_cast<int>(combined.size()) > topK) {
             combined.resize(topK);
         }
+    }
+
+    if (static_cast<int>(combined.size()) > topK) {
+        combined.resize(topK);
     }
 
     return combined;

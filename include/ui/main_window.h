@@ -15,6 +15,7 @@ class NavigationBar;
 class SearchPage;
 class LibraryPage;
 class HistoryPage;
+class QualityPage;
 class SettingsPage;
 
 namespace rag {
@@ -102,6 +103,7 @@ private:
     SearchPage* searchPage_ = nullptr;
     LibraryPage* libraryPage_ = nullptr;
     HistoryPage* historyPage_ = nullptr;
+    QualityPage* qualityPage_ = nullptr;
     SettingsPage* settingsPage_ = nullptr;
 
     // ── 检索参数配置（T3：启动时从 rag_settings.json 加载，设置页保存后更新）──

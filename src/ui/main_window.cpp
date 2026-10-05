@@ -17,6 +17,7 @@
 #include "ui/search_page.h"
 #include "ui/library_page.h"
 #include "ui/history_page.h"
+#include "ui/quality_page.h"
 #include "ui/settings_page.h"
 #include "config/app_config.h"
 #include "history/history_store.h"
@@ -110,15 +111,11 @@ void MainWindow::buildPages() {
     historyPage_ = new HistoryPage(historyStore_.get(), pageStack_);
     pageStack_->addWidget(historyPage_);
 
-    // ── 第 4 页：检索质量分析（T4，暂为占位）──
-    pageStack_->addWidget(new PlaceholderPage(
-        QStringLiteral("检索质量分析"),
-        QStringLiteral("同一查询 · 四路并列对比 · 可靠性验证"),
-        QStringLiteral("T4"),
-        QStringLiteral("面向系统维护者的检索质量看板：同一查询并列跑 "
-                       "BM25 单路 / 向量单路 / 加权融合 / RRF 融合，"
-                       "输出 Hit@5、R@10、MRR 指标卡——语料或模型变更后重新验证检索可靠性。"),
-        pageStack_));
+    // ── 第 4 页：检索质量分析（T4）──
+    // 维护者看板：对引擎只读调用（searchWithMode），不写索引不发指令。
+    // 删掉本页 = 去掉这几行 + 删页面文件，检索功能零影响。
+    qualityPage_ = new QualityPage(retriever_.get(), pageStack_);
+    pageStack_->addWidget(qualityPage_);
 
     // ── 第 5 页：设置（T3）──
     // 插件式接入：本页只读写配置层，不碰 Retriever——保存后发 settingsChanged，
@@ -288,6 +285,10 @@ void MainWindow::onSettingsChanged(const config::AppSettings& settings) {
     applySettingsToEngine();
     if (searchPage_) {
         searchPage_->applySettings(settings);
+    }
+    // Embedding 服务可能刚配上 Key，质量页提示行同步
+    if (qualityPage_) {
+        qualityPage_->refreshServiceHint();
     }
 }
 

@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace rag {
@@ -66,6 +68,16 @@ struct StoredDocument {
     std::vector<std::string> chunks;  // chunks[i] 对应 chunkIndex = i
 };
 
+/// 检索通路（T4 质量分析：四路并列对比）
+enum class SearchMode {
+    Bm25Only,        // ① BM25 关键词单路
+    VectorOnly,      // ② 向量语义单路（Embedding 未配置时返回空，由调用方提示降级）
+    WeightedFusion,  // ③ 加权融合（默认路：归一化后按 bm25Weight_/vectorWeight_ 加权；
+                     //    向量路不可用时自动降级纯 BM25，与 T0 以来行为一致）
+    RrfFusion,       // ④ 倒数排名融合 RRF（对照算法：score = Σ 1/(k + rank)，k=60；
+                     //    向量路不可用时同样降级纯 BM25）
+};
+
 /// RAG 检索器：混合 BM25 + 向量检索
 ///
 /// 解耦约定（开发工作计划·全局约束第 8 条）：
@@ -84,8 +96,20 @@ public:
                              const std::function<void(int, int)>& onPage = {});
     void addText(const std::string& text, const std::string& docId);
 
-    /// 混合检索：BM25 + 向量
+    /// 混合检索（默认加权融合路，T0 以来的行为，等价 searchWithMode(WeightedFusion)）
     std::vector<SearchResult> search(const std::string& query, int topK = 5);
+
+    /// 按指定通路检索（T4 质量分析页四路对比）。各路语义见 SearchMode 注释。
+    std::vector<SearchResult> searchWithMode(const std::string& query, int topK,
+                                             SearchMode mode);
+
+    /// 倒数排名融合（RRF）：score(d) = Σ_paths 1/(k + rank_i)，k = 60（论文标准值）。
+    /// 纯函数，公开供单测用合成排名直接断言（T4）。
+    /// 输入为两路已排序的 (chunkKey, 原始分数) 列表；输出按 RRF 分降序、截 topK。
+    static std::vector<std::pair<std::string, double>> rrfFuse(
+        const std::vector<std::pair<std::string, double>>& bm25Ranking,
+        const std::vector<std::pair<std::string, double>>& vectorRanking,
+        int topK, int k = 60);
 
     /// 设置 API Key（用于 embedding）
     void setApiKey(const std::string& key);

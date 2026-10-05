@@ -70,6 +70,7 @@ set(SRC_UI
     src/ui/search_page.cpp
     src/ui/library_page.cpp
     src/ui/history_page.cpp
+    src/ui/quality_page.cpp
     src/ui/settings_page.cpp
     src/ui/main_window.cpp
 )
@@ -101,6 +102,7 @@ set(HEADERS
     include/ui/search_page.h
     include/ui/library_page.h
     include/ui/history_page.h
+    include/ui/quality_page.h
     include/ui/settings_page.h
     include/config/app_config.h
     include/config/app_settings.h

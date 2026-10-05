@@ -367,3 +367,40 @@ QTextEdit#libraryDetail {
     padding: 12px 14px;
     color: #1F2937;
 }
+
+/* ── 检索质量分析页（T4）────────────────────────────────────────────────*/
+QLabel#qualityColTitle {
+    font-size: 12px;
+    font-weight: 700;
+    color: #14213D;
+    padding: 2px 4px;
+}
+QLabel#qualityStatus,
+QLabel#qualityEvalStatus {
+    font-size: 11px;
+    color: #64748B;
+}
+QLabel#qualityServiceHint {
+    font-size: 11px;
+    color: #94A3B8;
+}
+QTableWidget#qualityMetricsTable {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 6px;
+    gridline-color: #EDF0F5;
+    font-size: 12px;
+    color: #1F2937;
+}
+QTableWidget#qualityMetricsTable::item {
+    padding: 6px 8px;
+}
+QTableWidget#qualityMetricsTable QHeaderView::section {
+    background: #FAFBFD;
+    border: none;
+    border-bottom: 1px solid #E2E7EE;
+    padding: 8px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748B;
+}
