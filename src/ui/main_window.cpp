@@ -8,6 +8,7 @@
 #include <QMessageBox>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -124,6 +125,15 @@ void MainWindow::buildPages() {
     pageStack_->addWidget(settingsPage_);
     connect(settingsPage_, &SettingsPage::settingsChanged,
             this, &MainWindow::onSettingsChanged);
+
+    // ── P0-2 跨页忙碌互斥：任一页面开始引擎任务 → 其余页面禁用引擎动作 ──
+    // 页面之间零互相引用，广播经本窗口中转（与 answerFinished 同款模式）。
+    connect(searchPage_, &SearchPage::engineBusyChanged,
+            this, &MainWindow::forwardEngineBusy);
+    connect(libraryPage_, &LibraryPage::engineBusyChanged,
+            this, &MainWindow::forwardEngineBusy);
+    connect(qualityPage_, &QualityPage::engineBusyChanged,
+            this, &MainWindow::forwardEngineBusy);
 }
 
 void MainWindow::restoreIndexOnStartup() {
@@ -178,14 +188,15 @@ void MainWindow::setupStatusBar() {
     auto* bar = statusBar();
     bar->setSizeGripEnabled(false);
 
-    auto* dot = new QLabel(QStringLiteral("●"), this);
-    dot->setObjectName(QStringLiteral("statusDotOk"));
+    statusDot_ = new QLabel(QStringLiteral("●"), this);
+    // 初始灰点；实际颜色由 refreshServiceStatus() 按服务真实状态决定（P0-8，
+    // 旧实现写死 statusDotOk，QSS 里的 statusDotOff 是永不生效的死规则）
 
     statusEngine_ = new QLabel(this);
     statusEmbedding_ = new QLabel(this);
     statusLlm_ = new QLabel(this);
 
-    bar->addWidget(dot);
+    bar->addWidget(statusDot_);
     bar->addWidget(statusEngine_);
     bar->addWidget(statusEmbedding_);
     bar->addWidget(statusLlm_);
@@ -292,8 +303,42 @@ void MainWindow::onSettingsChanged(const config::AppSettings& settings) {
     }
 }
 
+// ── P0-2 跨页忙碌互斥 ──
+// busy 由发起页广播；这里回灌到全部动作页面（含发起页——发起页自身按钮
+// 已由其 busySelf_ 禁用，回灌把 busyExternal_ 同步为同一值，状态保持一致）。
+void MainWindow::forwardEngineBusy(bool busy) {
+    if (searchPage_) {
+        searchPage_->setExternalBusy(busy);
+    }
+    if (libraryPage_) {
+        libraryPage_->setExternalBusy(busy);
+    }
+    if (qualityPage_) {
+        qualityPage_->setExternalBusy(busy);
+    }
+}
+
+bool MainWindow::engineBusy() const {
+    return (searchPage_ && searchPage_->isBusy())
+        || (libraryPage_ && libraryPage_->isBusy())
+        || (qualityPage_ && qualityPage_->isBusy());
+}
+
 // ── 关闭前落盘 ──
 void MainWindow::closeEvent(QCloseEvent* event) {
+    // P0-2：任务进行中禁止退出。同步执行模型下强行关闭会在嵌套事件循环
+    // 深处析构正在跑 generate()/addDocument() 的对象（未定义行为，直接崩）；
+    // P1 线程模型落地后再放开为「确认后取消任务并退出」。
+    // 注意只做非模态提示：closeEvent 可能发生在嵌套事件循环（生成/导入）内，
+    // 在其中再弹模态对话框有重入风险。
+    if (engineBusy()) {
+        statusBar()->showMessage(
+            QStringLiteral("检索 / 生成 / 导入任务进行中，暂不能退出；请等待任务结束。"),
+            5000);
+        event->ignore();
+        return;
+    }
+
     if (retriever_ && retriever_->documentCount() > 0) {
         const auto result = retriever_->saveIndex();
         if (!result.ok) {
@@ -333,6 +378,23 @@ void MainWindow::refreshServiceStatus() {
     statusLlm_->setText(apiReady_
         ? QStringLiteral("LLM：deepseek-chat")
         : QStringLiteral("LLM：未配置"));
+
+    // P0-8：圆点 = 至少一路 AI 服务就绪；不再永远是死绿灯
+    setStatusDot((retriever_ && retriever_->embeddingReady()) || apiReady_);
+}
+
+void MainWindow::setStatusDot(bool ok) {
+    if (!statusDot_) {
+        return;
+    }
+    const QString want = ok ? QStringLiteral("statusDotOk") : QStringLiteral("statusDotOff");
+    if (statusDot_->objectName() != want) {
+        statusDot_->setObjectName(want);
+        // 动态属性/objectName 变更后必须重新跑一遍样式匹配，QSS 才会换色
+        statusDot_->style()->unpolish(statusDot_);
+        statusDot_->style()->polish(statusDot_);
+        statusDot_->update();
+    }
 }
 
 // ── Ctrl+滚轮 缩放 ──

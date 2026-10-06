@@ -112,6 +112,7 @@ void SearchPage::setupUi() {
     apiKeyLabel->setObjectName(QStringLiteral("fieldLabel"));
 
     apiKeyInput_ = new QLineEdit(this);
+    apiKeyInput_->setObjectName(QStringLiteral("apiKeyInput"));
     apiKeyInput_->setPlaceholderText(QStringLiteral("sk-xxxxxxxxxxxxxxxxxxxxxxxx"));
     apiKeyInput_->setEchoMode(QLineEdit::Password);
     apiKeyInput_->setMinimumHeight(36);
@@ -194,9 +195,11 @@ void SearchPage::setupUi() {
     toolLayout->setSpacing(10);
 
     importBtn_ = new QPushButton(QStringLiteral("＋ 导入文档"), this);
+    importBtn_->setObjectName(QStringLiteral("importBtn"));
     setButtonRole(importBtn_, "primary");
 
     clearBtn_ = new QPushButton(QStringLiteral("清空索引"), this);
+    clearBtn_->setObjectName(QStringLiteral("clearBtn"));
     setButtonRole(clearBtn_, "danger");
 
     statusLabel_ = new QLabel(QStringLiteral("就绪，请先导入文档"), this);
@@ -363,10 +366,47 @@ void SearchPage::updateApiKeyStatus(bool valid, const QString& message) {
     AppTheme::setStatusFlag(apiKeyStatus_, valid);
 }
 
+// ── P0-2 忙碌状态机 ──
+// 引擎动作按钮（检索/导入/清空）只在「本页空闲且其他页面也空闲」时可点。
+// 跨页互斥由 MainWindow 监听 engineBusyChanged 后回灌 setExternalBusy 实现。
+void SearchPage::refreshActionButtons() {
+    const bool enabled = !busySelf_ && !busyExternal_;
+    searchBtn_->setEnabled(enabled);
+    importBtn_->setEnabled(enabled);
+    clearBtn_->setEnabled(enabled);
+}
+
+SearchPage::OverwriteChoice SearchPage::defaultConfirmOverwrite(
+    const QString& docId, const QString& existingPath, const QString& newPath) const {
+    // 走到这里的必是「文档库已有同名 docId，但来源路径不同」——
+    // 同一路径重复导入（更新场景）已在调用侧静默放行。
+    QMessageBox box(QMessageBox::Warning, QStringLiteral("发现同名文档"),
+                    QStringLiteral("文档库中已存在同名文档「%1」\n\n"
+                                   "  已有来源：%2\n"
+                                   "  本次导入：%3\n\n"
+                                   "覆盖将删除原文档及其索引，如何处理？")
+                        .arg(docId, existingPath.isEmpty() ? QStringLiteral("（未知）") : existingPath,
+                             newPath),
+                    QMessageBox::NoButton, const_cast<SearchPage*>(this));
+    QPushButton* overwriteBtn = box.addButton(QStringLiteral("覆盖"), QMessageBox::YesRole);
+    QPushButton* skipBtn = box.addButton(QStringLiteral("跳过该文件"), QMessageBox::NoRole);
+    box.addButton(QStringLiteral("取消剩余导入"), QMessageBox::RejectRole);
+    box.exec();
+
+    QAbstractButton* clicked = box.clickedButton();
+    if (clicked == overwriteBtn) return OverwriteChoice::Overwrite;
+    if (clicked == skipBtn) return OverwriteChoice::Skip;
+    return OverwriteChoice::CancelAll;
+}
+
 // ── 搜索 ──
 void SearchPage::onSearch() {
     const QString query = searchInput_->text().trimmed();
     if (query.isEmpty()) return;
+    if (busySelf_ || busyExternal_) {
+        statusLabel_->setText(QStringLiteral("引擎忙碌中，请等待当前任务完成"));
+        return;
+    }
 
     if (retriever_->documentCount() == 0) {
         QMessageBox::information(this, QStringLiteral("提示"),
@@ -374,7 +414,9 @@ void SearchPage::onSearch() {
         return;
     }
 
-    searchBtn_->setEnabled(false);
+    // P0-2：从检索到生成结束全程忙碌——按钮禁用 + 跨页广播。
+    // 这一步同时封住重入链：嵌入向量懒重建期间，导入/删除/再检索都进不来。
+    beginEngineTask();
     progressBar_->setVisible(true);
     progressBar_->setRange(0, 0);  // 不确定模式
 
@@ -536,7 +578,7 @@ void SearchPage::onSearch() {
         }
 
         progressBar_->setVisible(false);
-        searchBtn_->setEnabled(true);
+        endEngineTask();
         statusLabel_->setText(QStringLiteral("检索完成，找到 %1 条结果（筛选后 %2 条）")
                                   .arg(static_cast<int>(cachedResults_.size()))
                                   .arg(static_cast<int>(filtered.size())));
@@ -559,9 +601,60 @@ void SearchPage::onPickImportFiles() {
 
 void SearchPage::importPaths(const QStringList& files) {
     if (files.isEmpty()) return;
+    if (busySelf_ || busyExternal_) {
+        statusLabel_->setText(QStringLiteral("引擎忙碌中，请等待当前任务完成"));
+        return;
+    }
 
+    // ── P0-7 同名冲突预检（在进度对话框出现前问清，避免模态叠模态）──
+    // docId = 文件名；同名但来源路径不同的文件若直接导入会静默覆盖原文档。
+    // 同一路径重复导入（更新场景）静默放行。
+    QStringList accepted;
+    int skipped = 0;
+    for (const QString& file : files) {
+        const QString docId = QFileInfo(file).fileName();
+        rag::DocumentInfo existing;
+        const bool known = retriever_->getDocumentInfo(docId.toStdString(), existing);
+        const bool sameSource = known
+            && !existing.sourcePath.empty()
+            && QFileInfo(QString::fromStdString(existing.sourcePath)).canonicalFilePath()
+                   == QFileInfo(file).canonicalFilePath();
+        if (known && !sameSource) {
+            const OverwriteChoice choice = confirmOverwrite_
+                ? confirmOverwrite_(docId,
+                                    QString::fromStdString(existing.sourcePath),
+                                    QFileInfo(file).absoluteFilePath())
+                : defaultConfirmOverwrite(docId,
+                                          QString::fromStdString(existing.sourcePath),
+                                          QFileInfo(file).absoluteFilePath());
+            if (choice == OverwriteChoice::Skip) {
+                ++skipped;
+                continue;
+            }
+            if (choice == OverwriteChoice::CancelAll) {
+                statusLabel_->setText(
+                    QStringLiteral("已取消导入（同名文档「%1」，未做任何更改）").arg(docId));
+                return;
+            }
+        }
+        accepted.append(file);
+    }
+
+    if (accepted.isEmpty()) {
+        statusLabel_->setText(
+            QStringLiteral("未导入任何文件（%1 个同名文档被跳过）").arg(skipped));
+        return;
+    }
+
+    // 二次检查：冲突确认弹窗泵事件期间，用户可能已发起检索——此时放弃导入
+    if (busySelf_ || busyExternal_) {
+        statusLabel_->setText(QStringLiteral("引擎忙碌中，导入已取消"));
+        return;
+    }
+
+    beginEngineTask();
     progressBar_->setVisible(true);
-    progressBar_->setRange(0, files.size());
+    progressBar_->setRange(0, accepted.size());
     statusLabel_->setText(
         QStringLiteral("正在导入文档...（扫描件 OCR 逐页识别，可能需要数分钟，请耐心等待）"));
 
@@ -590,7 +683,7 @@ void SearchPage::importPaths(const QStringList& files) {
     bool userCancelled = false;
     int stoppedAt = -1;   // 取消发生时的文件下标（用于统计未处理文件数）
     QStringList errors;
-    for (int i = 0; i < files.size(); ++i) {
+    for (int i = 0; i < accepted.size(); ++i) {
         if (cancelledQuery()) {
             userCancelled = true;
             stoppedAt = i;
@@ -598,11 +691,11 @@ void SearchPage::importPaths(const QStringList& files) {
         }
         progress.setLabelText(
             QStringLiteral("正在导入（%1 / %2）：\n%3")
-                .arg(i + 1).arg(files.size())
-                .arg(QFileInfo(files[i]).fileName()));
+                .arg(i + 1).arg(accepted.size())
+                .arg(QFileInfo(accepted[i]).fileName()));
         try {
             const auto result = retriever_->addDocument(
-                files[i].toStdString(), cancelledQuery, onPage);
+                accepted[i].toStdString(), cancelledQuery, onPage);
             if (result.imported) {
                 ++imported;
                 chunksAdded += result.chunksAdded;
@@ -614,14 +707,14 @@ void SearchPage::importPaths(const QStringList& files) {
                 stoppedAt = i;
                 break;
             } else {
-                const QString name = QFileInfo(files[i]).fileName();
+                const QString name = QFileInfo(accepted[i]).fileName();
                 const QString reason = result.diagnostic.empty()
                     ? QStringLiteral("未能提取可检索文本")
                     : QString::fromStdString(result.diagnostic);
                 errors.append(name + QStringLiteral("：") + reason);
             }
         } catch (const std::exception& e) {
-            errors.append(QFileInfo(files[i]).fileName() + QStringLiteral("：") +
+            errors.append(QFileInfo(accepted[i]).fileName() + QStringLiteral("：") +
                           QString::fromStdString(e.what()));
         }
         progressBar_->setValue(i + 1);
@@ -630,9 +723,10 @@ void SearchPage::importPaths(const QStringList& files) {
     progress.reset();
 
     progressBar_->setVisible(false);
+    endEngineTask();
     if (userCancelled) {
         const int remaining =
-            (stoppedAt >= 0) ? (files.size() - stoppedAt - 1) : 0;
+            (stoppedAt >= 0) ? (accepted.size() - stoppedAt - 1) : 0;
         QString message = QStringLiteral("已取消导入：成功 %1 个文档，新增 %2 个文本块")
                               .arg(imported).arg(chunksAdded);
         if (imported == 0) {
@@ -652,6 +746,9 @@ void SearchPage::importPaths(const QStringList& files) {
         if (ocrImported > 0) {
             message += QStringLiteral("（其中 %1 个通过 OCR 识别）").arg(ocrImported);
         }
+        if (skipped > 0) {
+            message += QStringLiteral("；同名跳过 %1 个").arg(skipped);
+        }
         statusLabel_->setText(message);
     } else {
         const QString summary = imported > 0
@@ -669,6 +766,11 @@ void SearchPage::importPaths(const QStringList& files) {
 
 // ── 清空索引 ──
 void SearchPage::onClearIndex() {
+    if (busySelf_ || busyExternal_) {
+        statusLabel_->setText(QStringLiteral("引擎忙碌中，请等待当前任务完成"));
+        return;
+    }
+
     const auto reply = QMessageBox::question(
         this,
         QStringLiteral("确认清空"),

@@ -33,9 +33,25 @@ class QualityPage : public QWidget {
 public:
     explicit QualityPage(rag::Retriever* retriever, QWidget* parent = nullptr);
 
+    /// 本页是否有引擎任务进行中（对比 / 批量评测），供 closeEvent 与 E2E 断言
+    bool isBusy() const { return busySelf_; }
+
 public slots:
     /// 引擎状态可能变化（如设置页新配了 Key）时刷新提示行
     void refreshServiceHint();
+
+    /// 其他页面有引擎任务进行中时，禁用本页动作按钮（P0-2 跨页互斥，
+    /// 由 MainWindow 中转——页面之间不互相引用）
+    void setExternalBusy(bool busy) {
+        if (busyExternal_ != busy) {
+            busyExternal_ = busy;
+            refreshActionButtons();
+        }
+    }
+
+signals:
+    /// 引擎任务开始/结束（P0-2）：MainWindow 据此让其他页面禁用引擎动作
+    void engineBusyChanged(bool busy);
 
 private slots:
     void onCompare();     // ① 单查询四路对比
@@ -44,11 +60,29 @@ private slots:
 private:
     void setupUi();
 
+    /// ── P0-2 忙碌状态机 ──
+    void beginEngineTask() {
+        busySelf_ = true;
+        refreshActionButtons();
+        emit engineBusyChanged(true);
+    }
+    void endEngineTask() {
+        busySelf_ = false;
+        refreshActionButtons();
+        emit engineBusyChanged(false);
+    }
+    /// 按当前忙碌状态刷新本页动作按钮（自忙或他页忙时一律禁用）
+    void refreshActionButtons();
+
     /// 往单列列表填充一路结果；vectorMissing 时显示降级说明
     void fillList(QListWidget* list, const std::vector<rag::SearchResult>& results,
                   bool vectorMissing);
 
     rag::Retriever* retriever_;   // 非拥有；只读调用
+
+    // ── P0-2 忙碌状态 ──
+    bool busySelf_ = false;
+    bool busyExternal_ = false;
 
     // ── 单查询对比 ──
     QLineEdit* queryInput_ = nullptr;

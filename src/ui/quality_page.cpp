@@ -193,11 +193,26 @@ void QualityPage::fillList(QListWidget* list,
     }
 }
 
+// ── P0-2 忙碌状态机 ──
+// 本页动作（对比/评测）期间禁用两个按钮；跨页互斥由 MainWindow 回灌 setExternalBusy。
+// 旧实现对比按钮从不禁用、靠 processEvents 泵事件刷新——重入保护为零（体检 P0-2）。
+void QualityPage::refreshActionButtons() {
+    const bool enabled = !busySelf_ && !busyExternal_;
+    compareBtn_->setEnabled(enabled);
+    evalBtn_->setEnabled(enabled);
+}
+
 void QualityPage::onCompare() {
     const QString q = queryInput_->text().trimmed();
     if (q.isEmpty() || !retriever_) {
         return;
     }
+    if (busySelf_ || busyExternal_) {
+        compareStatus_->setText(QStringLiteral("引擎忙碌中，请等待当前任务完成"));
+        return;
+    }
+    beginEngineTask();
+
     const std::string query = q.toStdString();
     constexpr int kTop = 10;
 
@@ -215,6 +230,7 @@ void QualityPage::onCompare() {
     fillList(listWeighted_, weighted, false);
     fillList(listRrf_, rrf, false);
 
+    endEngineTask();
     if (vectorMissing) {
         compareStatus_->setText(
             QStringLiteral("Embedding 未配置：② 向量单路无结果，③④ 融合路已自动降级纯 BM25。"));
@@ -229,6 +245,11 @@ void QualityPage::onBatchEval() {
     if (!retriever_) {
         return;
     }
+    if (busySelf_ || busyExternal_) {
+        evalStatus_->setText(QStringLiteral("引擎忙碌中，请等待当前任务完成"));
+        return;
+    }
+    beginEngineTask();
     const auto& golden = rag::goldenQueries();
     constexpr int kWidth = 50;   // 评测宽度：文档级排名取 Top 10 指标，检索放宽到 50
 
@@ -281,6 +302,7 @@ void QualityPage::onBatchEval() {
     }
 
     evalBtn_->setEnabled(true);
+    endEngineTask();
     evalStatus_->setText(vectorMissing
         ? QStringLiteral("评测完成（Embedding 未配置：② 向量单路无结果，③④ 为降级 BM25 排名，"
                          "其指标只反映 BM25 排序路径，不具对比意义）。")

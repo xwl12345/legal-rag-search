@@ -28,6 +28,7 @@ enum class ParseStatus {
     FileOpenFailed,
     InvalidPdf,
     NoTextExtracted,
+    UnsupportedEncoding,   // P0-6：文本编码无法识别（非 UTF-8 / GB18030 / UTF-16），拒绝导入而非吞成乱码
     OcrFailed,
     OcrCancelled
 };
@@ -38,6 +39,7 @@ struct ParseResult {
     ParseSource source = ParseSource::None;
     std::vector<TextChunk> chunks;
     std::string diagnostic;
+    std::string content;   // P0-5：分块前的整篇原文（Retriever 存 fullText 用，含 overlap 的分块拼不出原文）
 
     bool isSuccess() const { return status == ParseStatus::Success; }
 };

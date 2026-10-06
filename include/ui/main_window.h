@@ -72,6 +72,13 @@ private:
     void setupStatusBar();
     void buildPages();
 
+    /// ── P0-2 跨页忙碌互斥（中枢）──
+    /// 任一页面报告引擎任务开始/结束后，把忙碌状态回灌到全部动作页面
+    /// （含发起页，保持其按钮禁用一致），并记录到 engineBusy_ 供 closeEvent 判断。
+    void forwardEngineBusy(bool busy);
+    /// 是否有页面正在执行引擎任务（检索/生成/导入/删除/清空/对比/评测）
+    bool engineBusy() const;
+
     /// 启动时加载配置文件并把参数下发到引擎（缺文件/损坏回落默认值）
     void loadSettingsAndApply();
     /// 把 appSettings_ 应用到引擎热更新 setter（供启动与设置变更共用）
@@ -79,6 +86,8 @@ private:
     /// 按引擎真实状态刷新状态栏两行服务标签（Embedding 行读 retriever，
     /// LLM 行读 apiReady_ —— 两条服务的 Key 来源不同，不能共用一个 ready）
     void refreshServiceStatus();
+    /// 状态圆点着色（P0-8）：至少一路 AI 服务就绪 = 绿，否则灰（QSS statusDotOff）
+    void setStatusDot(bool ok);
 
     /// 启动时尝试从磁盘恢复索引，并把结果写进状态栏
     void restoreIndexOnStartup();
@@ -110,6 +119,7 @@ private:
     config::AppSettings appSettings_;
 
     // ── 状态栏 ──
+    QLabel* statusDot_ = nullptr;
     QLabel* statusEngine_ = nullptr;
     QLabel* statusEmbedding_ = nullptr;
     QLabel* statusLlm_ = nullptr;

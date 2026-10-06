@@ -144,10 +144,32 @@ int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) 
                              .arg(keyReady ? QStringLiteral("已配置")
                                            : QStringLiteral("未配置（本次验证降级分支）"));
 
-    // ── 2. 检索 ──
+    // ── 2. 检索（P0-2 忙碌互斥一并在本段验证）──
     searchInput->setText(QStringLiteral("民间借贷 交付凭证"));
     searchBtn->click();          // onSearch 内部用 singleShot(100) 排队
+    QApplication::processEvents();
+
+    // P0-2：检索+生成期间，检索页忙碌、引擎动作按钮全部禁用、
+    // 他页动作（此处以「忙碌期导入」代言）必须被拒绝。
+    check(page->isBusy(), QStringLiteral("P0-2：检索期间检索页处于忙碌态"));
+    check(!searchBtn->isEnabled(), QStringLiteral("P0-2：检索期间检索按钮禁用"));
+    if (QPushButton* importBtn = window.findChild<QPushButton*>("importBtn")) {
+        check(!importBtn->isEnabled(), QStringLiteral("P0-2：检索期间导入按钮禁用"));
+    }
+    const int docsBeforeBusy = lastDocs;
+    page->importPaths(corpus);   // 忙碌期导入必须整体 no-op
+    check(lastDocs == docsBeforeBusy, QStringLiteral("P0-2：忙碌期导入被拒（引擎无变化）"),
+          QStringLiteral("导入前后文档数 %1 / %2").arg(docsBeforeBusy).arg(lastDocs));
+
+    // P0-2：任务进行中关窗被拦截（同步执行模型下强关会在嵌套循环深处析构活动对象）
+    window.close();
+    QApplication::processEvents();
+    check(window.isVisible(), QStringLiteral("P0-2：任务进行中关闭被拦截"));
+    check(page->isBusy(), QStringLiteral("P0-2：拦截后任务继续运行"));
+
     pump(3000);                  // 等检索与生成分支走完
+    check(!page->isBusy(), QStringLiteral("P0-2：检索完成后忙碌解除"));
+    check(searchBtn->isEnabled(), QStringLiteral("P0-2：完成后按钮恢复可用"));
 
     const int hits = resultList->count();
     check(hits > 0, QStringLiteral("检索返回结果"), QStringLiteral("%1 条").arg(hits));
@@ -566,6 +588,128 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
     return g_failures;
 }
 
+/// P0-7 同名异路径覆盖确认 E2E：同路径更新静默放行；异路径同名经确认钩子
+/// 完成 覆盖 / 跳过 / 取消 三种选择，引擎内容与之一致。
+int runOverwriteE2E() {
+    QFile::remove(QStringLiteral("rag_index.dat"));
+
+    // ── 准备三个目录下的同名文件（内容互不相同，各带独有标记词）──
+    struct FileSpec { QString dir; QString marker; };
+    const FileSpec specs[] = {
+        { QStringLiteral("p0_dup_a"), QStringLiteral("甲案独有标记词玉衡") },
+        { QStringLiteral("p0_dup_b"), QStringLiteral("乙案独有标记词璇玑") },
+        { QStringLiteral("p0_dup_c"), QStringLiteral("丙案独有标记词玉衡三号") },
+    };
+    const QString name = QStringLiteral("case_p0_dup.txt");
+    QStringList paths;
+    for (const auto& spec : specs) {
+        const QString dir = QDir::current().absoluteFilePath(spec.dir);
+        QDir().mkpath(dir);
+        const QString path = dir + QLatin1Char('/') + name;
+        QFile file(path);
+        file.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        file.write(QStringLiteral("（2024）民初0000号 模拟文书。%1，本案事实清楚。")
+                       .arg(spec.marker).toUtf8());
+        file.close();
+        paths << path;
+    }
+
+    MainWindow window;
+    window.resize(1180, 720);
+    window.show();
+    QApplication::processEvents();
+
+    SearchPage* page = window.findChild<SearchPage*>();
+    LibraryPage* libPage = window.findChild<LibraryPage*>();
+    QTableWidget* table = window.findChild<QTableWidget*>("libraryTable");
+    QTextEdit* detail = window.findChild<QTextEdit*>("libraryDetail");
+    if (!page || !libPage || !table || !detail) {
+        check(false, QStringLiteral("P0-7：页面与控件就绪"), QStringLiteral("存在控件未找到"));
+        return g_failures;
+    }
+
+    auto showFirstRowDetail = [&]() {
+        QApplication::processEvents();
+        if (table->rowCount() > 0) {
+            table->selectRow(0);
+            QApplication::processEvents();
+        }
+    };
+
+    // 首次导入 A：docId 进入引擎
+    page->importPaths({paths[0]});
+    QApplication::processEvents();
+    libPage->refresh();
+    showFirstRowDetail();
+    check(libPage->rowCount() == 1, QStringLiteral("P0-7：首次导入同名文件 A 成功"),
+          QStringLiteral("%1 行").arg(libPage->rowCount()));
+
+    // 注入脚本化确认钩子（默认弹窗在无人值守环境无法点击）
+    struct Hook {
+        int calls = 0;
+        QString lastDocId, lastExisting, lastNew;
+        SearchPage::OverwriteChoice answer = SearchPage::OverwriteChoice::Overwrite;
+    } hook;
+    page->setConfirmOverwriteHandler(
+        [&hook](const QString& docId, const QString& existingPath, const QString& newPath) {
+            ++hook.calls;
+            hook.lastDocId = docId;
+            hook.lastExisting = existingPath;
+            hook.lastNew = newPath;
+            return hook.answer;
+        });
+
+    // ① 同路径重复导入（更新场景）：静默放行，不触发钩子
+    page->importPaths({paths[0]});
+    QApplication::processEvents();
+    check(hook.calls == 0 && libPage->rowCount() == 1,
+          QStringLiteral("P0-7：同路径重复导入静默放行（不弹确认）"));
+
+    // ② 异路径同名 + 选择「覆盖」：钩子参数正确，A 的内容被 B 替换
+    page->importPaths({paths[1]});
+    QApplication::processEvents();
+    libPage->refresh();
+    showFirstRowDetail();
+    check(hook.calls == 1, QStringLiteral("P0-7：异路径同名导入触发确认钩子"));
+    check(hook.lastDocId == name
+              && hook.lastExisting == paths[0]
+              && hook.lastNew == paths[1],
+          QStringLiteral("P0-7：确认钩子收到正确的 docId 与新旧路径"),
+          QStringLiteral("%1 | %2 → %3")
+              .arg(hook.lastDocId, hook.lastExisting, hook.lastNew));
+    check(detail->toPlainText().contains(specs[1].marker)
+              && !detail->toPlainText().contains(specs[0].marker),
+          QStringLiteral("P0-7：选择覆盖后引擎内容替换为新文件"));
+
+    // ③ 异路径同名 + 选择「跳过」：C 不入库，内容仍是 B
+    hook.answer = SearchPage::OverwriteChoice::Skip;
+    page->importPaths({paths[2]});
+    QApplication::processEvents();
+    libPage->refresh();
+    showFirstRowDetail();
+    check(hook.calls == 2, QStringLiteral("P0-7：跳过路径同样经过确认钩子"));
+    check(detail->toPlainText().contains(specs[1].marker)
+              && !detail->toPlainText().contains(specs[2].marker),
+          QStringLiteral("P0-7：选择跳过后原文档内容保持不变"));
+
+    // ④ 异路径同名（C 未入库，docId 已在库）+ 选择「取消剩余导入」
+    hook.answer = SearchPage::OverwriteChoice::CancelAll;
+    page->importPaths({paths[2]});
+    QApplication::processEvents();
+    check(hook.calls == 3, QStringLiteral("P0-7：取消路径同样经过确认钩子"));
+    check(libPage->rowCount() == 1, QStringLiteral("P0-7：取消后文档数不变"));
+
+    window.close();
+    QApplication::processEvents();
+
+    // 收尾：清掉本组写出的索引与临时文件
+    QFile::remove(QStringLiteral("rag_index.dat"));
+    for (const auto& spec : specs) {
+        QDir(QDir::current().absoluteFilePath(spec.dir)).removeRecursively();
+    }
+    return g_failures;
+}
+
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════
@@ -949,6 +1093,9 @@ int main(int argc, char* argv[]) {
 
         qInfo().noquote() << QStringLiteral("── 质量分析 E2E（四路对比 → 降级语义 → 批量评测）──");
         runQualityE2E(parser.value(e2eOption));
+
+        qInfo().noquote() << QStringLiteral("── P0 同名覆盖确认 E2E（覆盖 / 跳过 / 取消 + 内容一致）──");
+        runOverwriteE2E();
     }
 
     qInfo().noquote() << (g_failures == 0

@@ -1980,6 +1980,175 @@ void test_search_modes_degraded() {
 }  // namespace
 
 // ═══════════════════════════════════════════════════════════════
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QStringEncoder>
+#else
+#include <QTextCodec>
+#endif
+
+// ═══════════════════════════════════════════════════════════════
+// P0 止血包回归（docs/optimization-plan.md §2，P0-1..P0-8）
+// ═══════════════════════════════════════════════════════════════
+
+// P0-1（词典运行期探测）由整体可运行性覆盖：run_tests 从项目根跑命中
+// 「编译期路径」候选，exe 同级 dict/ 候选由 CMake POST_BUILD 部署。
+// 探测全落空时抛异常由 main 捕获——无法在本进程内注入"缺词典"场景，不设用例。
+
+void test_p0_metadata_court_underflow_guard() {
+    TEST("P0-3：法院名回扫遇截断 UTF-8 头不越界");
+    // "人民法院"前是被截断的多字节字符：旧实现 substr(nameStart - 3) 在
+    // size_t 上回绕 → std::out_of_range；P0-3 守卫后到边界为止，不再抛。
+    const std::string variants[] = {
+        std::string("\xE4\xB8") + "人民法院已审理本案。",   // 3 字节汉字截剩 2 字节
+        std::string("\xE4") + "人民法院",                    // 截剩 1 字节
+        std::string("\xF0\x9F") + "人民法院",                // 4 字节字符截剩 2 字节
+    };
+    for (const auto& text : variants) {
+        bool threw = false;
+        try {
+            // extractCourt 是 private，统一走公开入口 extract()（内部会触发法院回扫）
+            auto meta = document::MetadataExtractor::extract(text);
+            (void)meta;
+        } catch (...) {
+            threw = true;
+        }
+        CHECK(!threw);
+    }
+    PASS();
+}
+
+void test_p0_fulltext_is_original() {
+    TEST("P0-5：fullText = 解析原文（无分块重叠重复）");
+    const std::string path = "build/test_p0_fulltext.txt";
+    std::string original;
+    for (int i = 0; i < 60; ++i) {
+        original += "第" + std::to_string(i) + "条：本案争议焦点为合同违约金数额如何认定。\n";
+    }
+    {
+        std::ofstream f(path, std::ios::binary);
+        f << original;
+    }
+
+    rag::Retriever r;
+    r.setIndexFilePath("build/test_p0_fulltext.dat");
+    const auto res = r.addDocument(path);
+    CHECK(res.imported);
+
+    rag::DocumentInfo info;
+    CHECK(r.getDocumentInfo(res.documentId, info));
+    CHECK(info.chunkCount >= 2);   // 必须是多块文档，否则测不出"重复拼接"
+
+    std::string full;
+    CHECK(r.getFullText(res.documentId, full));
+    CHECK(full == original);       // 与原文逐字节一致（带 overlap 的分块拼不出这个结果）
+    r.clearAll(true);
+    std::remove(path.c_str());
+    PASS();
+}
+
+void test_p0_gbk_file_import() {
+    TEST("P0-6：GBK（GB18030）编码文件自动转码导入");
+    const std::string path = "build/test_p0_gbk.txt";
+    const std::string utf8Content =
+        "（2024）京0105民初12345号\n北京市朝阳区人民法院民事判决书\n"
+        "原告与被告民间借贷纠纷一案，本院经审理认为，被告应当向原告偿还借款本金十万元并支付利息。\n"
+        "判决如下：被告于本判决生效之日起十日内向原告偿还借款本金并支付利息。\n二〇二四年五月二十日\n";
+
+    QByteArray gbkBytes;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    QStringEncoder gb(QByteArray("GB18030"));
+    CHECK(gb.isValid());
+    gbkBytes = gb(QString::fromStdString(utf8Content));
+#else
+    QTextCodec* gb = QTextCodec::codecForName("GB18030");
+    CHECK(gb != nullptr);
+    gbkBytes = gb->fromUnicode(QString::fromStdString(utf8Content));
+#endif
+    CHECK(!gbkBytes.isEmpty());
+    {
+        std::ofstream f(path, std::ios::binary);
+        f.write(gbkBytes.constData(), gbkBytes.size());
+    }
+
+    rag::Retriever r;
+    r.setIndexFilePath("build/test_p0_gbk.dat");
+    const auto res = r.addDocument(path);
+    CHECK(res.imported);
+
+    std::string full;
+    CHECK(r.getFullText(res.documentId, full));
+    CHECK(full == utf8Content);    // 落库的全文就是正确 UTF-8
+
+    auto hits = r.search("民间借贷 借款本金", 5);
+    CHECK(hits.size() >= 1);       // GBK 内容可被正常检索命中
+    r.clearAll(true);
+    std::remove(path.c_str());
+    PASS();
+}
+
+void test_p0_utf8_bom_stripped() {
+    TEST("P0-6：UTF-8 BOM 被剥离，不混入正文");
+    const std::string path = "build/test_p0_bom.txt";
+    const std::string content = "（2023）沪0115刑初789号 故意伤害案 上海市浦东新区人民法院";
+    {
+        std::ofstream f(path, std::ios::binary);
+        f << "\xEF\xBB\xBF" << content;
+    }
+
+    rag::Retriever r;
+    r.setIndexFilePath("build/test_p0_bom.dat");
+    const auto res = r.addDocument(path);
+    CHECK(res.imported);
+
+    std::string full;
+    CHECK(r.getFullText(res.documentId, full));
+    CHECK(full == content);        // BOM 不进 fullText
+    const auto* meta = r.getMetadata(res.documentId);
+    CHECK(meta != nullptr && !meta->caseNumber.empty());  // 元数据提取不受 BOM 干扰
+    r.clearAll(true);
+    std::remove(path.c_str());
+    PASS();
+}
+
+void test_p0_binary_file_rejected() {
+    TEST("P0-6：二进制乱码文件如实拒绝导入（不吞成乱码索引）");
+    const std::string path = "build/test_p0_bin.txt";
+    {
+        std::ofstream f(path, std::ios::binary);
+        f << "\x00\x01\x02\x03\xFF\xFE\xFD\xFC\x00\xFB";
+    }
+
+    rag::Retriever r;
+    r.setIndexFilePath("build/test_p0_bin.dat");
+    const auto res = r.addDocument(path);
+    CHECK(!res.imported);
+    CHECK(!res.diagnostic.empty());
+    CHECK_EQ(r.documentCount(), 0);
+    r.clearAll(true);
+    std::remove(path.c_str());
+    PASS();
+}
+
+void test_p0_vector_cache_invalidation() {
+    TEST("P0-4：换 Embedding 端点/模型不残留旧缓存（观测口冒烟）");
+    // 说明：本用例当前只能观测"缓存清空 + 配置生效 + 不崩溃"；
+    // 向量条目的真实重建行为待 P2 IHttpTransport 注入 FakeTransport 后升级为全链路断言。
+    rag::Retriever r;
+    CHECK_EQ(r.vectorCacheSize(), 0);
+
+    r.setApiKey("sk-p0vectorcache123456");
+    r.setEmbeddingEndpoint("https://api.siliconflow.cn", "BAAI/bge-large-zh-v1.5");
+    CHECK_EQ(r.vectorCacheSize(), 0);
+    CHECK(r.embeddingModel() == "BAAI/bge-large-zh-v1.5");
+    CHECK(r.embeddingReady());
+
+    // 同值重复下发（启动时配置原样回灌的路径）不得异常
+    r.setEmbeddingEndpoint("https://api.siliconflow.cn", "BAAI/bge-large-zh-v1.5");
+    r.setApiKey("sk-p0vectorcache123456");
+    CHECK(r.embeddingModel() == "BAAI/bge-large-zh-v1.5");
+    PASS();
+}
+
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -2097,6 +2266,14 @@ void run_all_tests() {
     test_rrf_fuse();
     test_eval_metrics();
     test_search_modes_degraded();
+
+    std::cout << "\n── P0 止血包回归（2026-10-06 体检必修项）──" << std::endl;
+    test_p0_metadata_court_underflow_guard();
+    test_p0_fulltext_is_original();
+    test_p0_gbk_file_import();
+    test_p0_utf8_bom_stripped();
+    test_p0_binary_file_rejected();
+    test_p0_vector_cache_invalidation();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

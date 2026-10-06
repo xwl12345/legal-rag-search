@@ -1,10 +1,19 @@
 #include "document/tokenizer.h"
 #include "cppjieba/Jieba.hpp"
+#include <QFile>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_set>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace document {
 
@@ -23,15 +32,91 @@ static const std::unordered_set<std::string> DEFAULT_STOP_WORDS = {
     "it", "its", "and", "or", "but", "not", "no", "this", "that"
 };
 
+// ── 词典目录的运行期解析（P0-1）──
+// 旧实现把编译期绝对路径写死进二进制，词典缺失时 cppjieba 的 XCHECK 直接
+// abort()，异常都接不住——exe 拷到别的机器就是启动即崩。现在按优先级探测：
+//   1. 环境变量 LEGAL_RAG_DICT_DIR（部署兜底）
+//   2. exe 所在目录 /dict（部署拷贝；CMake POST_BUILD 会随构建复制一份）
+//   3. 编译期路径（开发：源码树绝对路径，由 CMake 注入）
+//   4. 工作目录相对路径 third_party/cppjieba/dict（开发：从项目根运行）
+// 全部落空则抛出带指引的异常（main 捕获后弹对话框），不再裸 abort。
+namespace {
+
+std::string trimDirSeparators(std::string dir) {
+    while (!dir.empty() && (dir.back() == '/' || dir.back() == '\\')) {
+        dir.pop_back();
+    }
+    return dir;
+}
+
+bool dictFileExists(const std::string& dir, const char* file) {
+    const std::string base = trimDirSeparators(dir);
+    return QFile::exists(QString::fromStdString(base + "/" + file));
+}
+
+/// 返回探测成功的词典目录；找不到时抛出带指引的异常。
+const std::string& resolveDictDir() {
+    static const std::string dir = []() -> std::string {
+        std::vector<std::string> tried;
+
+        if (const char* env = std::getenv("LEGAL_RAG_DICT_DIR"); env && *env) {
+            if (dictFileExists(env, "jieba.dict.utf8")) {
+                return trimDirSeparators(env);
+            }
+            tried.push_back(std::string("LEGAL_RAG_DICT_DIR=") + env);
+        }
+
+#if defined(_WIN32)
+        char exePathBuf[MAX_PATH] = {0};
+        if (GetModuleFileNameA(nullptr, exePathBuf, MAX_PATH) > 0) {
+            std::string exeDir(exePathBuf);
+            const size_t slash = exeDir.find_last_of("/\\");
+            if (slash != std::string::npos) {
+                exeDir = trimDirSeparators(exeDir.substr(0, slash)) + "/dict";
+                if (dictFileExists(exeDir, "jieba.dict.utf8")) {
+                    return exeDir;
+                }
+                tried.push_back(exeDir);
+            }
+        }
+#endif
+
+        if (dictFileExists(CPPJIEBA_DICT_PATH, "jieba.dict.utf8")) {
+            return trimDirSeparators(CPPJIEBA_DICT_PATH);
+        }
+        tried.push_back(CPPJIEBA_DICT_PATH);
+
+        if (dictFileExists("third_party/cppjieba/dict", "jieba.dict.utf8")) {
+            return "third_party/cppjieba/dict";
+        }
+        tried.push_back("third_party/cppjieba/dict");
+
+        std::string hint = "找不到 cppjieba 词典目录，已尝试：";
+        for (size_t i = 0; i < tried.size(); ++i) {
+            hint += (i ? "；" : "") + tried[i];
+        }
+        hint += "。请把词典目录拷贝到程序同级 dict/ 下，或设置环境变量 LEGAL_RAG_DICT_DIR";
+        throw std::runtime_error(hint);
+    }();
+    return dir;
+}
+
+std::string dictPath(const char* file) {
+    const std::string& dir = resolveDictDir();
+    return (dir.back() == '/' || dir.back() == '\\') ? dir + file : dir + "/" + file;
+}
+
+}  // namespace
+
 // ── Pimpl 封装 cppjieba ──
 class Tokenizer::Impl {
 public:
     Impl()
-        : jieba_(CPPJIEBA_DICT_PATH "/jieba.dict.utf8",
-                 CPPJIEBA_DICT_PATH "/hmm_model.utf8",
-                 CPPJIEBA_DICT_PATH "/user.dict.utf8",
-                 CPPJIEBA_DICT_PATH "/idf.utf8",
-                 CPPJIEBA_DICT_PATH "/stop_words.utf8")
+        : jieba_(dictPath("jieba.dict.utf8"),
+                 dictPath("hmm_model.utf8"),
+                 dictPath("user.dict.utf8"),
+                 dictPath("idf.utf8"),
+                 dictPath("stop_words.utf8"))
     {
     }
 
@@ -52,9 +137,8 @@ Tokenizer::Tokenizer()
     : impl_(std::make_unique<Impl>())
     , stopWords_(DEFAULT_STOP_WORDS)
 {
-    // 自动加载法律领域词典
-    std::string legalDictPath = std::string(CPPJIEBA_DICT_PATH) + "/legal_dict.utf8";
-    int loaded = loadUserDict(legalDictPath);
+    // 自动加载法律领域词典（与主词典同一运行期解析出的目录）
+    int loaded = loadUserDict(dictPath("legal_dict.utf8"));
     if (loaded > 0) {
         // 静默加载成功（避免干扰日志输出）
     }

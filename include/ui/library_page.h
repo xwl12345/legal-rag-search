@@ -33,6 +33,9 @@ public:
     /// 当前表格中的行数（供自动化测试断言）
     int rowCount() const;
 
+    /// 本页是否有引擎任务进行中（删除/清空），供 closeEvent 断言
+    bool isBusy() const { return busySelf_; }
+
 public slots:
     /// 从引擎重新拉取文档列表并刷新表格与统计（供外部在导入/检索后触发）
     void refresh();
@@ -41,9 +44,21 @@ public slots:
     /// @return 是否真的删掉了
     bool removeDocumentById(const QString& docId, bool confirm = false);
 
+    /// 其他页面有引擎任务进行中时，禁用本页删除/清空按钮（P0-2 跨页互斥，
+    /// 由 MainWindow 中转——页面之间不互相引用）
+    void setExternalBusy(bool busy) {
+        if (busyExternal_ != busy) {
+            busyExternal_ = busy;
+            refreshActionButtons();
+        }
+    }
+
 signals:
     /// 文档集合发生变化（增删/清空），供主窗口刷新状态栏与检索页
     void libraryChanged();
+
+    /// 引擎任务开始/结束（P0-2）：MainWindow 据此让其他页面禁用引擎动作
+    void engineBusyChanged(bool busy);
 
 private slots:
     void onRemoveSelected();
@@ -53,6 +68,20 @@ private slots:
 
 private:
     void setupUi();
+    /// ── P0-2 忙碌状态机 ──
+    void beginEngineTask() {
+        busySelf_ = true;
+        refreshActionButtons();
+        emit engineBusyChanged(true);
+    }
+    void endEngineTask() {
+        busySelf_ = false;
+        refreshActionButtons();
+        emit engineBusyChanged(false);
+    }
+    /// 按忙碌状态 + 选中情况刷新删除/清空按钮
+    void refreshActionButtons();
+
     /// 重建表格内容
     void rebuildTable();
     /// 更新顶部统计标签
@@ -65,6 +94,10 @@ private:
     void clearDetails();
 
     rag::Retriever* retriever_ = nullptr;   // 非拥有
+
+    // ── P0-2 忙碌状态 ──
+    bool busySelf_ = false;
+    bool busyExternal_ = false;
 
     QTableWidget* table_ = nullptr;
     QLabel* summary_ = nullptr;

@@ -63,6 +63,9 @@ std::string Generator::generate(const std::string& query,
     std::string fullAnswer;
     std::string sseBuffer;  // buffer for partial SSE lines
 
+    // 同步等待用的本地事件循环——提前声明，readyRead 的接收者上下文要挂它
+    QEventLoop loop;
+
     // 处理单条 SSE 行（"data: {...}" / "data: [DONE]" / 注释行）
     auto processSseLine = [&](const std::string& line) {
         if (line.empty() || line[0] == ':') return;
@@ -96,7 +99,9 @@ std::string Generator::generate(const std::string& query,
     // （旧实现用 getline + processed 计数回退：当流末尾无换行时，getline 仍会
     //   取出尾行并给它补一个缓冲区中不存在的 '\n'，使 processed.size() 比
     //   缓冲区大 1，substr 越界抛出 basic_string::substr __pos > size。）
-    QObject::connect(reply, &QNetworkReply::readyRead, [&]() {
+    // 接收者上下文挂到 &loop（P0-8）：loop 析构即断连，杜绝 finished 之后
+    // 仍有 readyRead 投递时对已销毁栈帧的悬挂访问。
+    QObject::connect(reply, &QNetworkReply::readyRead, &loop, [&]() {
         QByteArray chunk = reply->readAll();
         sseBuffer += chunk.toStdString();
 
@@ -112,7 +117,6 @@ std::string Generator::generate(const std::string& query,
     });
 
     // Synchronous wait via local event loop
-    QEventLoop loop;
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
 

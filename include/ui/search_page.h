@@ -7,6 +7,7 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QComboBox>
+#include <functional>
 #include <memory>
 #include <vector>
 #include "history/history_record.h"
@@ -33,6 +34,18 @@ public:
     /// 当前缓存（最近一次检索）的结果条数，供自动化测试断言
     int lastResultCount() const { return static_cast<int>(cachedResults_.size()); }
 
+    /// 本页是否有引擎任务进行中（检索+生成 / 批量导入），供 closeEvent 与 E2E 断言
+    bool isBusy() const { return busySelf_; }
+
+    /// ── P0-7 同名异路径覆盖确认钩子 ──
+    /// 返回值决定对新文件的处理；默认实现弹 QMessageBox，测试可注入脚本化应答。
+    enum class OverwriteChoice { Overwrite, Skip, CancelAll };
+    using ConfirmOverwrite = std::function<OverwriteChoice(
+        const QString& docId, const QString& existingPath, const QString& newPath)>;
+    void setConfirmOverwriteHandler(ConfirmOverwrite handler) {
+        confirmOverwrite_ = std::move(handler);
+    }
+
 public slots:
     /// 导入给定路径的文档。与「导入文档」按钮走同一条代码路径，
     /// 区别仅在于文件由调用方给出（按钮内部弹 QFileDialog）。
@@ -41,6 +54,15 @@ public slots:
     /// 引擎内的文档集合被外部改动（如文档库页删除）后调用：
     /// 清掉已失效的检索缓存与筛选器，避免展示已被删除文档的片段。
     void invalidateIndexCache();
+
+    /// 其他页面有引擎任务进行中时，禁用本页全部引擎动作按钮（P0-2 跨页互斥，
+    /// 由 MainWindow 中转——页面之间不互相引用）
+    void setExternalBusy(bool busy) {
+        if (busyExternal_ != busy) {
+            busyExternal_ = busy;
+            refreshActionButtons();
+        }
+    }
 
     /// ⚠️ 测试钩子（仅供 ui_smoke 的问答历史 E2E 使用，生产逻辑不会调用）。
     ///
@@ -66,6 +88,10 @@ signals:
     /// 一个字都没吐出来的回合不入库。
     void answerFinished(const history::HistoryRecord& record);
 
+    /// 引擎任务开始/结束（P0-2）：MainWindow 据此让其他页面禁用引擎动作，
+    /// 关闭窗口时据此拦截「任务进行中就退出」
+    void engineBusyChanged(bool busy);
+
 private slots:
     void onSearch();
     void onPickImportFiles();
@@ -78,6 +104,26 @@ private:
     void displayResults(const std::vector<rag::SearchResult>& results);
     void appendAiAnswer(const QString& text);
     void loadApiKey();
+
+    /// ── P0-2 忙碌状态机 ──
+    /// 进入/退出引擎任务；busyChanged 广播后由 MainWindow 中转给其他页面。
+    void beginEngineTask() {
+        busySelf_ = true;
+        refreshActionButtons();
+        emit engineBusyChanged(true);
+    }
+    void endEngineTask() {
+        busySelf_ = false;
+        refreshActionButtons();
+        emit engineBusyChanged(false);
+    }
+    /// 按当前忙碌状态刷新本页动作按钮（自忙或他页忙时一律禁用）
+    void refreshActionButtons();
+
+    /// P0-7 默认覆盖确认弹窗（可在测试中注入脚本化替换）
+    OverwriteChoice defaultConfirmOverwrite(const QString& docId,
+                                            const QString& existingPath,
+                                            const QString& newPath) const;
 
 public slots:
     /// 应用 T3 设置页下发的配置：检索条数与生成温度（由 MainWindow 中转，
@@ -158,4 +204,11 @@ private:
     // ── 缓存当前搜索结果（用于筛选）──
     std::vector<rag::SearchResult> cachedResults_;
     QString currentQuery_;
+
+    // ── P0-2 忙碌状态：self = 本页任务进行中；external = 其他页面任务进行中 ──
+    bool busySelf_ = false;
+    bool busyExternal_ = false;
+
+    // ── P0-7 同名覆盖确认钩子（空 = 默认弹窗；ui_smoke 注入脚本化应答）──
+    ConfirmOverwrite confirmOverwrite_;
 };

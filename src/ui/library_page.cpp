@@ -250,6 +250,18 @@ int LibraryPage::rowCount() const {
     return table_ ? table_->rowCount() : 0;
 }
 
+// ── P0-2 忙碌状态机 ──
+// 删除/清空会改引擎数据；确认弹窗泵事件期间，其他页面的引擎动作必须被挡住。
+void LibraryPage::refreshActionButtons() {
+    const bool enabled = !busySelf_ && !busyExternal_;
+    if (removeBtn_) {
+        removeBtn_->setEnabled(enabled && !selectedDocIds().isEmpty());
+    }
+    if (clearBtn_) {
+        clearBtn_->setEnabled(enabled);
+    }
+}
+
 // ── 选中/详情 ──
 QStringList LibraryPage::selectedDocIds() const {
     QStringList ids;
@@ -270,7 +282,7 @@ QStringList LibraryPage::selectedDocIds() const {
 void LibraryPage::onSelectionChanged() {
     const QStringList ids = selectedDocIds();
     if (removeBtn_) {
-        removeBtn_->setEnabled(!ids.isEmpty());
+        removeBtn_->setEnabled(!busySelf_ && !busyExternal_ && !ids.isEmpty());
     }
     if (ids.size() == 1) {
         showDetails(ids.first());
@@ -371,7 +383,9 @@ void LibraryPage::clearDetails() {
 // ── 删除 ──
 bool LibraryPage::removeDocumentById(const QString& docId, bool confirm) {
     if (!retriever_ || docId.isEmpty()) return false;
+    if (busySelf_ || busyExternal_) return false;
 
+    beginEngineTask();
     if (confirm) {
         const auto reply = QMessageBox::question(
             this,
@@ -380,6 +394,7 @@ bool LibraryPage::removeDocumentById(const QString& docId, bool confirm) {
                            "删除后其内容不再被检索命中；该操作不可撤销。").arg(docId),
             QMessageBox::Yes | QMessageBox::No);
         if (reply != QMessageBox::Yes) {
+            endEngineTask();
             return false;
         }
     }
@@ -388,11 +403,13 @@ bool LibraryPage::removeDocumentById(const QString& docId, bool confirm) {
     if (removed <= 0) {
         // 引擎侧不存在该文档：刷新界面保持一致，但不报错（幂等）
         refresh();
+        endEngineTask();
         return false;
     }
 
     refresh();
     emit libraryChanged();
+    endEngineTask();
     return true;
 }
 
@@ -403,6 +420,14 @@ void LibraryPage::onRemoveSelected() {
                                  QStringLiteral("请先在列表中选中要删除的文书。"));
         return;
     }
+    if (busySelf_ || busyExternal_) {
+        if (hint_) {
+            hint_->setText(QStringLiteral("引擎忙碌中，请等待当前任务完成"));
+        }
+        return;
+    }
+
+    beginEngineTask();
 
     const int count = ids.size();
     const auto reply = QMessageBox::question(
@@ -415,6 +440,7 @@ void LibraryPage::onRemoveSelected() {
                              "删除后其内容不再被检索命中；该操作不可撤销。").arg(count),
         QMessageBox::Yes | QMessageBox::No);
     if (reply != QMessageBox::Yes) {
+        endEngineTask();
         return;
     }
 
@@ -434,6 +460,7 @@ void LibraryPage::onRemoveSelected() {
                            .arg(removedDocs).arg(removedChunks));
     }
     emit libraryChanged();
+    endEngineTask();
 }
 
 void LibraryPage::onClearAll() {
@@ -443,6 +470,14 @@ void LibraryPage::onClearAll() {
                                  QStringLiteral("文档库已经是空的。"));
         return;
     }
+    if (busySelf_ || busyExternal_) {
+        if (hint_) {
+            hint_->setText(QStringLiteral("引擎忙碌中，请等待当前任务完成"));
+        }
+        return;
+    }
+
+    beginEngineTask();
 
     const auto reply = QMessageBox::question(
         this,
@@ -452,6 +487,7 @@ void LibraryPage::onClearAll() {
             .arg(retriever_->documentCount()),
         QMessageBox::Yes | QMessageBox::No);
     if (reply != QMessageBox::Yes) {
+        endEngineTask();
         return;
     }
 
@@ -461,4 +497,5 @@ void LibraryPage::onClearAll() {
         hint_->setText(QStringLiteral("✓ 已清空文档库与落盘索引"));
     }
     emit libraryChanged();
+    endEngineTask();
 }

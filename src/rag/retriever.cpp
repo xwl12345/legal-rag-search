@@ -50,7 +50,14 @@ Retriever::Retriever()
     : store_(std::make_unique<index_store::IndexStore>()) {}
 
 void Retriever::setApiKey(const std::string& key) {
+    if (embedding_.apiKey() == key) {
+        return;  // 同 Key 重复下发（如启动时从配置加载）不清缓存，避免无谓的全库重算
+    }
     embedding_.setApiKey(key);
+    // Key 指向的服务/配额可能不同，同一模型名下旧向量不再可信：
+    // 失效缓存，下次向量检索按新配置懒重建（P0-4）。
+    similarity_.clear();
+    vectorIndexMap_.clear();
 }
 
 // ── T3 配置中心：运行时热更新 ──
@@ -68,7 +75,18 @@ void Retriever::setChunkParams(int maxSize, int overlap) {
 }
 
 void Retriever::setEmbeddingEndpoint(const std::string& baseUrl, const std::string& model) {
+    // setEndpoint 对空串字段保持原值，先算出生效值再判断是否真的变了
+    const std::string newBase = baseUrl.empty() ? embedding_.apiBaseUrl() : baseUrl;
+    const std::string newModel = model.empty() ? embedding_.model() : model;
+    if (newBase == embedding_.apiBaseUrl() && newModel == embedding_.model()) {
+        return;  // 未变化（如启动时按配置原样下发）不动缓存
+    }
     embedding_.setEndpoint(baseUrl, model);
+    // 模型/服务变了，旧模型的文档向量对新查询向量毫无意义（跨维度恒 0、
+    // 同维度是纯噪声分）——必须失效缓存，下次向量检索按新配置懒重建（P0-4）。
+    // 这让「改 Key/模型后无需重新导入，下次检索自动按新配置重算」的注释承诺成真。
+    similarity_.clear();
+    vectorIndexMap_.clear();
 }
 
 std::string Retriever::embeddingHost() const {
@@ -135,8 +153,10 @@ ImportResult Retriever::addDocument(const std::string& filePath,
     doc.ocr = (parseResult.source == document::ParseSource::Ocr);
 
     // 整篇原文（T10 全文阅读的数据源；分块只够判断相关性）
+    // P0-5：直接存解析出的原文——旧实现逐块 += 拼接，而相邻块带 50 字节 overlap，
+    // 拼出的"全文"每 512 字节就重复 50 字节，全文阅读 / byteSize / 元数据提取输入全被污染。
+    doc.fullText = std::move(parseResult.content);
     for (const auto& chunk : chunks) {
-        doc.fullText += chunk.content;
         doc.chunks.push_back(chunk.content);
     }
 

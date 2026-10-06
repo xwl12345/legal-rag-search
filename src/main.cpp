@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QMessageBox>
 #include <QtGlobal>
 #include "ui/main_window.h"
 
@@ -20,8 +21,17 @@ int main(int argc, char* argv[]) {
     font.setPointSize(10);
     app.setFont(font);
 
-    MainWindow window;
-    window.show();
+    // 引擎构建（分词词典探测等）失败时给出可操作的人工提示，
+    // 而不是让异常一路穿透到 terminate（P0-1）。
+    try {
+        MainWindow window;
+        window.show();
 
-    return app.exec();
+        return app.exec();
+    } catch (const std::exception& e) {
+        QMessageBox::critical(nullptr, QStringLiteral("启动失败"),
+                              QStringLiteral("程序初始化失败，请按下图提示处理后重新启动：\n\n")
+                                  + QString::fromUtf8(e.what()));
+        return 1;
+    }
 }

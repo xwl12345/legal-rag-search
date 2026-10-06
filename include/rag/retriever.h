@@ -140,6 +140,9 @@ public:
     std::string embeddingHost() const;
     std::string embeddingModel() const { return embedding_.model(); }
 
+    /// 向量缓存条数（P0-4 诊断口：换端点/Key 后应为 0，首次向量检索后 = 文本块数）
+    size_t vectorCacheSize() const { return similarity_.size(); }
+
     /// ⚠️ 注意：本函数走 InvertedIndex::totalDocs()，而 totalDocs_ 是按
     /// (docId, chunkIndex) 逐块累加的——**它返回的是文本块数，不是文档数**。
     /// 需要真实文档数请用 allDocIds().size() 或 documentCount()。

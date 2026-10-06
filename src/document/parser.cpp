@@ -4,6 +4,11 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QString>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+#include <QStringDecoder>
+#else
+#include <QTextCodec>
+#endif
 #include <sstream>
 #include <algorithm>
 
@@ -20,6 +25,100 @@ size_t previousUtf8Boundary(std::string_view text, size_t position) {
         --position;
     }
     return position;
+}
+
+// ── 文本编码识别 → UTF-8（P0-6）──
+// 旧实现按原始字节直接进索引：中文 Windows 记事本「ANSI」（GB18030）保存的文件
+// 会全链路乱码且无任何报错。现在按序识别：
+//   1. UTF-16 BOM（FF FE / FE FF）→ 按对应端序解码；
+//   2. UTF-8 校验通过（含纯 ASCII）→ 原样保留；
+//   3. GB18030 解码后「非法字符数」少于 UTF-8 → 按GB18030 转码；
+//   4. 都解不动（典型：二进制文件被改成 .txt）→ 如实拒绝，导入报错而非吞成乱码。
+bool decodeToUtf8(const QByteArray& raw, std::string& out, std::string& diag) {
+    if (raw.isEmpty()) {
+        out.clear();
+        return true;
+    }
+
+    // UTF-8 BOM 先剥掉（U+FEFF 是合法 UTF-8，不剥会混进首块文本与元数据提取）
+    QByteArray body = raw;
+    bool hadUtf8Bom = body.startsWith("\xEF\xBB\xBF");
+    if (hadUtf8Bom) {
+        body.remove(0, 3);
+        if (body.isEmpty()) {
+            out.clear();
+            return true;
+        }
+    }
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    auto tryDecode = [&body](const char* name, bool* ok) -> QString {
+        QStringDecoder dec(name);
+        *ok = dec.isValid();
+        if (!*ok) return {};
+        const QString decoded = dec(body);
+        *ok = !dec.hasError();
+        return decoded;
+    };
+
+    bool ok = false;
+    if (body.startsWith("\xFF\xFE")) {
+        const QString s = tryDecode("UTF-16LE", &ok);
+        if (ok) { out = s.toUtf8().toStdString(); return true; }
+    } else if (body.startsWith("\xFE\xFF")) {
+        const QString s = tryDecode("UTF-16BE", &ok);
+        if (ok) { out = s.toUtf8().toStdString(); return true; }
+    } else {
+        const QString asUtf8 = tryDecode("UTF-8", &ok);
+        if (ok && !asUtf8.contains(QChar(0xFFFD))) {
+            out = asUtf8.toUtf8().toStdString();
+            return true;
+        }
+        const QString asGb = tryDecode("GB18030", &ok);
+        if (ok) { out = asGb.toUtf8().toStdString(); return true; }
+    }
+#else
+    // Qt5（当前工具链）：QTextCodec::ConverterState::invalidChars 精确计数
+    auto decodeWith = [&body](const char* name, int* invalidChars) -> QString {
+        QTextCodec* codec = QTextCodec::codecForName(name);
+        QTextCodec::ConverterState state;
+        const QString decoded = codec->toUnicode(body.constData(), body.size(), &state);
+        *invalidChars = static_cast<int>(state.invalidChars);
+        return decoded;
+    };
+
+    int utf16Invalid = -1;
+    if (body.startsWith("\xFF\xFE")) {
+        const QString s = decodeWith("UTF-16LE", &utf16Invalid);
+        if (utf16Invalid == 0) { out = s.toUtf8().toStdString(); return true; }
+    } else if (body.startsWith("\xFE\xFF")) {
+        const QString s = decodeWith("UTF-16BE", &utf16Invalid);
+        if (utf16Invalid == 0) { out = s.toUtf8().toStdString(); return true; }
+    }
+
+    // 二进制哨兵：正文文本不含 NUL（无 BOM 的 UTF-16 会走到这里被拦下）
+    if (body.contains('\0')) {
+        diag = "文件含二进制内容（NUL 字节），不是可检索的文本文档";
+        return false;
+    }
+
+    int utf8Invalid = 0;
+    decodeWith("UTF-8", &utf8Invalid);
+    if (utf8Invalid == 0) {
+        out.assign(body.constData(), static_cast<size_t>(body.size()));  // 校验通过，保留原字节
+        return true;
+    }
+
+    int gbInvalid = 0;
+    const QString asGb = decodeWith("GB18030", &gbInvalid);
+    if (gbInvalid < utf8Invalid) {
+        out = asGb.toUtf8().toStdString();
+        return true;
+    }
+#endif
+
+    diag = "无法识别的文本编码（非 UTF-8 / GB18030 / UTF-16），可能是不含文本的二进制文件";
+    return false;
 }
 
 } // namespace
@@ -69,7 +168,15 @@ ParseResult DocumentParser::parseWithResult(const std::string& filePath,
         if (!file.open(QIODevice::ReadOnly)) {
             return {ParseStatus::FileOpenFailed, source, {}, "无法打开文件：" + docId};
         }
-        content = file.readAll().toStdString();
+        // P0-6：先做编码识别统一转成 UTF-8（GBK 的「ANSI」文件 / UTF-16 BOM 自动转码，
+        // 二进制乱码文件如实拒绝），后续分词、索引、展示都只见 UTF-8。
+        const QByteArray raw = file.readAll();
+        file.close();
+        std::string decoded, encodingDiag;
+        if (!decodeToUtf8(raw, decoded, encodingDiag)) {
+            return {ParseStatus::UnsupportedEncoding, source, {}, encodingDiag};
+        }
+        content = std::move(decoded);
         source = ParseSource::TextFile;
     }
 
@@ -82,7 +189,7 @@ ParseResult DocumentParser::parseWithResult(const std::string& filePath,
         return {ParseStatus::NoTextExtracted, source, {}, "文件不包含可检索文本"};
     }
 
-    return {ParseStatus::Success, source, std::move(chunks), ""};
+    return {ParseStatus::Success, source, std::move(chunks), "", content};
 }
 
 std::vector<TextChunk> DocumentParser::parse(const std::string& filePath) {

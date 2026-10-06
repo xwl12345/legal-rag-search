@@ -364,3 +364,30 @@ if(WIN32 AND NOT Qt6_FOUND)
     endforeach()
     message(STATUS "Qt runtime DLLs deploy from: ${QT_BIN_DIR}")
 endif()
+
+# ── 词典随程序分发（P0-1）──
+# 分词词典的运行期探测候选之一是「exe 所在目录 /dict」。构建时直接把词典
+# 复制到各 exe 同级，构建目录即自包含：整个 build 文件夹拷走也能跑，
+# 不再依赖编译期写死的源码树绝对路径。copy_if_different 幂等，增量构建零开销。
+# （放在文件末尾：add_custom_command(TARGET) 要求所有 target 已定义。）
+set(DICT_FILES
+    third_party/cppjieba/dict/jieba.dict.utf8
+    third_party/cppjieba/dict/hmm_model.utf8
+    third_party/cppjieba/dict/user.dict.utf8
+    third_party/cppjieba/dict/idf.utf8
+    third_party/cppjieba/dict/stop_words.utf8
+    third_party/cppjieba/dict/legal_dict.utf8)
+foreach(_target ${PROJECT_NAME} run_tests ui_smoke eval_retrieval test_utf8_location_regression)
+    add_custom_command(TARGET ${_target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:${_target}>/dict")
+    foreach(_dict ${DICT_FILES})
+        if(EXISTS "${CMAKE_SOURCE_DIR}/${_dict}")
+            get_filename_component(_dict_name "${_dict}" NAME)
+            add_custom_command(TARGET ${_target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${CMAKE_SOURCE_DIR}/${_dict}"
+                        "$<TARGET_FILE_DIR:${_target}>/dict/${_dict_name}")
+        endif()
+    endforeach()
+endforeach()

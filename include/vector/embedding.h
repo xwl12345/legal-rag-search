@@ -11,6 +11,9 @@ public:
     /// 设置 API Key
     void setApiKey(const std::string& key) { apiKey_ = key; }
 
+    /// 当前 API Key（供 Retriever 判断「下发值是否真的变化」，避免无谓清缓存）
+    std::string apiKey() const { return apiKey_; }
+
     /// 运行时配置服务地址与模型名（T3 配置中心，T4 消费）。
     /// baseUrl 形如 https://api.siliconflow.cn —— 带 / 或 /v1 结尾也可以，
     /// 程序会先规范化（剥掉尾部 / 与 /v1）再拼 /v1/embeddings，不会双写。

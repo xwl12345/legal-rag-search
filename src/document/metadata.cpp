@@ -148,6 +148,13 @@ std::optional<std::string> MetadataExtractor::extractCourt(const std::string& te
             if (c < 0x80) {
                 break;
             }
+            // 守卫（P0-3）：回扫一步 = 3 字节（一个 UTF-8 汉字）。
+            // 剩余空间不足 3 字节说明前面是被截断的多字节字符（畸形/损坏编码），
+            // 再回退 nameStart-3 会在 size_t 上回绕成巨大值，substr 直接抛
+            // std::out_of_range。此处按"到边界为止"处理。
+            if (nameStart - start < 3) {
+                break;
+            }
             // 检查是否是中文标点或空白
             std::string prev3 = text.substr(nameStart - 3, 3);
             if (prev3 == "\xE3\x80\x82" ||  // 。
