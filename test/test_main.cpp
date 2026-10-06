@@ -2284,6 +2284,101 @@ void test_t5_persistence_roles_roundtrip() {
     PASS();
 }
 
+// ── v2 索引文件手工构造（T5 迁移测试用）──
+// 字节布局与 index_store.cpp 头部格式注释一一对应（v2 = 块不带角色字节）。
+namespace {
+
+void twU8(std::string& b, std::uint8_t v)  { b.push_back(static_cast<char>(v)); }
+void twU32(std::string& b, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) b.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+}
+void twU64(std::string& b, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) b.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+}
+void twStr(std::string& b, const std::string& s) {
+    twU32(b, static_cast<std::uint32_t>(s.size()));
+    b += s;
+}
+/// 与 index_store.cpp 同款 CRC-32（多项式 0xEDB88320，位翻转型实现等价）
+std::uint32_t twCrc32(const std::string& s) {
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (unsigned char c : s) {
+        crc ^= c;
+        for (int k = 0; k < 8; ++k) {
+            crc = (crc & 1) ? (0xEDB88320u ^ (crc >> 1)) : (crc >> 1);
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+}  // namespace
+
+void test_t5_v2_index_roles_reannotated() {
+    TEST("T5 补：v2 旧索引加载后免费重算角色（不固化全 Unknown）");
+    const std::string indexPath = "build/test_t5_v2_migrate.dat";
+
+    // 两个块：诉称段 + 「本院认为……判决如下」跨段块
+    const std::string chunk1 = "原告张某某诉称：被告于二〇二三年向其借款十万元至今未还，请求判令偿还。";
+    const std::string chunk2 = "本院认为，合法借贷关系受法律保护，借款事实清楚。判决如下：被告于本判决生效之日起十日内偿还原告借款。";
+    const std::string fullText = chunk1 + chunk2;
+
+    // 手写 v2 字节流（无角色字节）+ 正确 CRC
+    std::string payload;
+    payload += "LRAGIDX1";
+    twU32(payload, 2);                       // version = 2
+    twU32(payload, 1);                       // docCount
+    twStr(payload, "case_v2_migrate.txt");
+    twStr(payload, "build/v2_src/case_v2_migrate.txt");
+    twStr(payload, "2026-10-06 12:00:00");
+    twU32(payload, 2);                       // chunkCount
+    twU64(payload, fullText.size());         // byteSize
+    twU8(payload, 0);                        // ocr = false
+    twStr(payload, "");                      // caseNumber
+    twStr(payload, "");                      // court
+    twStr(payload, "");                      // date
+    twStr(payload, "");                      // caseType
+    twStr(payload, "");                      // litigants
+    twStr(payload, "");                      // procedure
+    twStr(payload, "");                      // tendency
+    twU64(payload, fullText.size());         // fullTextLen
+    payload += fullText;
+    twU32(payload, 2);                       // 分块段前的块数（load 侧 storedChunkCount）
+    twStr(payload, chunk1);
+    twStr(payload, chunk2);                  // v2：块后无角色字节
+    std::string file = payload;
+    twU32(file, twCrc32(payload));
+    {
+        std::ofstream f(indexPath, std::ios::binary);
+        f << file;
+    }
+
+    rag::Retriever r;
+    r.setIndexFilePath(indexPath);
+    const auto loaded = r.loadIndex();
+    if (!loaded.ok) {
+        std::cout << "    (load 诊断: " << loaded.diagnostic << ") ";
+    }
+    CHECK(loaded.ok);
+    CHECK_EQ(r.documentCount(), 1);
+
+    // 角色按同一算法免费重算，而不是全 Unknown
+    CHECK(r.getChunkRole("case_v2_migrate.txt", 0) == document::ChunkRole::PlaintiffClaims);
+    const int merged = static_cast<int>(r.getChunkRole("case_v2_migrate.txt", 1));
+    CHECK((merged & static_cast<int>(document::ChunkRole::CourtOpinion)) != 0);
+    CHECK((merged & static_cast<int>(document::ChunkRole::Judgment)) != 0);
+
+    // 再落盘升级为 v3 → 全新实例读回角色仍在（迁移不回退）
+    CHECK(r.saveIndex().ok);
+    rag::Retriever reader;
+    reader.setIndexFilePath(indexPath);
+    CHECK(reader.loadIndex().ok);
+    CHECK((static_cast<int>(reader.getChunkRole("case_v2_migrate.txt", 1))
+           & static_cast<int>(document::ChunkRole::CourtOpinion)) != 0);
+
+    reader.clearAll(true);   // 连落盘文件一并清掉
+    PASS();
+}
+
 void test_t5_corpus_role_distribution() {
     TEST("T5：21 篇语料全量标注（每篇均有法院认定块与主文块）");
     rag::Retriever r;
@@ -2456,6 +2551,7 @@ void run_all_tests() {
     test_t5_role_annotation_real_parse();
     test_t5_search_results_carry_role();
     test_t5_persistence_roles_roundtrip();
+    test_t5_v2_index_roles_reannotated();
     test_t5_corpus_role_distribution();
 
     std::cout << "\n";

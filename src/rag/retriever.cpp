@@ -739,6 +739,27 @@ PersistResult Retriever::loadIndex() {
             doc.chunkRoles.push_back(static_cast<document::ChunkRole>(role));   // T5
         }
 
+        // T5 补丁：v2 旧索引没有角色字节（chunkRoles 与 chunks 数目不齐）。
+        // 块文本完整在手，按同一标注算法免费重算，而不是把"全 Unknown"
+        // 在下次落盘时固化进 v3 文件——否则升级后「只看本院认为」会静默为空。
+        if (doc.chunkRoles.size() != doc.chunks.size()) {
+            std::vector<document::TextChunk> reannotated;
+            reannotated.reserve(doc.chunks.size());
+            for (std::size_t ci = 0; ci < doc.chunks.size(); ++ci) {
+                document::TextChunk tc;
+                tc.docId = doc.docId;
+                tc.chunkIndex = static_cast<int>(ci);
+                tc.content = doc.chunks[ci];
+                reannotated.push_back(std::move(tc));
+            }
+            document::annotateChunkRoles(reannotated);
+            doc.chunkRoles.clear();
+            doc.chunkRoles.reserve(reannotated.size());
+            for (const auto& tc : reannotated) {
+                doc.chunkRoles.push_back(tc.role);
+            }
+        }
+
         if (doc.chunks.empty()) continue;
 
         indexDocument(doc);
