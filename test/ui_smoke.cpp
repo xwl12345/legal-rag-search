@@ -14,6 +14,7 @@
 //   - 需要 offscreen 平台插件；不弹真实窗口，可在无人值守环境跑。
 //   - 流式回答需要真实 API Key 且联网，缺 DEEPSEEK_API_KEY 时该步记为跳过（不算失败）。
 #include <QApplication>
+#include <QCheckBox>
 #include <QCommandLineParser>
 #include <QComboBox>
 #include <QDebug>
@@ -188,6 +189,38 @@ int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) 
     check(resultList->count() == hits, QStringLiteral("筛选复位后结果还原"),
           QStringLiteral("%1 条").arg(resultList->count()));
     page->grab().save(outDir + QStringLiteral("/07-search-filtered.png"));
+
+    // ── 3.5 T5 角色标签 + 「只看本院认为」过滤 ──
+    QCheckBox* courtOnly = window.findChild<QCheckBox*>("courtOnlyFilter");
+    check(courtOnly != nullptr, QStringLiteral("T5：只看本院认为复选框存在"));
+    bool anyTagged = false;
+    for (int i = 0; i < resultList->count(); ++i) {
+        const QString text = resultList->item(i)->text();
+        if (text.contains(QStringLiteral("[诉称]")) || text.contains(QStringLiteral("[辩称]"))
+            || text.contains(QStringLiteral("[本院认为"))
+            || text.contains(QStringLiteral("[判决"))) {
+            anyTagged = true;
+        }
+    }
+    check(anyTagged, QStringLiteral("T5：检索结果行携带角色标签（抽检）"));
+
+    courtOnly->setChecked(true);
+    QApplication::processEvents();
+    const int opinionCount = resultList->count();
+    bool allOpinion = opinionCount > 0;
+    for (int i = 0; i < opinionCount; ++i) {
+        // 标签按位组合：跨段块显示「本院认为|判决」，同样以 [本院认为 开头
+        allOpinion = allOpinion
+            && resultList->item(i)->text().contains(QStringLiteral("[本院认为"));
+    }
+    check(allOpinion, QStringLiteral("T5：只看本院认为过滤生效（结果全为法院认定块）"),
+          QStringLiteral("%1 条").arg(opinionCount));
+    page->grab().save(outDir + QStringLiteral("/15-search-court-only.png"));
+
+    courtOnly->setChecked(false);
+    QApplication::processEvents();
+    check(resultList->count() == hits, QStringLiteral("T5：取消过滤后结果还原"),
+          QStringLiteral("%1 条").arg(resultList->count()));
 
     // ── 4. 流式回答 ──
     if (keyReady) {

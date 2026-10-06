@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <string_view>
@@ -6,13 +7,47 @@
 
 namespace document {
 
+/// 文本块角色（T5 段落角色标注）：按裁判文书固定结构给块分级，支撑
+/// 「检索结果证据效力分级」与「只看本院认为」过滤。
+///
+/// 语义：**位标志**。块所属的每个结构段置一位——正常块只属一段；跨段块
+/// （如短文书的「本院认为……判决如下」同块）同时持有两段位，两个段位的
+/// 过滤都能命中，不丢内容。段起点 = 全文中最近一次出现的结构标记；
+/// 无标记的块延续当前段。角色随解析产生，与文本块一同进索引、随索引持久化。
+enum class ChunkRole : std::uint8_t {
+    Unknown = 0,           // 未识别（首部、尾部、无结构文书、法条等）
+    PlaintiffClaims = 1,   // 当事人主张：原告诉称 / 上诉人诉称……
+    DefendantDefense = 2,  // 当事人答辩：被告辩称 / 被上诉人辩称……
+    CourtOpinion = 4,      // 法院认定：经审理查明 / 本院查明 / 本院认为
+    Judgment = 8,          // 裁判主文：判决如下 / 裁定如下
+};
+
+/// 角色组合的展示标签：按 诉称/辩称/本院认为/判决 顺序列出命中段，
+/// 多段以 "|" 连接（如「本院认为|判决」）；Unknown 返回空串，不显示。
+std::string chunkRoleLabel(ChunkRole role);
+
 /// 文本块：文档解析后的基本检索单元
 struct TextChunk {
     std::string docId;       // 来源文档 ID（文件名）
     int chunkIndex = 0;      // 在文档中的块序号
     std::string content;     // 文本内容
-    int startPos = 0;        // 在原文档中的起始位置（字符偏移）
+    int startPos = 0;        // 在原文档中的起始位置（字节偏移；注意 overlap 会使其
+                             // 不等于「去掉重叠后的净偏移」，当前无消费方）
+    ChunkRole role = ChunkRole::Unknown;   // T5：结构段角色（annotateChunkRoles 填充）
 };
+
+/// 按裁判文书固定结构给有序文本块打角色标签（T5）。
+///
+/// 规则：
+///   1. 识别标准结构标记：诉称 / 辩称 / 经审理查明 / 本院查明 / 本院认为 /
+///      判决如下 / 裁定如下（语料中「原告张某某诉称」等变体同样命中）；
+///   2. 段落按规范序单调推进：诉称 → 辩称 → 法院认定 → 主文。块内只把
+///      「比当前段更靠后」的标记计为新段位——本院认为段落里复述
+///      「原告诉称」属于引述，不会往块上添加当事人段位；
+///   3. 块位 = 块内全部推进段标记的位并集；无推进标记则整块延续当前段。
+///      跨段块因此同时持有两段位（如「……本院认为……判决如下……」
+///      = 法院认定|主文），两个段的过滤都能命中。
+void annotateChunkRoles(std::vector<TextChunk>& chunks);
 
 /// 文档内容来源。
 enum class ParseSource {

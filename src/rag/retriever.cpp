@@ -115,6 +115,13 @@ void Retriever::indexDocument(const StoredDocument& doc) {
         auto terms = tokenizer_.cutForIndex(content);
         index_.addDocument(doc.docId, chunkIndex, terms);
         chunkStore_[chunkKey(doc.docId, chunkIndex)] = content;
+
+        // T5：角色与块同键同生命周期（缺省 Unknown，兼容旧落盘文件）
+        document::ChunkRole role = document::ChunkRole::Unknown;
+        if (i < doc.chunkRoles.size()) {
+            role = doc.chunkRoles[i];
+        }
+        chunkRoles_[chunkKey(doc.docId, chunkIndex)] = role;
     }
 }
 
@@ -156,8 +163,10 @@ ImportResult Retriever::addDocument(const std::string& filePath,
     // P0-5：直接存解析出的原文——旧实现逐块 += 拼接，而相邻块带 50 字节 overlap，
     // 拼出的"全文"每 512 字节就重复 50 字节，全文阅读 / byteSize / 元数据提取输入全被污染。
     doc.fullText = std::move(parseResult.content);
+    doc.chunkRoles.reserve(chunks.size());
     for (const auto& chunk : chunks) {
         doc.chunks.push_back(chunk.content);
+        doc.chunkRoles.push_back(chunk.role);   // T5：解析时已打好的角色
     }
 
     doc.metadata = document::MetadataExtractor::extract(doc.fullText);
@@ -195,6 +204,7 @@ void Retriever::addText(const std::string& text, const std::string& docId) {
 
     for (const auto& chunk : chunks) {
         doc.chunks.push_back(chunk.content);
+        doc.chunkRoles.push_back(chunk.role);   // T5
     }
 
     doc.metadata = document::MetadataExtractor::extract(doc.fullText);
@@ -329,6 +339,10 @@ std::vector<SearchResult> Retriever::searchWithMode(const std::string& query, in
         if (it != chunkStore_.end()) {
             sr.content = it->second;
         }
+        auto roleIt = chunkRoles_.find(key);
+        if (roleIt != chunkRoles_.end()) {
+            sr.role = roleIt->second;   // T5
+        }
         return sr;
     };
 
@@ -445,6 +459,10 @@ std::vector<SearchResult> Retriever::searchWithMode(const std::string& query, in
             auto it = chunkStore_.find(key);
             if (it != chunkStore_.end()) {
                 sr.content = it->second;
+            }
+            auto roleIt = chunkRoles_.find(key);
+            if (roleIt != chunkRoles_.end()) {
+                sr.role = roleIt->second;   // T5
             }
             combined.push_back(sr);
         }
@@ -564,6 +582,11 @@ bool Retriever::getChunk(const std::string& docId, int chunkIndex, std::string& 
     return true;
 }
 
+document::ChunkRole Retriever::getChunkRole(const std::string& docId, int chunkIndex) const {
+    auto it = chunkRoles_.find(chunkKey(docId, chunkIndex));
+    return it != chunkRoles_.end() ? it->second : document::ChunkRole::Unknown;
+}
+
 // ────────────────────────────────────────────────────────────────
 // 删除
 // ────────────────────────────────────────────────────────────────
@@ -579,6 +602,7 @@ int Retriever::removeDocument(const std::string& docId) {
     for (int i = 0; i < chunkTotal; ++i) {
         index_.removeChunk(docId, i);
         chunkStore_.erase(chunkKey(docId, i));
+        chunkRoles_.erase(chunkKey(docId, i));   // T5：角色与块同键同生命周期
     }
 
     // 2. 元数据与文档记录
@@ -599,6 +623,7 @@ int Retriever::removeDocument(const std::string& docId) {
 void Retriever::clearAll(bool alsoDeletePersistedFile) {
     index_.clear();
     chunkStore_.clear();
+    chunkRoles_.clear();
     docMeta_.clear();
     documents_.clear();
     documentOrder_.clear();
@@ -643,6 +668,11 @@ PersistResult Retriever::saveIndex() const {
         record.metadata = doc.metadata;
         record.fullText = doc.fullText;
         record.chunks = doc.chunks;
+        record.chunkRoles.reserve(doc.chunks.size());
+        for (int i = 0; i < static_cast<int>(doc.chunks.size()); ++i) {
+            record.chunkRoles.push_back(
+                static_cast<std::uint8_t>(getChunkRole(doc.docId, i)));   // T5
+        }
 
         records.push_back(std::move(record));
     }
@@ -704,6 +734,10 @@ PersistResult Retriever::loadIndex() {
         doc.metadata = record.metadata;
         doc.fullText = record.fullText;
         doc.chunks = record.chunks;
+        doc.chunkRoles.reserve(record.chunkRoles.size());
+        for (std::uint8_t role : record.chunkRoles) {
+            doc.chunkRoles.push_back(static_cast<document::ChunkRole>(role));   // T5
+        }
 
         if (doc.chunks.empty()) continue;
 

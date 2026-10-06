@@ -24,6 +24,7 @@ struct SearchResult {
     double bm25Score = 0.0;
     double vectorScore = 0.0;
     double finalScore = 0.0;    // 加权融合后的分数
+    document::ChunkRole role = document::ChunkRole::Unknown;  // T5：结构段角色
 };
 
 /// 单个文件的导入结果。
@@ -66,6 +67,7 @@ struct StoredDocument {
     document::DocMetadata metadata;
     std::string fullText;             // 整篇文书原文（T10 数据源）
     std::vector<std::string> chunks;  // chunks[i] 对应 chunkIndex = i
+    std::vector<document::ChunkRole> chunkRoles;  // T5：与 chunks 平行的角色（可短于 chunks，缺省 Unknown）
 };
 
 /// 检索通路（T4 质量分析：四路并列对比）
@@ -178,6 +180,9 @@ public:
     /// 某个文本块的原文；不存在返回 false
     bool getChunk(const std::string& docId, int chunkIndex, std::string& out) const;
 
+    /// 某个文本块的结构段角色（T5）；块不存在返回 Unknown
+    document::ChunkRole getChunkRole(const std::string& docId, int chunkIndex) const;
+
     // ── T1 新增：删除与持久化 ──
 
     /// 删除单篇文档：倒排索引（逐块）、文本块、向量槽位、元数据、全文一并清理。
@@ -220,6 +225,9 @@ private:
 
     // 存储所有文本块，按 (docId, chunkIndex) 索引
     std::unordered_map<std::string, std::string> chunkStore_;
+
+    // 文本块的结构段角色（T5），键与 chunkStore_ 一致、生命周期同步
+    std::unordered_map<std::string, document::ChunkRole> chunkRoles_;
 
     // 向量库索引 → (docId, chunkIndex) 的映射
     std::vector<std::pair<std::string, int>> vectorIndexMap_;

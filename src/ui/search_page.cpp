@@ -177,6 +177,12 @@ void SearchPage::setupUi() {
     }
     tendencyFilter_->setMinimumHeight(32);
 
+    // T5：「只看本院认为」——证据效力分级过滤。
+    // 勾选后仅保留角色 = 法院认定（经审理查明 / 本院查明 / 本院认为）的块。
+    courtOnlyFilter_ = new QCheckBox(QStringLiteral("只看本院认为"), this);
+    courtOnlyFilter_->setObjectName(QStringLiteral("courtOnlyFilter"));
+    courtOnlyFilter_->setMinimumHeight(32);
+
     filterLayout->addWidget(filterLabel);
     filterLayout->addSpacing(6);
     filterLayout->addWidget(typeLabel);
@@ -187,6 +193,7 @@ void SearchPage::setupUi() {
     filterLayout->addWidget(yearFilter_);
     filterLayout->addWidget(tendencyLabel);
     filterLayout->addWidget(tendencyFilter_);
+    filterLayout->addWidget(courtOnlyFilter_);
     filterLayout->addStretch();
     root->addLayout(filterLayout);
 
@@ -281,6 +288,8 @@ void SearchPage::setupUi() {
     connect(yearFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &SearchPage::onFilterChanged);
     connect(tendencyFilter_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &SearchPage::onFilterChanged);
+    connect(courtOnlyFilter_, &QCheckBox::toggled,
             this, &SearchPage::onFilterChanged);
 
     // 点击结果列表中的项 → 查看全文片段
@@ -814,7 +823,12 @@ void SearchPage::displayResults(const std::vector<rag::SearchResult>& results) {
     for (size_t i = 0; i < results.size(); ++i) {
         const auto& r = results[i];
         std::ostringstream oss;
-        oss << "【" << (i + 1) << "】" << r.docId
+        oss << "【" << (i + 1) << "】";
+        // T5：结构段角色标签（Unknown 不显示），支撑证据效力分级
+        if (r.role != document::ChunkRole::Unknown) {
+            oss << "[" << document::chunkRoleLabel(r.role) << "] ";
+        }
+        oss << r.docId
             << "  相关度: " << std::fixed << std::setprecision(2) << r.finalScore
             << "  (BM25: " << r.bm25Score << " | 向量: " << r.vectorScore << ")";
 
@@ -844,15 +858,25 @@ std::vector<rag::SearchResult> SearchPage::getFilteredResults() {
     const auto wantedTendency =
         static_cast<document::ResultTendency>(tendencyValue);
 
+    // T5：「只看本院认为」——仅保留法院认定块（查明事实 + 说理）
+    const bool courtOnly = courtOnlyFilter_->isChecked();
+
     // 无筛选条件，直接返回全部
     if (caseType == QStringLiteral("全部") && courtLevel == QStringLiteral("全部")
-        && year == QStringLiteral("全部") && !tendencyFiltering) {
+        && year == QStringLiteral("全部") && !tendencyFiltering && !courtOnly) {
         return cachedResults_;
     }
 
     std::vector<rag::SearchResult> filtered;
     for (const auto& r : cachedResults_) {
         const auto* meta = retriever_->getMetadata(r.docId);
+
+        // T5：角色过滤（位标志：跨段块同时归属多段，按位匹配不丢内容）
+        if (courtOnly
+            && (static_cast<int>(r.role)
+                & static_cast<int>(document::ChunkRole::CourtOpinion)) == 0) {
+            continue;
+        }
 
         // 案件类型筛选
         if (caseType != QStringLiteral("全部")) {

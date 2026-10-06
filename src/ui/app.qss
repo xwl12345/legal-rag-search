@@ -187,6 +187,27 @@ QComboBox {
 QComboBox:hover {
     border-color: #B7791F;
 }
+/* T5：「只看本院认为」复选框——与筛选栏下拉框同字号，勾选态用铜金强调 */
+QCheckBox {
+    font-size: 12px;
+    color: #1F2937;
+    spacing: 6px;
+    min-height: 18px;
+}
+QCheckBox::indicator {
+    width: 15px;
+    height: 15px;
+    border: 1px solid #E2E7EE;
+    border-radius: 4px;
+    background: #FFFFFF;
+}
+QCheckBox::indicator:hover {
+    border-color: #B7791F;
+}
+QCheckBox::indicator:checked {
+    background: #B7791F;
+    border-color: #B7791F;
+}
 QComboBox::drop-down {
     border: none;
     width: 20px;

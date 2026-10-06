@@ -1,5 +1,6 @@
 #pragma once
 #include <QWidget>
+#include <QCheckBox>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTextEdit>
@@ -200,6 +201,7 @@ private:
     QComboBox* courtLevelFilter_ = nullptr;
     QComboBox* yearFilter_ = nullptr;
     QComboBox* tendencyFilter_ = nullptr;
+    QCheckBox* courtOnlyFilter_ = nullptr;   // T5：只看本院认为（角色 = 法院认定）
 
     // ── 缓存当前搜索结果（用于筛选）──
     std::vector<rag::SearchResult> cachedResults_;

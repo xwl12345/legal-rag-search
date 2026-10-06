@@ -23,11 +23,12 @@ namespace {
 //   str caseNumber | str court | str date | str caseType | str litigants
 //   str procedure | str tendency
 //   u64 fullTextLen | fullTextBytes
-//   [u32 chunkLen | chunkBytes] * chunkCount
+//   [u32 chunkLen | chunkBytes | (v3) u8 chunkRole] * chunkCount
 //
 // str  = u32 长度 + 原始字节（UTF-8），不写入 '\0'
 constexpr char kMagic[8] = {'L', 'R', 'A', 'G', 'I', 'D', 'X', '1'};
-constexpr std::uint32_t kVersion = 2;   // v2: 增加 fullText（T10 全文阅读）
+constexpr std::uint32_t kVersion = 3;   // v3: 每块追加 1 字节结构段角色（T5 段落角色标注）
+constexpr std::uint32_t kMinReadableVersion = 2;  // v2 无角色字节，读出角色全为 Unknown（平滑迁移）
 
 // 单个字符串上限 512 MB，防止坏文件导致巨额分配
 constexpr std::uint32_t kMaxStringBytes = 512u * 1024u * 1024u;
@@ -208,8 +209,14 @@ IndexStore::SaveResult IndexStore::save(const std::vector<StoredDocument>& docum
 
         // 以存储的 chunks 为准写块数，保证内存中的 chunkCount 与落盘一致
         w.u32(static_cast<std::uint32_t>(doc.chunks.size()));
-        for (const auto& chunk : doc.chunks) {
-            w.str(chunk);
+        for (std::size_t ci = 0; ci < doc.chunks.size(); ++ci) {
+            w.str(doc.chunks[ci]);
+            // v3：块角色紧随块内容（T5）；缺省补 Unknown，容忍角色向量短于块向量
+            std::uint8_t role = 0;
+            if (ci < doc.chunkRoles.size()) {
+                role = doc.chunkRoles[ci];
+            }
+            w.u8(role);
         }
     }
 
@@ -297,12 +304,14 @@ IndexStore::LoadResult IndexStore::load(std::vector<StoredDocument>& documents) 
              payloadSize - sizeof(kMagic));
 
     const std::uint32_t version = r.u32();
-    if (r.failed() || version != kVersion) {
-        result.diagnostic = "索引文件版本不兼容（期望 v" +
+    if (r.failed() || version > kVersion || version < kMinReadableVersion) {
+        result.diagnostic = "索引文件版本不兼容（支持 v" +
+                            std::to_string(kMinReadableVersion) + "–v" +
                             std::to_string(kVersion) + "，实际 v" +
                             std::to_string(version) + "）";
         return result;
     }
+    const bool hasChunkRoles = (version >= 3);   // v2 旧文件：块角色全 Unknown（平滑迁移）
 
     const std::uint32_t docCount = r.u32();
     if (r.failed()) {
@@ -348,13 +357,21 @@ IndexStore::LoadResult IndexStore::load(std::vector<StoredDocument>& documents) 
             return result;
         }
         doc.chunks.reserve(storedChunkCount);
+        doc.chunkRoles.reserve(storedChunkCount);
         for (std::uint32_t c = 0; c < storedChunkCount; ++c) {
             doc.chunks.push_back(r.str());
+            if (hasChunkRoles) {
+                doc.chunkRoles.push_back(r.u8());   // v3：块角色
+            }
             if (r.failed()) {
                 result.diagnostic = "索引文件分块内容损坏";
                 documents.clear();
                 return result;
             }
+        }
+        // 角色向量与块向量严格平行（v2 文件为空 → 上层按 Unknown 兜底）
+        if (!hasChunkRoles) {
+            doc.chunkRoles.clear();
         }
         // 以实际读出的块数为准（坏文件时不至于让 chunkCount 说谎）
         doc.chunkCount = static_cast<int>(doc.chunks.size());

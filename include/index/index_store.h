@@ -22,6 +22,8 @@ struct StoredDocument {
 
     std::string fullText;           // 整篇文书原文（T10 用）
     std::vector<std::string> chunks;  // 分块内容，chunks[i] 对应 chunkIndex=i
+    std::vector<std::uint8_t> chunkRoles;  // T5：与 chunks 平行的角色值
+                                           // （document::ChunkRole 枚举值；v2 旧文件读出为空 → 全 Unknown）
 };
 
 /// 索引持久化层：与 UI 完全解耦（不 include 任何 ui/ 头）。

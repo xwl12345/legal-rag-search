@@ -11,6 +11,7 @@
 #endif
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 
 namespace {
 
@@ -218,7 +219,71 @@ std::vector<TextChunk> DocumentParser::parseText(std::string_view text,
         }
     }
 
+    // T5：解析时即按文书结构打角色标签（无结构文本全部落 Unknown，零开销语义）
+    annotateChunkRoles(chunks);
+
     return chunks;
+}
+
+// ── T5 段落角色标注 ──────────────────────────────────────────────
+
+std::string chunkRoleLabel(ChunkRole role) {
+    // 按 诉称 → 辩称 → 本院认为 → 判决 的规范序列出命中段，跨段块用 "|" 连接
+    static const std::pair<ChunkRole, const char*> kLabels[] = {
+        {ChunkRole::PlaintiffClaims,  "诉称"},
+        {ChunkRole::DefendantDefense, "辩称"},
+        {ChunkRole::CourtOpinion,     "本院认为"},
+        {ChunkRole::Judgment,         "判决"},
+    };
+    const int bits = static_cast<int>(role);
+    std::string label;
+    for (const auto& [flag, text] : kLabels) {
+        if (bits & static_cast<int>(flag)) {
+            if (!label.empty()) label += "|";
+            label += text;
+        }
+    }
+    return label;
+}
+
+void annotateChunkRoles(std::vector<TextChunk>& chunks) {
+    // 结构标记按规范序排列（见 parser.h 注释）；"诉称/辩称"用短标记，
+    // 使「原告张某某诉称」「被上诉人辩称」等语料变体同样命中。
+    struct SectionMarker {
+        ChunkRole role;
+        const char* text;
+    };
+    static const SectionMarker kMarkers[] = {
+        {ChunkRole::PlaintiffClaims,   "诉称"},
+        {ChunkRole::DefendantDefense,  "辩称"},
+        {ChunkRole::CourtOpinion,      "经审理查明"},
+        {ChunkRole::CourtOpinion,      "本院查明"},
+        {ChunkRole::CourtOpinion,      "本院认为"},
+        {ChunkRole::Judgment,          "判决如下"},
+        {ChunkRole::Judgment,          "裁定如下"},
+    };
+
+    int current = 0;   // 已进入的最深段落（单调，引述不回退）
+    for (auto& chunk : chunks) {
+        int bits = 0;
+        int maxSeen = current;
+        for (const auto& marker : kMarkers) {
+            if (std::search(chunk.content.begin(), chunk.content.end(),
+                            marker.text, marker.text + std::strlen(marker.text))
+                    != chunk.content.end()) {
+                const int rank = static_cast<int>(marker.role);
+                if (rank > current) {
+                    bits |= rank;   // 只认推进段标记：本院认为里引述「诉称」不加位
+                }
+                maxSeen = std::max(maxSeen, rank);
+            }
+        }
+        if (bits == 0) {
+            bits = current;   // 无新段 → 整块延续当前段
+        }
+        chunk.role = static_cast<ChunkRole>(bits);
+        current = maxSeen;
+    }
 }
 
 std::vector<std::string> DocumentParser::splitChunks(std::string_view text,

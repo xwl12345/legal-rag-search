@@ -2149,6 +2149,182 @@ void test_p0_vector_cache_invalidation() {
     PASS();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// T5: 段落角色标注（检索结果证据效力分级）
+// ═══════════════════════════════════════════════════════════════
+
+void test_t5_role_annotation_basic() {
+    TEST("T5：角色标注——段继承 + 引述不回退 + 跨段位并集");
+    // 直接构造块序列，精确钉住标注算法的规则
+    std::vector<document::TextChunk> chunks(6);
+    chunks[0].content = "北京市某某人民法院民事判决书。（首部，无结构标记）";
+    chunks[1].content = "原告张某某诉称：被告借款不还，请求判令偿还。";
+    chunks[2].content = "（此段为诉称事实的延续，不含任何结构标记。）";
+    chunks[3].content = "被告李某某辩称：承认借款，但暂时无力偿还。";
+    chunks[4].content = "本院经审理查明：借款事实清楚。本院认为：被告构成违约。"
+                        "原告称被告恶意逃债与查明事实不符——此为引述，不得加当事人段位。";
+    chunks[5].content = "判决如下：一、被告偿还借款本息。如不服本判决，可提起上诉。";
+
+    document::annotateChunkRoles(chunks);
+    CHECK(chunks[0].role == document::ChunkRole::Unknown);
+    CHECK(chunks[1].role == document::ChunkRole::PlaintiffClaims);
+    CHECK(chunks[2].role == document::ChunkRole::PlaintiffClaims);   // 无标记块延续当前段
+    CHECK(chunks[3].role == document::ChunkRole::DefendantDefense);
+    CHECK(chunks[4].role == document::ChunkRole::CourtOpinion);      // 引述「原告称」不加位
+    CHECK(chunks[5].role == document::ChunkRole::Judgment);
+
+    // 跨段块（短文书）：本院认为 + 判决如下 同块 → 两段位并集，两路过滤都命中
+    std::vector<document::TextChunk> mergedSeq(1);
+    mergedSeq[0].content = "本院认为：调解无效。判决如下：准予离婚。";
+    document::annotateChunkRoles(mergedSeq);
+    const int merged = static_cast<int>(mergedSeq[0].role);
+    CHECK((merged & static_cast<int>(document::ChunkRole::CourtOpinion)) != 0);
+    CHECK((merged & static_cast<int>(document::ChunkRole::Judgment)) != 0);
+    CHECK(document::chunkRoleLabel(mergedSeq[0].role) == "本院认为|判决");
+    PASS();
+}
+
+void test_t5_role_annotation_real_parse() {
+    TEST("T5：真实语料解析即带角色（parseText 出口打标）");
+    document::DocumentParser parser;
+    const auto chunks = parser.parse("test/data/legal_cases/case_civil_001_loan_dispute.txt");
+    CHECK(chunks.size() >= 2);
+
+    bool sawPlaintiff = false, sawOpinion = false, sawJudgment = false;
+    for (const auto& c : chunks) {
+        const int bits = static_cast<int>(c.role);
+        if (c.content.find("诉称") != std::string::npos) {
+            CHECK((bits & static_cast<int>(document::ChunkRole::PlaintiffClaims)) != 0);
+            sawPlaintiff = true;
+        }
+        if (c.content.find("本院认为") != std::string::npos
+            || c.content.find("经审理查明") != std::string::npos) {
+            CHECK((bits & static_cast<int>(document::ChunkRole::CourtOpinion)) != 0);
+            sawOpinion = true;
+        }
+        if (c.content.find("判决如下") != std::string::npos) {
+            CHECK((bits & static_cast<int>(document::ChunkRole::Judgment)) != 0);
+            sawJudgment = true;
+        }
+    }
+    CHECK(sawPlaintiff && sawOpinion && sawJudgment);
+    PASS();
+}
+
+void test_t5_search_results_carry_role() {
+    TEST("T5：检索结果携带角色（分段构造文本逐段断言）");
+    // 各段之间垫 550+ 字节：512 字节的块窗口装不下两个不同段的标记，
+    // 保证「含目标短语的块」的角色唯一确定
+    const std::string pad(550, '垫');
+    const std::string doc =
+        pad + "原告诉称：被告借我一百万元至今未还。" + pad
+        + "本院认为：借款事实清楚，利息约定有效。" + pad
+        + "判决如下：被告偿还借款本息。";
+
+    rag::Retriever r;
+    r.addText(doc, "t5_roles_doc");
+    CHECK_EQ(r.documentCount(), 1);
+
+    auto hits1 = r.search("借我一百万元", 5);
+    CHECK(!hits1.empty());
+    CHECK(hits1[0].role == document::ChunkRole::PlaintiffClaims);
+
+    auto hits2 = r.search("借款事实清楚 利息约定", 5);
+    CHECK(!hits2.empty());
+    CHECK(hits2[0].role == document::ChunkRole::CourtOpinion);
+
+    auto hits3 = r.search("偿还借款本息", 5);
+    CHECK(!hits3.empty());
+    CHECK(hits3[0].role == document::ChunkRole::Judgment);
+    PASS();
+}
+
+void test_t5_persistence_roles_roundtrip() {
+    TEST("T5：角色随索引持久化往返一致");
+    const std::string indexPath = "build/test_t5_roles.dat";
+    const std::string pad(550, '垫');
+    const std::string doc =
+        pad + "原告诉称：被告借我一百万元至今未还。" + pad
+        + "本院认为：借款事实清楚，利息约定有效。" + pad
+        + "判决如下：被告偿还借款本息。";
+
+    rag::Retriever writer;
+    writer.setIndexFilePath(indexPath);
+    writer.addText(doc, "t5_roundtrip_doc");
+    CHECK(writer.saveIndex().ok);
+
+    rag::Retriever reader;
+    reader.setIndexFilePath(indexPath);
+    CHECK(reader.loadIndex().ok);
+    CHECK_EQ(reader.documentCount(), 1);
+
+    // 块级角色逐块一致
+    for (int i = 0; i < 12; ++i) {
+        const auto roleW = writer.getChunkRole("t5_roundtrip_doc", i);
+        const auto roleR = reader.getChunkRole("t5_roundtrip_doc", i);
+        CHECK(roleW == roleR);
+        if (roleW == document::ChunkRole::Unknown && i > 6) break;  // 越界侧同为 Unknown
+    }
+    // 关键块角色命中预期段
+    bool sawOpinion = false, sawJudgment = false, sawClaims = false;
+    for (int i = 0; i < 12; ++i) {
+        const auto role = reader.getChunkRole("t5_roundtrip_doc", i);
+        if (role == document::ChunkRole::CourtOpinion) sawOpinion = true;
+        if (role == document::ChunkRole::Judgment) sawJudgment = true;
+        if (role == document::ChunkRole::PlaintiffClaims) sawClaims = true;
+    }
+    CHECK(sawClaims && sawOpinion && sawJudgment);
+
+    // 恢复后的检索结果仍携带角色
+    auto hits = reader.search("借我一百万元", 5);
+    CHECK(!hits.empty());
+    CHECK(hits[0].role == document::ChunkRole::PlaintiffClaims);
+
+    reader.clearAll(true);
+    PASS();
+}
+
+void test_t5_corpus_role_distribution() {
+    TEST("T5：21 篇语料全量标注（每篇均有法院认定块与主文块）");
+    rag::Retriever r;
+    for (const auto& file : listTxtFiles("test/data/legal_cases")) {
+        r.addDocument(file);
+    }
+    CHECK_EQ(r.documentCount(), 21);
+
+    int docsWithOpinion = 0, docsWithJudgment = 0;
+    int opinionChunks = 0, judgmentChunks = 0;
+    for (const auto& id : r.allDocIds()) {
+        rag::DocumentInfo info;
+        CHECK(r.getDocumentInfo(id, info));
+        bool hasOpinion = false, hasJudgment = false;
+        for (int i = 0; i < info.chunkCount; ++i) {
+            const int bits = static_cast<int>(r.getChunkRole(id, i));
+            if (bits & static_cast<int>(document::ChunkRole::CourtOpinion)) {
+                hasOpinion = true;
+                ++opinionChunks;
+            }
+            if (bits & static_cast<int>(document::ChunkRole::Judgment)) {
+                hasJudgment = true;
+                ++judgmentChunks;
+            }
+        }
+        docsWithOpinion += hasOpinion ? 1 : 0;
+        docsWithJudgment += hasJudgment ? 1 : 0;
+        std::cout << "    " << id << " 块数=" << info.chunkCount
+                  << " 含认定=" << (hasOpinion ? "Y" : "N")
+                  << " 含主文=" << (hasJudgment ? "Y" : "N") << "\n";
+    }
+    std::cout << "    含法院认定位块的文书: " << docsWithOpinion
+              << "；含主文位块的文书: " << docsWithJudgment << "\n";
+    CHECK_EQ(docsWithOpinion, 21);   // 跨段块按位并集：说理段不再被主文标记吞掉
+    CHECK_EQ(docsWithJudgment, 21);  // 判决如下 / 裁定如下 均归主文位
+    CHECK(opinionChunks >= 21);
+    CHECK(judgmentChunks >= 20);
+    r.clearAll(false);
+    PASS();
+}
+
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -2274,6 +2450,13 @@ void run_all_tests() {
     test_p0_utf8_bom_stripped();
     test_p0_binary_file_rejected();
     test_p0_vector_cache_invalidation();
+
+    std::cout << "\n── T5: 段落角色标注 ──" << std::endl;
+    test_t5_role_annotation_basic();
+    test_t5_role_annotation_real_parse();
+    test_t5_search_results_carry_role();
+    test_t5_persistence_roles_roundtrip();
+    test_t5_corpus_role_distribution();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;
