@@ -45,6 +45,10 @@
 #include "ui/library_page.h"
 #include "ui/history_page.h"
 #include "ui/quality_page.h"
+#include "../test/fake_transport.h"
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include "ui/settings_page.h"
 #include "config/app_config.h"
 #include "config/app_settings.h"
@@ -53,6 +57,9 @@
 namespace {
 
 int g_failures = 0;
+
+// P2：注入 MainWindow 的假传输——历史 E2E 用它驱动真实 SSE 生成链路
+static std::shared_ptr<FakeTransport> g_fakeTransport;
 
 void check(bool ok, const QString& label, const QString& detail = QString()) {
     if (!ok) {
@@ -419,8 +426,8 @@ int runPersistenceE2E(const QString& corpusDir, const QString& outDir) {
 ///
 /// 说明：本组验证走的是 MainWindow 默认路径（config::HISTORY_DB，即工作目录下的
 /// rag_history.db），跑完清空记录，不与用户手工留下的数据混淆。
-/// 回答文本由 SearchPage::simulateAnswer 给出（本机通常没有 DEEPSEEK_API_KEY），
-/// 但"命中来源"是真实检索出来的文本块 —— 详见该函数头部的说明。
+/// P2 起：回答由 FakeTransport 驱动的真实生成链路产生（注入假 Key + SSE 应答），
+/// simulateAnswer 测试后门已删除——假的只有传输层，其余全是生产代码路径。
 ///
 /// ⚠️ 清状态一律走 SQL 层（removeAll），**不要试图 QFile::remove 库文件**：
 /// 本进程里 main() 的主窗口全程存活，SQLite 连接一直开着，
@@ -466,6 +473,41 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
         check(store->isOpen(), QStringLiteral("问答历史库打开成功"),
               QString::fromStdString(store->lastError()));
 
+        // P2：假传输装到本组窗口的 worker 上（离线驱动真实生成链路）。
+        // chat 应答器回 2 段 SSE 增量；embeddings 按输入数量返回 index 化向量。
+        g_fakeTransport = std::make_shared<FakeTransport>();
+        g_fakeTransport->setResponder([](const QUrl& url, const QByteArray& body)
+                                           -> FakeTransport::Reply {
+            FakeTransport::Reply r;
+            if (url.path().contains(QStringLiteral("chat/completions"))) {
+                r.chunks = {
+                    QByteArray("data: {\"choices\":[{\"delta\":{\"content\":\"交付凭证\"}}]}\n\n"),
+                    QByteArray("data: {\"choices\":[{\"delta\":{\"content\":\"应当结合转账记录与收条综合认定。\"}}]}\n\n"),
+                    QByteArray("data: [DONE]\n\n"),
+                };
+                r.finish = FakeTransport::Finish{200, QByteArray(), false, QString()};
+            } else {
+                const QJsonDocument doc = QJsonDocument::fromJson(body);
+                const QJsonArray inputs = doc.object()["input"].toArray();
+                QJsonArray data;
+                for (int i = 0; i < inputs.size(); ++i) {
+                    QJsonObject item;
+                    item["index"] = i;
+                    QJsonArray vec;
+                    vec.append(1.0);
+                    vec.append(2.0);
+                    item["embedding"] = vec;
+                    data.append(item);
+                }
+                QJsonObject root;
+                root["data"] = data;
+                r.finish = FakeTransport::Finish{
+                    200, QJsonDocument(root).toJson(QJsonDocument::Compact), false, QString()};
+            }
+            return r;
+        });
+        window.engineWorker()->installTransport(g_fakeTransport);
+
         // 从空历史起步：清前现状记进详情里，将来若失败一眼能看出是残留还是写入异常
         const long long beforeCount = store->count();
         store->removeAll();
@@ -485,24 +527,44 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
               QStringLiteral("检索页已有真实命中结果（作为记录来源）"),
               QStringLiteral("%1 条").arg(searchPage->lastResultCount()));
 
-        // 两个回合：一条完整、一条中断
-        searchPage->simulateAnswer(QStringLiteral("民间借贷纠纷中交付凭证如何认定？"),
-                                   QStringLiteral("应当结合转账记录、收条与当事人陈述综合认定。"),
-                                   /*interrupted=*/false);
+        // ── P2：历史链路走真实生成（FakeTransport + 假 Key，不再用测试后门）──
+        QLineEdit* apiKeyInput = window.findChild<QLineEdit*>("apiKeyInput");
+        QPushButton* setApiKeyBtn = window.findChild<QPushButton*>("setApiKeyBtn");
+        QPushButton* stopGenBtn = window.findChild<QPushButton*>("stopGenBtn");
+        if (!apiKeyInput || !setApiKeyBtn || !stopGenBtn) {
+            check(false, QStringLiteral("P2：生成链路控件齐全"),
+                  QStringLiteral("存在控件未找到"));
+            return g_failures;
+        }
+        check(true, QStringLiteral("P2：生成链路控件齐全"));
+        apiKeyInput->setText(QStringLiteral("sk-fake-history-e2e-key"));
+        setApiKeyBtn->click();
+        QApplication::processEvents();
+
+        // 回合 1：完整回答——真实检索 → 引擎线程 SSE 生成（2 段增量）→ 收场落库
+        searchInput->setText(QStringLiteral("民间借贷 交付凭证"));
+        searchBtn->click();
+        waitUntil([&] { return !searchPage->isBusy(); });
         QApplication::processEvents();
 
         // 落库后主窗口应主动刷新历史页（不经切页、不点刷新按钮）
         check(historyPage->rowCount() == 1,
-              QStringLiteral("回答结束后历史列表自动出现记录（无需手动刷新）"),
+              QStringLiteral("真实生成后历史列表自动出现记录（无需手动刷新）"),
               QStringLiteral("%1 行").arg(historyPage->rowCount()));
 
-        searchPage->simulateAnswer(QStringLiteral("劳动争议申请仲裁的时效怎么算？"),
-                                   QStringLiteral("劳动争议申请仲裁的时效期间为一年，"),
-                                   /*interrupted=*/true);
+        // 回合 2：中断——fake 挂起不收场 → 点「■ 停止」→ 残卷带 interrupted 落库。
+        // 换一个不同查询，保证关键词阶段「交付凭证」只命中回合 1。
+        searchInput->setText(QStringLiteral("劳动争议 仲裁时效"));
+        g_fakeTransport->setHangNext(true);
+        searchBtn->click();
+        pump(500);   // 等检索完成并进入生成阶段（生成已被 fake 挂起）
+        check(searchPage->isBusy(), QStringLiteral("P2：挂起的生成保持忙碌态"));
+        stopGenBtn->click();
+        waitUntil([&] { return !searchPage->isBusy(); });
         QApplication::processEvents();
 
         check(historyPage->rowCount() == 2,
-              QStringLiteral("第二个回合后列表继续同步"),
+              QStringLiteral("中断回合后列表继续同步（真实停止链路）"),
               QStringLiteral("%1 行").arg(historyPage->rowCount()));
         check(store->count() == 2, QStringLiteral("两条记录均已落库"),
               QStringLiteral("%1 条").arg(store->count()));
@@ -511,13 +573,23 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
         const auto records = store->recent(10);
         check(static_cast<int>(records.size()) == 2, QStringLiteral("可读回 2 条记录"));
         if (records.size() == 2) {
-            check(!records.front().sources.empty(),
-                  QStringLiteral("命中来源随回答一起入库"),
-                  QStringLiteral("%1 个文本块").arg(records.front().hitCount()));
-            check(records.front().interrupted,
-                  QStringLiteral("中断回合被标记为未完成"),
-                  QString::fromStdString(records.front().note));
-            check(!records.back().interrupted, QStringLiteral("正常回合标记为完整"));
+            // 同秒内两回合的 created_at 可能并列，断言不依赖返回顺序
+            bool hasInterrupted = false, hasComplete = false;
+            for (const auto& rec : records) {
+                if (rec.interrupted) {
+                    hasInterrupted = true;
+                    check(!rec.sources.empty(),
+                          QStringLiteral("命中来源随中断回合一起入库"),
+                          QStringLiteral("%1 个文本块").arg(rec.hitCount()));
+                } else if (QString::fromStdString(rec.answer)
+                               .contains(QStringLiteral("综合认定"))) {
+                    hasComplete = true;
+                }
+            }
+            check(hasInterrupted,
+                  QStringLiteral("「停止」中断回合被标记为未完成（真实取消链路）"));
+            check(hasComplete,
+                  QStringLiteral("完整回合回答来自真实 SSE 流"));
         }
 
         // ── 关键词搜索 ──
@@ -568,7 +640,7 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
                       QStringLiteral("导出件带 UTF-8 BOM（防记事本乱码）"));
                 const QString text = QString::fromUtf8(
                     QByteArray(raw.constData() + 3, qMax(0, raw.size() - 3)));
-                check(text.contains(QStringLiteral("劳动争议申请仲裁的时效怎么算？")),
+                check(text.contains(QStringLiteral("劳动争议")),
                       QStringLiteral("导出件回读中文正常（UTF-8 无损）"));
                 check(text.contains(QStringLiteral("命中块数：")),
                       QStringLiteral("导出件含命中来源章节"));

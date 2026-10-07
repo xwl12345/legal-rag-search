@@ -67,9 +67,18 @@ public:
         importCancel_ = std::move(cancelFlag);
     }
 
+    /// 网络传输注入（P2；MainWindow/ui_smoke 接线时直调，先于任何任务入队）。
+    /// 同时作用于生成器与 Embedding 服务——测试注入 FakeTransport 即可
+    /// 离线驱动真实 SSE 生成 / 向量检索全链路。
+    void installTransport(std::shared_ptr<IHttpTransport> transport) {
+        generator_.setTransport(transport);
+        retriever_.setEmbeddingTransport(transport);
+    }
+
 public slots:
     // ── 重操作（队列化到引擎线程）──
     void search(const QString& query, int topK);
+    void searchAggregate(const QString& query, int width);   // P2：聚合检索下沉引擎
     void compareModes(const QString& query, int topK);
     void runBatchEval(int width);
     void importDocuments(const QStringList& files);

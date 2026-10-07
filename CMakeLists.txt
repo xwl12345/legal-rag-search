@@ -50,6 +50,9 @@ set(SRC_ENGINE
     # RAG pipeline
     src/rag/retriever.cpp
     src/rag/generator.cpp
+
+    # Network transport abstraction（P2：HTTP 出口可注入）
+    src/net/qt_transport.cpp
 )
 
 # 存储层（T2：问答历史 SQLite；不含 Qt Widgets，测试目标复用）
@@ -96,6 +99,8 @@ set(HEADERS
     include/vector/similarity.h
     include/rag/retriever.h
     include/rag/generator.h
+    include/net/transport.h
+    include/net/qt_transport.h
     include/ui/main_window.h
     include/ui/engine_worker.h
     include/ui/app_theme.h
@@ -212,6 +217,7 @@ add_executable(test_utf8_location_regression
     src/vector/embedding.cpp
     src/vector/similarity.cpp
     src/rag/retriever.cpp
+    src/net/qt_transport.cpp
 )
 target_include_directories(test_utf8_location_regression PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -250,6 +256,7 @@ set(TEST_SOURCES
     src/vector/similarity.cpp
     src/rag/retriever.cpp
     src/rag/generator.cpp
+    src/net/qt_transport.cpp
     ${SRC_STORE}
     ${SRC_CONFIG}
 )
@@ -291,6 +298,7 @@ add_executable(eval_retrieval test/eval_retrieval.cpp
     src/vector/embedding.cpp
     src/vector/similarity.cpp
     src/rag/retriever.cpp
+    src/net/qt_transport.cpp
 )
 target_include_directories(eval_retrieval PRIVATE
     ${CMAKE_SOURCE_DIR}/include

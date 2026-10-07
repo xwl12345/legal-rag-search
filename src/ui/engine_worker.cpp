@@ -32,6 +32,12 @@ void EngineWorker::search(const QString& query, int topK) {
     emit searchFinished(results, query);
 }
 
+void EngineWorker::searchAggregate(const QString& query, int width) {
+    // P2：宽检索 + per-doc 去重在引擎内完成（原 UI 层逻辑下沉）
+    auto results = retriever_.searchAggregate(query.toStdString(), width);
+    emit searchFinished(results, query);
+}
+
 void EngineWorker::compareModes(const QString& query, int topK) {
     const std::string q = query.toStdString();
     ui_engine::CompareResult result;

@@ -1,8 +1,6 @@
 #include "vector/embedding.h"
+#include "net/qt_transport.h"
 #include "config/app_config.h"
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
 #include <QEventLoop>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -41,6 +39,9 @@ std::vector<std::vector<double>> EmbeddingService::embedBatch(
     if (texts.empty() || apiKey_.empty()) {
         return {};
     }
+    if (!transport_) {
+        transport_ = std::make_shared<QtTransport>();   // 懒创建：绑定当前（引擎）线程
+    }
 
     // Build JSON request body
     QJsonObject body;
@@ -55,44 +56,51 @@ std::vector<std::vector<double>> EmbeddingService::embedBatch(
     QJsonDocument doc(body);
     QByteArray data = doc.toJson(QJsonDocument::Compact);
 
-    // Setup HTTPS request
-    QNetworkRequest request(
-        QUrl(QString::fromStdString(normalizedBaseUrl()) + QStringLiteral("/v1/embeddings")));
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    request.setRawHeader("Authorization", ("Bearer " + apiKey_).c_str());
-    // 30 秒无数据传输视为失败，避免网络异常时批量嵌入无限等待
-    request.setTransferTimeout(config::HTTP_TIMEOUT * 1000);
+    // Setup HTTPS request（P2：URL 规范化逻辑不变）
+    QUrl url(QString::fromStdString(normalizedBaseUrl()) + QStringLiteral("/v1/embeddings"));
+    QList<QPair<QByteArray, QByteArray>> headers;
+    headers << qMakePair(QByteArray("Authorization"),
+                         QByteArray(("Bearer " + apiKey_).c_str()));
 
-    QNetworkAccessManager manager;
-    QNetworkReply* reply = manager.post(request, data);
-
-    // Synchronous wait via local event loop
+    // 同步等待：传输回调在本线程投递，onFinished 恰好一次（P2 结构化版本）
     QEventLoop loop;
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    HttpResponse resp;
+    auto handle = transport_->post(
+        url, headers, data, config::HTTP_TIMEOUT * 1000,
+        nullptr,   // 嵌入响应无流式增量
+        [&](const HttpResponse& r) {
+            resp = r;
+            loop.quit();
+        });
     loop.exec();
 
-    if (reply->error() != QNetworkReply::NoError) {
-        std::string errMsg = reply->errorString().toStdString();
-        reply->deleteLater();
-        throw std::runtime_error("Embedding API error: " + errMsg);
+    if (resp.networkError || resp.statusCode != 200) {
+        const QString reason = resp.errorText.isEmpty()
+            ? QStringLiteral("HTTP %1").arg(resp.statusCode)
+            : resp.errorText;
+        throw std::runtime_error("Embedding API error: " + reason.toStdString());
     }
 
-    QByteArray response = reply->readAll();
-    reply->deleteLater();
-
-    // Parse response
+    // Parse response（200 包错误体此前被静默当空结果——体检缺陷 #20 同源，这里如实抛）
     QJsonParseError parseError;
-    QJsonDocument respDoc = QJsonDocument::fromJson(response, &parseError);
+    QJsonDocument respDoc = QJsonDocument::fromJson(resp.body, &parseError);
     if (parseError.error != QJsonParseError::NoError) {
         throw std::runtime_error("JSON parse error: " + parseError.errorString().toStdString());
     }
 
     QJsonObject respObj = respDoc.object();
+    if (respObj.contains(QStringLiteral("error"))) {
+        const QString msg = respObj.value(QStringLiteral("error")).toObject()
+                                .value(QStringLiteral("message")).toString();
+        throw std::runtime_error("Embedding API error: " + msg.toStdString());
+    }
+
     QJsonArray dataArray = respObj["data"].toArray();
 
-    std::vector<std::vector<double>> result;
-    result.reserve(dataArray.size());
-
+    // P2 缺陷修复（#8）：按响应的 index 字段重排，不再假设服务端保序——
+    // OpenAI 兼容端点规范允许乱序返回，错位是静默的语义级数据损坏。
+    std::vector<std::vector<double>> result(texts.size());
+    int sequential = 0;   // 服务端未带 index 时的保底（按数组顺序）
     for (const auto& item : dataArray) {
         QJsonObject itemObj = item.toObject();
         QJsonArray embedding = itemObj["embedding"].toArray();
@@ -102,7 +110,18 @@ std::vector<std::vector<double>> EmbeddingService::embedBatch(
         for (const auto& v : embedding) {
             vec.push_back(v.toDouble());
         }
-        result.push_back(std::move(vec));
+
+        int idx = -1;
+        if (itemObj.contains(QStringLiteral("index"))) {
+            idx = itemObj.value(QStringLiteral("index")).toInt(-1);
+        }
+        if (idx < 0 || idx >= static_cast<int>(texts.size())) {
+            idx = sequential;
+        }
+        ++sequential;
+        if (idx >= 0 && idx < static_cast<int>(result.size())) {
+            result[idx] = std::move(vec);
+        }
     }
 
     return result;

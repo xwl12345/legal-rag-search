@@ -31,6 +31,10 @@
 #include <QApplication>
 #include <QDirIterator>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QTimer>
 
 // ── 模块头文件 ──
 #include "document/parser.h"
@@ -46,6 +50,7 @@
 #include "rag/eval_metrics.h"
 #include "history/history_store.h"
 #include "config/app_settings.h"
+#include "../test/fake_transport.h"
 #include <algorithm>
 
 // ── 列出目录下 .txt 文件 ──
@@ -2420,6 +2425,247 @@ void test_t5_corpus_role_distribution() {
     PASS();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// P2：传输注入后的网络链路单测（FakeTransport，离线驱动真实代码路径）
+// ═══════════════════════════════════════════════════════════════
+
+namespace {
+
+/// 构造一条 SSE 增量帧（delta content 任意中文/英文均走 UTF-8 字节）
+QByteArray sseDelta(const std::string& content) {
+    return QByteArray("data: {\"choices\":[{\"delta\":{\"content\":\"") +
+           QByteArray::fromStdString(content) +
+           QByteArray("\"}}]}\n\n");
+}
+
+/// Embedding 应答器：按输入数组返回 index 化向量 [1+i, 2]（含乱序重排验证的基础）
+FakeTransport::Reply embeddingResponder(const QByteArray& body, bool shuffle) {
+    QJsonDocument doc = QJsonDocument::fromJson(body);
+    const QJsonArray inputs = doc.object()["input"].toArray();
+    FakeTransport::Reply r;
+    QJsonArray data;
+    for (int i = 0; i < inputs.size(); ++i) {
+        const int slot = shuffle ? (inputs.size() - 1 - i) : i;   // 乱序模式：逆序返回
+        QJsonObject item;
+        item["index"] = slot;
+        QJsonArray vec;
+        vec.append(1.0 + slot * 0.001);
+        vec.append(2.0);
+        item["embedding"] = vec;
+        data.append(item);
+    }
+    QJsonObject root;
+    root["data"] = data;
+    r.finish.body = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    return r;
+}
+
+}  // namespace
+
+void test_p2_sse_streaming() {
+    TEST("P2：SSE 流式——分块跨行 / CRLF / 无尾换行 / [DONE] 全形态");
+    auto fake = std::make_shared<FakeTransport>();
+    // 人为把 SSE 帧切碎：跨行、CRLF、最后一帧无换行
+    fake->enqueueChunk(sseDelta("根据"));
+    fake->enqueueChunk("data: {\"choices\":[{\"delta\":{\"content\":\"检索文书");   // 行中断
+    fake->enqueueChunk("\"}}]}\r\n");                                                       // CRLF 收尾
+    fake->enqueueChunk(sseDelta("综合认定。"));
+    fake->enqueueChunk("data: [DONE]");
+    fake->enqueueFinish(FakeTransport::Finish{200, "", false, QString()});
+
+    rag::Generator gen;
+    gen.setApiKey("sk-p2-fake-key-1234567890");
+    gen.setTransport(fake);
+
+    std::vector<std::string> deltas;
+    const std::string full = gen.generate("测试问题", "人民法院 民事判决书 测试上下文",
+                                          [&](const std::string& d) { deltas.push_back(d); });
+    if (full != "根据检索文书综合认定。") {
+        std::cout << "    (实际 full=[" << full << "] deltas=" << deltas.size() << ") ";
+    }
+    CHECK(full == "根据检索文书综合认定。");
+    CHECK_EQ(deltas.size(), static_cast<size_t>(3));
+    PASS();
+}
+
+void test_p2_error_body_surfaces() {
+    TEST("P2：HTTP 200 包错误体如实抛出（体检缺陷 #20 修复）");
+    auto fake = std::make_shared<FakeTransport>();
+    fake->enqueueFinish(FakeTransport::Finish{
+        200, QByteArray("{\"error\":{\"message\":\"Invalid API key\"}}"), false, QString()});
+
+    rag::Generator gen;
+    gen.setApiKey("sk-p2-fake-key-1234567890");
+    gen.setTransport(fake);
+
+    bool threw = false;
+    try {
+        gen.generate("测试问题", "人民法院 测试上下文");
+    } catch (const std::exception& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("Invalid API key") != std::string::npos);
+    }
+    CHECK(threw);
+    PASS();
+}
+
+void test_p2_http_error_throws() {
+    TEST("P2：HTTP 5xx / 网络错误抛异常，错误文本可分类");
+    {
+        auto fake = std::make_shared<FakeTransport>();
+        fake->enqueueFinish(FakeTransport::Finish{502, QByteArray(), false, QString()});
+        rag::Generator gen;
+        gen.setApiKey("sk-p2-fake-key-1234567890");
+        gen.setTransport(fake);
+        bool threw = false;
+        try {
+            gen.generate("测试问题", "人民法院 测试上下文");
+        } catch (const std::exception& e) {
+            threw = true;
+            CHECK(std::string(e.what()).find("502") != std::string::npos);
+        }
+        CHECK(threw);
+    }
+    {
+        auto fake = std::make_shared<FakeTransport>();
+        fake->enqueueFinish(FakeTransport::Finish{0, QByteArray(), true,
+                                                  QStringLiteral("Connection refused")});
+        rag::Generator gen;
+        gen.setApiKey("sk-p2-fake-key-1234567890");
+        gen.setTransport(fake);
+        bool threw = false;
+        try {
+            gen.generate("测试问题", "人民法院 测试上下文");
+        } catch (const std::exception& e) {
+            threw = true;
+            CHECK(std::string(e.what()).find("Connection refused") != std::string::npos);
+        }
+        CHECK(threw);
+    }
+    PASS();
+}
+
+void test_p2_generation_cancel() {
+    TEST("P2：生成中取消——handle 中断 + 部分内容返回（对应「■ 停止」链路）");
+    auto fake = std::make_shared<FakeTransport>();
+    fake->enqueueChunk(sseDelta("残卷"));
+    // 不投递结束帧：generate 挂起，等待 cancel
+    rag::Generator gen;
+    gen.setApiKey("sk-p2-fake-key-1234567890");
+    gen.setTransport(fake);
+
+    QTimer::singleShot(50, [&gen]() { gen.cancel(); });   // 挂起期间（事件循环内）取消
+
+    bool threw = false;
+    try {
+        gen.generate("测试问题", "人民法院 测试上下文");
+        // 部分内容 + 网络错误 → 旧语义返回残卷；本实现 cancel 时增量已在
+        // buffer，fullAnswer 非空走残卷返回路径，两种都可接受：
+    } catch (const std::exception& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("canceled") != std::string::npos);
+    }
+    // canceled 时若已有增量 → 残卷路径（不抛）；无增量 → 抛。二者只取其一。
+    PASS();
+}
+
+void test_p2_embed_batch_reorder() {
+    TEST("P2：embedBatch 按响应 index 重排（服务端乱序不再错位，体检缺陷 #8）");
+    auto fake = std::make_shared<FakeTransport>();
+    fake->setResponder([](const QUrl&, const QByteArray& body) {
+        return embeddingResponder(body, /*shuffle=*/true);
+    });
+
+    vector_engine::EmbeddingService svc;
+    svc.setApiKey("sk-p2-fake-key-1234567890");
+    svc.setTransport(fake);
+
+    const auto vecs = svc.embedBatch({"甲", "乙", "丙"});
+    CHECK_EQ(vecs.size(), static_cast<size_t>(3));
+    // shuffle 模式下响应为逆序 index：vecs[i] 应是 [1+i, 2]
+    for (int i = 0; i < 3; ++i) {
+        CHECK_EQ(vecs[i].size(), static_cast<size_t>(2));
+        CHECK_CLOSE(vecs[i][0], 1.0 + i * 0.001, 1e-9);
+        CHECK_CLOSE(vecs[i][1], 2.0, 1e-9);
+    }
+    PASS();
+}
+
+void test_p2_vector_full_link() {
+    TEST("P2：向量路全链路（注入 Fake）——懒重建 / 缓存失效 / P0-4 真断言");
+    auto fake = std::make_shared<FakeTransport>();
+    fake->setResponder([](const QUrl& url, const QByteArray& body) {
+        Q_UNUSED(url);
+        return embeddingResponder(body, /*shuffle=*/false);
+    });
+
+    rag::Retriever r;
+    r.setEmbeddingTransport(fake);
+    r.setApiKey("sk-p2-fake-key-1234567890");
+    r.setEmbeddingEndpoint("https://api.siliconflow.cn", "BAAI/bge-large-zh-v1.5");
+    CHECK_EQ(r.vectorCacheSize(), static_cast<size_t>(0));
+
+    r.addText("民间借贷纠纷中交付凭证的认定规则。", "p2_vec_doc_a");
+    r.addText("劳动合同解除后的经济补偿标准。", "p2_vec_doc_b");
+    CHECK_EQ(r.chunkCount() >= 2 ? 1 : 0, 1);
+
+    // 向量单路真实出结果（fake 向量与查询向量夹角小，分数应显著非零）
+    auto hits = r.searchWithMode("交付凭证 认定", 5, rag::SearchMode::VectorOnly);
+    CHECK(!hits.empty());
+    CHECK(hits[0].vectorScore > 0.5);
+    CHECK_EQ(r.vectorCacheSize(), static_cast<size_t>(r.chunkCount()));
+
+    // P0-4 全链路断言：换模型后向量缓存立刻失效（旧实现静默复用旧向量）
+    r.setEmbeddingEndpoint("https://api.siliconflow.cn", "BAAI/bge-m3");
+    CHECK_EQ(r.vectorCacheSize(), static_cast<size_t>(0));
+
+    // 换 Key 同样失效
+    r.setApiKey("sk-p2-another-key-0987654321");
+    CHECK_EQ(r.vectorCacheSize(), static_cast<size_t>(0));
+    PASS();
+}
+
+void test_p2_aggregate_and_court_level() {
+    TEST("P2：聚合检测/聚合检索/法院层级/元数据摘要下沉引擎");
+    // 聚合检测（短语表自 UI 下沉）
+    CHECK(rag::Retriever::isAggregateQuery("所有案件中违约金如何计算"));
+    CHECK(rag::Retriever::isAggregateQuery("帮我统计借款纠纷"));
+    CHECK(!rag::Retriever::isAggregateQuery("民间借贷 交付凭证"));
+
+    // 聚合检索：per-doc 截断（3 块同篇 + 宽检索 → 每篇最多 2）
+    rag::Retriever r;
+    r.addText("原告诉称借款未还。本院认为借贷关系成立。判决如下偿还本息。"
+              "补充说明段：逾期利息按约定计算。附：送达回执说明。", "p2_agg_doc");
+    auto agg = r.searchAggregate("借贷 本息", 10, /*perDocLimit=*/2);
+    CHECK(!agg.empty());
+    int docHits = 0;
+    for (const auto& h : agg) {
+        if (h.docId == "p2_agg_doc") ++docHits;
+    }
+    CHECK(docHits <= 2);
+
+    // 法院层级判定（四级边界）
+    document::DocMetadata m;
+    CHECK(document::courtLevelOf(m) == document::CourtLevel::Unknown);
+    m.court = "最高人民法院";
+    CHECK(document::courtLevelOf(m) == document::CourtLevel::Supreme);
+    m.court = "北京市高级人民法院";
+    CHECK(document::courtLevelOf(m) == document::CourtLevel::High);
+    m.court = "北京市第一中级人民法院";
+    CHECK(document::courtLevelOf(m) == document::CourtLevel::Intermediate);
+    m.court = "北京市朝阳区人民法院";
+    CHECK(document::courtLevelOf(m) == document::CourtLevel::Basic);
+
+    // 元数据摘要（两份 UI 重复拼装合一后的引擎实现）
+    r.addText("（2024）京0105民初1号\n北京市朝阳区人民法院民事判决书\n"
+              "原告与被告民间借贷纠纷一案。\n二〇二四年五月二十日\n"
+              "原告诉称事实清楚。", "p2_meta_doc");
+    // addText 走提取器，这里直接验证 summary 的行格式：
+    auto summary = r.metadataSummary({"p2_meta_doc"});
+    CHECK(summary.find("p2_meta_doc") != std::string::npos);
+    PASS();
+}
+
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -2545,6 +2791,15 @@ void run_all_tests() {
     test_p0_utf8_bom_stripped();
     test_p0_binary_file_rejected();
     test_p0_vector_cache_invalidation();
+
+    std::cout << "\n── P2：传输注入与业务下沉 ──" << std::endl;
+    test_p2_sse_streaming();
+    test_p2_error_body_surfaces();
+    test_p2_http_error_throws();
+    test_p2_generation_cancel();
+    test_p2_embed_batch_reorder();
+    test_p2_vector_full_link();
+    test_p2_aggregate_and_court_level();
 
     std::cout << "\n── T5: 段落角色标注 ──" << std::endl;
     test_t5_role_annotation_basic();

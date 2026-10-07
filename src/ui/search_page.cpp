@@ -51,12 +51,8 @@ SearchPage::SearchPage(rag::Retriever* retriever, QWidget* parent)
     : QWidget(parent)
     , retriever_(retriever)
 {
-    // 未注入引擎时自建一个（仅独立构造本页的测试场景走到这里）；
-    // 正常运行时由 MainWindow 注入共享实例，本页只借用不拥有。
-    if (!retriever_) {
-        ownedRetriever_ = std::make_unique<rag::Retriever>();
-        retriever_ = ownedRetriever_.get();
-    }
+    // P2：引擎实例必须由 MainWindow 注入（组合根唯一），自建分支已删除
+    Q_ASSERT(retriever_ && "SearchPage 必须注入 Retriever");
 
     setupUi();
     loadApiKey();
@@ -125,6 +121,7 @@ void SearchPage::setupUi() {
     apiKeyInput_->setMinimumHeight(36);
 
     setApiKeyBtn_ = new QPushButton(QStringLiteral("设置"), this);
+    setApiKeyBtn_->setObjectName(QStringLiteral("setApiKeyBtn"));
     setApiKeyBtn_->setMinimumHeight(36);
 
     apiKeyStatus_ = new QLabel(this);
@@ -452,42 +449,21 @@ void SearchPage::onSearchFinished(const std::vector<rag::SearchResult>& results,
     if (stage_ == SearchStage::Idle) return;   // 迟到的陈旧结果，忽略
 
     if (stage_ == SearchStage::WideSearch) {
-        // ── 聚合模式第二跳：宽检索结果 → per-doc 去重 → 生成 ──
-        std::vector<rag::SearchResult> deduped;
-        constexpr int perDocLimit = 2;
-        std::unordered_map<std::string, int> docCount;
-        for (const auto& r : results) {
-            int& cnt = docCount[r.docId];
-            if (cnt >= perDocLimit) continue;
-            ++cnt;
-            deduped.push_back(r);
-        }
-        if (!deduped.empty()) {
-            displayResults(deduped);
+        // ── 聚合模式第二跳（P2：宽检索 + per-doc 去重已下沉引擎层）──
+        if (!results.empty()) {
+            displayResults(results);
         }
 
-        // 收集全部文档元数据注入 AI（轻只读，锁内拷贝）
+        // 收集全部文档元数据注入 AI（P2：摘要拼装已下沉 Retriever::metadataSummary）
         auto allIds = retriever_->allDocIds();
-        std::ostringstream allMeta;
-        for (size_t i = 0; i < allIds.size(); ++i) {
-            const auto meta = retriever_->metadataOf(allIds[i]);
-            if (meta && !meta->isEmpty()) {
-                allMeta << "- " << allIds[i];
-                if (!meta->caseNumber.empty()) allMeta << " | 案号: " << meta->caseNumber;
-                if (!meta->court.empty()) allMeta << " | 法院: " << meta->court;
-                if (!meta->caseType.empty()) allMeta << " | 类型: " << meta->caseType;
-                if (!meta->date.empty()) allMeta << " | 日期: " << meta->date;
-                if (!meta->procedure.empty()) allMeta << " | 程序: " << meta->procedure;
-                if (!meta->litigants.empty()) allMeta << " | 当事人: " << meta->litigants;
-                allMeta << "\n";
-            }
-        }
-        if (allMeta.tellp() > 0) {
-            allMeta << "\n（以上为全部 " << allIds.size() << " 个已导入文档的元数据汇总）\n";
+        std::string allMeta = retriever_->metadataSummary(allIds);
+        if (!allMeta.empty()) {
+            allMeta += "\n（以上为全部 " + std::to_string(allIds.size())
+                     + " 个已导入文档的元数据汇总）\n";
         }
         // 聚合模式来源 = 去重后的宽检索结果（空则沿用主检索的聚焦结果兜底）
-        auto sources = !deduped.empty() ? std::move(deduped) : std::move(pendingSources_);
-        startGeneration(std::move(sources), allMeta.str());
+        auto sources = std::move(pendingSources_);
+        startGeneration(std::move(sources), allMeta);
         return;
     }
 
@@ -503,27 +479,12 @@ void SearchPage::onSearchFinished(const std::vector<rag::SearchResult>& results,
 
     // AI 生成答案（使用筛选后的结果构建上下文）
     if (!llmKey_.isEmpty() && !filtered.empty()) {
-        // ── 检测聚合型问题（跨文档查询）──
-        // 仅用明确指向「全部文档」的短语，避免误判聚焦型查询
-        static const std::vector<std::string> AGGREGATE_MARKERS = {
-            "这些案件", "所有案件", "全部案件", "各案件", "各个案件", "每个案件",
-            "这些文档", "所有文档", "全部文档", "各文档", "这些文件", "所有文件",
-            "哪些案件", "汇总", "统计", "总共", "一共"
-        };
-        bool isAggregate = false;
-        const std::string qstr = query.toStdString();
-        for (const auto& marker : AGGREGATE_MARKERS) {
-            if (qstr.find(marker) != std::string::npos) {
-                isAggregate = true;
-                break;
-            }
-        }
-
-        if (isAggregate) {
-            // 聚合模式：先记下聚焦结果作为兜底来源，再追加一次宽检索
+        // ── 聚合型问题检测（P2：规则已下沉 Retriever::isAggregateQuery）──
+        if (rag::Retriever::isAggregateQuery(query.toStdString())) {
+            // 聚合模式：先记下聚焦结果作为兜底来源，再追加一次引擎聚合检索
             pendingSources_ = std::move(filtered);
             stage_ = SearchStage::WideSearch;
-            emit searchRequested(query, wideSearchWidth_);
+            emit aggregateSearchRequested(query, wideSearchWidth_);
             return;
         }
 
@@ -910,25 +871,14 @@ std::vector<rag::SearchResult> SearchPage::getFilteredResults() {
             }
         }
 
-        // 法院级别筛选
+        // 法院级别筛选（P2：层级判定下沉 document::courtLevelOf，含单测）
         if (courtLevel != QStringLiteral("全部")) {
-            if (!meta || meta->court.empty()) {
-                continue;
-            }
-            const std::string level = courtLevel.toStdString();
-            bool match = false;
-            if (level == "最高人民法院") {
-                match = (meta->court.find("最高") != std::string::npos);
-            } else if (level == "高级人民法院") {
-                match = (meta->court.find("高级") != std::string::npos);
-            } else if (level == "中级人民法院") {
-                match = (meta->court.find("中级") != std::string::npos);
-            } else if (level == "基层人民法院") {
-                // 基层法院：不含 最高/高级/中级
-                match = (meta->court.find("最高") == std::string::npos &&
-                         meta->court.find("高级") == std::string::npos &&
-                         meta->court.find("中级") == std::string::npos);
-            }
+            const auto level = document::courtLevelOf(meta ? *meta : document::DocMetadata{});
+            const bool match =
+                (courtLevel == QStringLiteral("最高人民法院") && level == document::CourtLevel::Supreme) ||
+                (courtLevel == QStringLiteral("高级人民法院") && level == document::CourtLevel::High) ||
+                (courtLevel == QStringLiteral("中级人民法院") && level == document::CourtLevel::Intermediate) ||
+                (courtLevel == QStringLiteral("基层人民法院") && level == document::CourtLevel::Basic);
             if (!match) continue;
         }
 
@@ -1005,28 +955,15 @@ void SearchPage::populateYearFilter(const std::vector<rag::SearchResult>& result
 }
 
 std::string SearchPage::buildMetadataSummary(const std::vector<rag::SearchResult>& results) {
-    // 收集所有结果的元数据（去重）
+    // P2：字段拼装下沉 Retriever::metadataSummary，这里只按命中顺序收集 docId（去重）
+    std::vector<std::string> orderedIds;
     std::set<std::string> seenIds;
-    std::ostringstream oss;
-
     for (const auto& r : results) {
-        if (seenIds.count(r.docId)) continue;
-        seenIds.insert(r.docId);
-
-        const auto meta = retriever_->metadataOf(r.docId);
-        if (!meta || meta->isEmpty()) continue;
-
-        oss << "- " << r.docId;
-        if (!meta->caseNumber.empty()) oss << " | 案号: " << meta->caseNumber;
-        if (!meta->court.empty()) oss << " | 法院: " << meta->court;
-        if (!meta->caseType.empty()) oss << " | 类型: " << meta->caseType;
-        if (!meta->date.empty()) oss << " | 日期: " << meta->date;
-        if (!meta->procedure.empty()) oss << " | 程序: " << meta->procedure;
-        if (!meta->litigants.empty()) oss << " | 当事人: " << meta->litigants;
-        oss << "\n";
+        if (seenIds.insert(r.docId).second) {
+            orderedIds.push_back(r.docId);
+        }
     }
-
-    return oss.str();
+    return retriever_->metadataSummary(orderedIds);
 }
 
 void SearchPage::appendAiAnswer(const QString& text) {
@@ -1071,17 +1008,6 @@ history::HistoryRecord SearchPage::buildHistoryRecord(
         record.sources.push_back(std::move(item));
     }
     return record;
-}
-
-void SearchPage::simulateAnswer(const QString& query, const QString& answer, bool interrupted) {
-    // 与真实流式回合完全一样的复位与累计方式（见头文件说明）：
-    // 界面显示什么，历史就记什么；来源是上一次真实检索的命中结果。
-    answerBuffer_.clear();
-    answerInterrupted_ = interrupted;
-    answerNote_ = interrupted ? QStringLiteral("模拟：生成中途中断") : QString();
-    aiAnswerArea_->clear();
-    appendAiAnswer(answer);
-    finishAnswerRound(query, cachedResults_);
 }
 
 void SearchPage::applySettings(const config::AppSettings& settings) {

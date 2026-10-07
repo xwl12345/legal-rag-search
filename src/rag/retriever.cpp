@@ -307,6 +307,37 @@ std::vector<SearchResult> Retriever::search(const std::string& query, int topK) 
     return searchWithMode(query, topK, SearchMode::WeightedFusion);
 }
 
+bool Retriever::isAggregateQuery(const std::string& query) {
+    // 聚合型问题检测：仅用明确指向「全部文档」的短语，避免误判聚焦型查询
+    // （P2 自检索页 search_page.cpp 下沉；短语表变更有单测钉死）
+    static const std::vector<std::string> AGGREGATE_MARKERS = {
+        "这些案件", "所有案件", "全部案件", "各案件", "各个案件", "每个案件",
+        "这些文档", "所有文档", "全部文档", "各文档", "这些文件", "所有文件",
+        "哪些案件", "汇总", "统计", "总共", "一共"
+    };
+    for (const auto& marker : AGGREGATE_MARKERS) {
+        if (query.find(marker) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<SearchResult> Retriever::searchAggregate(const std::string& query, int width,
+                                                     int perDocLimit) {
+    auto wideResults = search(query, width);
+
+    std::vector<SearchResult> deduped;
+    std::unordered_map<std::string, int> docCount;
+    for (auto& r : wideResults) {
+        int& cnt = docCount[r.docId];
+        if (cnt >= perDocLimit) continue;
+        ++cnt;
+        deduped.push_back(std::move(r));
+    }
+    return deduped;
+}
+
 std::vector<std::pair<std::string, double>> Retriever::rrfFuse(
     const std::vector<std::pair<std::string, double>>& bm25Ranking,
     const std::vector<std::pair<std::string, double>>& vectorRanking,
@@ -619,6 +650,35 @@ std::optional<document::DocMetadata> Retriever::metadataOf(const std::string& do
         return it->second;
     }
     return std::nullopt;
+}
+
+std::string Retriever::metadataSummary(const std::vector<std::string>& docIds) const {
+    // P2 合一：检索页聚焦/聚合两份重复拼装的唯一实现（锁内逐份拷贝元数据）
+    std::ostringstream oss;
+    for (const auto& docId : docIds) {
+        std::optional<document::DocMetadata> meta;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = docMeta_.find(docId);
+            if (it != docMeta_.end()) meta = it->second;
+        }
+        if (!meta || meta->isEmpty()) continue;
+
+        oss << "- " << docId;
+        if (!meta->caseNumber.empty()) oss << " | 案号: " << meta->caseNumber;
+        if (!meta->court.empty()) oss << " | 法院: " << meta->court;
+        if (!meta->caseType.empty()) oss << " | 类型: " << meta->caseType;
+        if (!meta->date.empty()) oss << " | 日期: " << meta->date;
+        if (!meta->procedure.empty()) oss << " | 程序: " << meta->procedure;
+        if (!meta->litigants.empty()) oss << " | 当事人: " << meta->litigants;
+        oss << "\n";
+    }
+    return oss.str();
+}
+
+void Retriever::setEmbeddingTransport(std::shared_ptr<IHttpTransport> transport) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    embedding_.setTransport(std::move(transport));
 }
 
 std::vector<std::string> Retriever::allDocIds() const {

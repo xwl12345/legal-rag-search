@@ -31,8 +31,9 @@ class SearchPage : public QWidget {
     Q_OBJECT
 
 public:
-    /// @param retriever 引擎实例（非拥有；为空时本页自建，仅供独立测试）
-    explicit SearchPage(rag::Retriever* retriever = nullptr, QWidget* parent = nullptr);
+    /// @param retriever 引擎实例（非拥有；P2 起必须注入，自建分支已删除——
+    ///                  组合根唯一，独立测试场景由测试方自持实例注入）
+    explicit SearchPage(rag::Retriever* retriever, QWidget* parent = nullptr);
     ~SearchPage() override;
 
     /// 当前缓存（最近一次检索）的结果条数，供自动化测试断言
@@ -81,15 +82,6 @@ public slots:
     void onImportOcrPage(int page, int total);
     void onImportFinished(const ui_engine::ImportSummary& summary);
 
-    /// ⚠️ 测试钩子（仅供 ui_smoke 的问答历史 E2E 使用，生产逻辑不会调用）。
-    ///
-    /// 无 API Key 的环境下无法产生真实回答，但"回合结束 → 落库 → 历史页出现记录"
-    /// 这条链路必须能被自动验证。本钩子把一段给定的回答文本按正常流程走完：
-    /// 界面显示 → 累计进 answerBuffer_ → finishAnswerRound() → answerFinished()，
-    /// 来源则取当前一轮**真实检索**命中结果（调用方需先检索）。
-    /// 换言之，假的只是"回答从哪来"，其余全是生产代码路径。
-    void simulateAnswer(const QString& query, const QString& answer, bool interrupted = false);
-
 signals:
     /// 索引规模变化（文档数 / 文本块数），供主窗口状态栏显示
     void engineStatsChanged(int docCount, int chunkCount);
@@ -112,6 +104,8 @@ signals:
     // ── P1 异步引擎请求（MainWindow 接线到 EngineWorker 的队列化槽）──
     /// 请求检索（普通检索与聚合宽检索共用，EngineWorker::search）
     void searchRequested(const QString& query, int topK);
+    /// 请求聚合检索（宽检索 + per-doc 去重在引擎内完成，EngineWorker::searchAggregate）
+    void aggregateSearchRequested(const QString& query, int width);
     /// 请求生成回答（EngineWorker::generateAnswer，流式增量经 generationDelta 回来）
     void generationRequested(const QString& query, const QString& context,
                              const QString& metaContext, double temperature);
@@ -212,10 +206,9 @@ private:
     int wideSearchWidth_ = 50;
     double temperature_ = 0.3;   // 生成温度（随生成请求下发给引擎线程的 Generator）
 
-    // ── 核心引擎（retriever_ 非拥有；仅独立测试时才由本页自持）──
+    // ── 核心引擎（retriever_ 非拥有，P2 起构造必须注入）──
     // P1 起 Generator 归 EngineWorker 所有，本页经信号请求生成。
     rag::Retriever* retriever_ = nullptr;
-    std::unique_ptr<rag::Retriever> ownedRetriever_;
 
     // ── UI 组件 ──
     QLineEdit* searchInput_ = nullptr;

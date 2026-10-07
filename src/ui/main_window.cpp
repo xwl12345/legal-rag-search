@@ -117,6 +117,8 @@ void MainWindow::buildPages() {
     // ── P1：页面请求 → 引擎线程（队列化）；引擎结果 → 页面（队列化）──
     connect(searchPage_, &SearchPage::searchRequested,
             engineWorker_, &EngineWorker::search);
+    connect(searchPage_, &SearchPage::aggregateSearchRequested,
+            engineWorker_, &EngineWorker::searchAggregate);
     connect(searchPage_, &SearchPage::generationRequested,
             engineWorker_, &EngineWorker::generateAnswer);
     connect(searchPage_, &SearchPage::generationCancelRequested,

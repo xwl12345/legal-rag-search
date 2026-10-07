@@ -7,6 +7,7 @@
 #include "document/tokenizer.h"
 #include "document/parser.h"
 #include "document/metadata.h"
+#include "net/transport.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -114,6 +115,15 @@ public:
     std::vector<SearchResult> searchWithMode(const std::string& query, int topK,
                                              SearchMode mode);
 
+    /// 聚合型问题检测（P2 自检索页下沉）：query 含明确指向「全部文档」的
+    /// 短语（如「所有案件/汇总/统计」）时返回 true
+    static bool isAggregateQuery(const std::string& query);
+
+    /// 聚合检索（P2 自检索页下沉）：按 width 宽检索后做 per-doc 截断去重，
+    /// 每篇文档最多保留 perDocLimit 个最高分块
+    std::vector<SearchResult> searchAggregate(const std::string& query, int width,
+                                              int perDocLimit = 2);
+
     /// 倒数排名融合（RRF）：score(d) = Σ_paths 1/(k + rank_i)，k = 60（论文标准值）。
     /// 纯函数，公开供单测用合成排名直接断言（T4）。
     /// 输入为两路已排序的 (chunkKey, 原始分数) 列表；输出按 RRF 分降序、截 topK。
@@ -176,6 +186,13 @@ public:
 
     /// 线程安全版元数据读取（锁内拷贝）；文档不存在返回 nullopt
     std::optional<document::DocMetadata> metadataOf(const std::string& docId) const;
+
+    /// 元数据摘要（P2 合一：检索页聚焦/聚合两份重复拼装的唯一实现）。
+    /// 按 docIds 顺序输出「- docId | 案号: … | 法院: …」行；无元数据的文档跳过。
+    std::string metadataSummary(const std::vector<std::string>& docIds) const;
+
+    /// Embedding 网络出口注入（P2；EngineWorker 启动接线时直调，先于任何任务）
+    void setEmbeddingTransport(std::shared_ptr<IHttpTransport> transport);
 
     /// 已导入的所有文档 ID（按 docId 排序，稳定可复现）
     std::vector<std::string> allDocIds() const;

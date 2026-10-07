@@ -730,4 +730,14 @@ DocMetadata MetadataExtractor::extract(const std::string& text) {
     return meta;
 }
 
+CourtLevel courtLevelOf(const DocMetadata& meta) {
+    // 层级判定（P2 自检索页 getFilteredResults 下沉，语义保持一致）：
+    // 含「最高/高级/中级」字样即归级；其余非空法院名一律视为基层。
+    if (meta.court.empty()) return CourtLevel::Unknown;
+    if (meta.court.find("最高") != std::string::npos) return CourtLevel::Supreme;
+    if (meta.court.find("高级") != std::string::npos) return CourtLevel::High;
+    if (meta.court.find("中级") != std::string::npos) return CourtLevel::Intermediate;
+    return CourtLevel::Basic;
+}
+
 } // namespace document

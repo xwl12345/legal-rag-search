@@ -1,7 +1,10 @@
 #pragma once
+#include <memory>
 #include <string>
 #include <vector>
 #include <unordered_map>
+
+#include "net/transport.h"
 
 namespace vector_engine {
 
@@ -24,10 +27,17 @@ public:
     std::string apiBaseUrl() const { return apiBaseUrl_; }
     std::string model() const { return model_; }
 
+    /// 网络传输注入（P2）：默认 QtTransport（首次请求时在当前线程懒创建，
+    /// 头文件不引入 QtTransport 完整类型）；测试注入 FakeTransport 走全链路
+    void setTransport(std::shared_ptr<IHttpTransport> transport) {
+        transport_ = std::move(transport);
+    }
+
     /// 将单个文本转为向量
     std::vector<double> embed(const std::string& text);
 
     /// 批量将多个文本转为向量（一次 API 调用）
+    /// @throw std::runtime_error 网络失败 / HTTP 错误 / 200 包错误体
     std::vector<std::vector<double>> embedBatch(const std::vector<std::string>& texts);
 
     /// 检查 API 是否已配置
@@ -42,6 +52,9 @@ private:
     std::string apiKey_;
     std::string apiBaseUrl_ = "https://api.deepseek.com";
     std::string model_ = "text-embedding-3-small";
+
+    // P2：网络出口可注入；空 = 未注入，embedBatch 首次使用时懒创建 QtTransport
+    std::shared_ptr<IHttpTransport> transport_;
 };
 
 } // namespace vector_engine

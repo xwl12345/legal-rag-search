@@ -1,23 +1,20 @@
 #include "rag/generator.h"
+#include "net/qt_transport.h"
 #include "config/app_config.h"
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
-#include <QEventLoop>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
-#include <QUrl>
+#include <QEventLoop>
 #include <sstream>
 #include <stdexcept>
 
 namespace rag {
 
 void Generator::cancel() {
-    // 同线程调用（引擎线程内）：直接 abort 活动应答，等待中的事件循环
-    // 以网络错误（OperationCanceled）收场 → generate() 走异常/部分返回路径。
-    if (activeReply_) {
-        activeReply_->abort();
+    // 同线程调用（引擎线程内）：中断活动传输；onFinished 仍会恰好一次，
+    // 等待中的事件循环以网络错误（OperationCanceled）收场 → generate() 走异常路径。
+    if (activeHandle_) {
+        activeHandle_->cancel();
     }
 }
 
@@ -28,6 +25,9 @@ std::string Generator::generate(const std::string& query,
     if (apiKey_.empty()) {
         return "[错误] 未设置 API Key，请设置环境变量 DEEPSEEK_API_KEY";
     }
+    if (!transport_) {
+        transport_ = std::make_shared<QtTransport>();   // 懒创建：绑定当前（引擎）线程
+    }
 
     std::string prompt = buildPrompt(query, context, metaContext_);
 
@@ -35,7 +35,7 @@ std::string Generator::generate(const std::string& query,
 
     // Build request body
     QJsonObject body;
-    body["model"] = QString::fromStdString("deepseek-chat");
+    body["model"] = QString::fromStdString(chatModel_);   // P2：模型名成员化（旧为硬编码）
     body["stream"] = true;
 
     QJsonArray messages;
@@ -56,31 +56,17 @@ std::string Generator::generate(const std::string& query,
     QJsonDocument doc(body);
     QByteArray data = doc.toJson(QJsonDocument::Compact);
 
-    // Setup request
-    QNetworkRequest request(QUrl("https://api.deepseek.com/v1/chat/completions"));
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    request.setRawHeader("Authorization", ("Bearer " + apiKey_).c_str());
-    request.setRawHeader("Accept", "text/event-stream");
-    // 60 秒无数据传输视为失败（网络不通时快速报错而非无限挂起；
-    // SSE 流式期间持续有增量数据，不会误伤慢回答）
-    request.setTransferTimeout(config::HTTP_TIMEOUT * 2000);
+    // Setup request（P2：URL 用成员拼接，apiBaseUrl_ 不再是死成员）
+    QUrl url(QString::fromStdString(apiBaseUrl_) + QStringLiteral("/v1/chat/completions"));
+    QList<QPair<QByteArray, QByteArray>> headers;
+    headers << qMakePair(QByteArray("Authorization"),
+                         QByteArray(("Bearer " + apiKey_).c_str()))
+            << qMakePair(QByteArray("Accept"), QByteArray("text/event-stream"));
 
-    QNetworkAccessManager manager;
-    QNetworkReply* reply = manager.post(request, data);
-
-    // 活动应答登记（cancel() 的作用目标）+ RAII 清理：generate() 的所有出口
-    // （正常返回 / 异常）都不留悬挂指针
-    activeReply_ = reply;
-    struct ReplyGuard {
-        QPointer<QNetworkReply>& r;
-        ~ReplyGuard() { r = nullptr; }
-    } replyGuard{activeReply_};
-
+    QEventLoop loop;
     std::string fullAnswer;
     std::string sseBuffer;  // buffer for partial SSE lines
-
-    // 同步等待用的本地事件循环——提前声明，readyRead 的接收者上下文要挂它
-    QEventLoop loop;
+    HttpResponse finalResp;
 
     // 处理单条 SSE 行（"data: {...}" / "data: [DONE]" / 注释行）
     auto processSseLine = [&](const std::string& line) {
@@ -112,29 +98,31 @@ std::string Generator::generate(const std::string& query,
 
     // Process SSE stream chunks as they arrive.
     // 只消费以 \n 结尾的完整行，不完整的尾行留在缓冲区等下一次数据到达。
-    // （旧实现用 getline + processed 计数回退：当流末尾无换行时，getline 仍会
-    //   取出尾行并给它补一个缓冲区中不存在的 '\n'，使 processed.size() 比
-    //   缓冲区大 1，substr 越界抛出 basic_string::substr __pos > size。）
-    // 接收者上下文挂到 &loop（P0-8）：loop 析构即断连，杜绝 finished 之后
-    // 仍有 readyRead 投递时对已销毁栈帧的悬挂访问。
-    QObject::connect(reply, &QNetworkReply::readyRead, &loop, [&]() {
-        QByteArray chunk = reply->readAll();
-        sseBuffer += chunk.toStdString();
+    // 接收路径由传输层保证：回调只在 post 的调用线程投递，onFinished 恰好一次。
+    auto handle = transport_->post(
+        url, headers, data, config::HTTP_TIMEOUT * 2000,
+        [&](const QByteArray& chunk) {
+            sseBuffer += chunk.toStdString();
 
-        size_t pos = 0;
-        size_t nl;
-        while ((nl = sseBuffer.find('\n', pos)) != std::string::npos) {
-            std::string line = sseBuffer.substr(pos, nl - pos);
-            pos = nl + 1;
-            if (!line.empty() && line.back() == '\r') line.pop_back();  // 兼容 CRLF
-            processSseLine(line);
-        }
-        sseBuffer.erase(0, pos);  // 保留不完整的尾行（pos ≤ size，安全）
-    });
+            size_t pos = 0;
+            size_t nl;
+            while ((nl = sseBuffer.find('\n', pos)) != std::string::npos) {
+                std::string line = sseBuffer.substr(pos, nl - pos);
+                pos = nl + 1;
+                if (!line.empty() && line.back() == '\r') line.pop_back();  // 兼容 CRLF
+                processSseLine(line);
+            }
+            sseBuffer.erase(0, pos);  // 保留不完整的尾行（pos ≤ size，安全）
+        },
+        [&](const HttpResponse& resp) {
+            finalResp = resp;
+            loop.quit();
+        });
 
-    // Synchronous wait via local event loop
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    // 活动句柄登记（cancel 的作用目标）；generate 的所有出口都不留悬挂
+    activeHandle_ = handle;
     loop.exec();
+    activeHandle_.reset();
 
     // 流结束后处理缓冲区中残留的最后一行（可能没有换行结尾）
     if (!sseBuffer.empty()) {
@@ -143,18 +131,40 @@ std::string Generator::generate(const std::string& query,
         processSseLine(lastLine);
     }
 
-    // Check for network errors (but don't throw - return what we got)
-    if (reply->error() != QNetworkReply::NoError) {
-        std::string errMsg = reply->errorString().toStdString();
-        reply->deleteLater();
-        if (fullAnswer.empty()) {
-            throw std::runtime_error("LLM API request failed: " + errMsg);
+    // ── 错误归并（P2：与旧语义对齐 + 新增错误体解析）──
+    // 传输层失败 / HTTP >= 400 / 200 包错误体，都走"有增量则保残卷、无增量则抛"
+    QString failReason;
+    if (finalResp.networkError || finalResp.statusCode >= 400) {
+        failReason = finalResp.errorText.isEmpty()
+            ? QStringLiteral("HTTP %1").arg(finalResp.statusCode)
+            : finalResp.errorText;
+    } else if (finalResp.statusCode == 0) {
+        failReason = QStringLiteral("no response from server");
+    } else {
+        // HTTP 200：响应体可能是 {"error": {...}}（网关/上游错误此前被静默吞掉，
+        // 界面上像"按钮失灵"——体检缺陷 #20）。这里解析并如实上报。
+        QJsonParseError parseError;
+        QJsonDocument respDoc = QJsonDocument::fromJson(finalResp.body, &parseError);
+        if (parseError.error == QJsonParseError::NoError && respDoc.isObject()) {
+            const QJsonObject root = respDoc.object();
+            if (root.contains(QStringLiteral("error"))) {
+                const QString msg = root.value(QStringLiteral("error")).toObject()
+                                        .value(QStringLiteral("message")).toString();
+                failReason = msg.isEmpty()
+                    ? QStringLiteral("服务返回错误响应体")
+                    : msg;
+            }
         }
-        // If we got partial content, return it
+    }
+
+    if (!failReason.isEmpty()) {
+        if (fullAnswer.empty()) {
+            throw std::runtime_error("LLM API request failed: " + failReason.toStdString());
+        }
+        // 已有部分内容：按旧语义返回残卷（调用方按正常完成落库）
         return fullAnswer;
     }
 
-    reply->deleteLater();
     return fullAnswer;
 }
 
@@ -237,24 +247,6 @@ std::string Generator::buildPrompt(const std::string& query,
         return buildLegalPrompt(query, context, metaContext);
     }
     return buildGeneralPrompt(query, context);
-}
-
-std::string Generator::parseDelta(const std::string& jsonLine) {
-    QJsonParseError parseError;
-    QJsonDocument jdoc = QJsonDocument::fromJson(
-        QByteArray::fromStdString(jsonLine), &parseError);
-    if (parseError.error == QJsonParseError::NoError && jdoc.isObject()) {
-        QJsonObject root = jdoc.object();
-        QJsonArray choices = root["choices"].toArray();
-        if (!choices.isEmpty()) {
-            QJsonObject choice = choices[0].toObject();
-            QJsonObject delta = choice["delta"].toObject();
-            if (delta.contains("content")) {
-                return delta["content"].toString().toStdString();
-            }
-        }
-    }
-    return "";
 }
 
 } // namespace rag

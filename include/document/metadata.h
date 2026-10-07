@@ -23,6 +23,19 @@ const char* resultTendencyLabel(ResultTendency tendency);
 /// 中文标签 → 结果倾向（标签不匹配返回 Unknown）
 ResultTendency resultTendencyFromLabel(const std::string& label);
 
+/// 法院行政层级（P2 自检索页下沉：筛选规则不再散落在 UI 字符串匹配里）
+enum class CourtLevel {
+    Unknown,       // 未提取到法院名
+    Supreme,       // 最高人民法院
+    High,          // 高级人民法院
+    Intermediate,  // 中级人民法院
+    Basic,         // 基层人民法院（不含最高/高级/中级字样的「XX人民法院」）
+};
+
+/// 按法院名判定行政层级（P2 逻辑与检索页原实现一致，单测覆盖四级边界）
+struct DocMetadata;
+CourtLevel courtLevelOf(const DocMetadata& meta);
+
 /// 法律文档结构化元数据
 struct DocMetadata {
     std::string caseNumber;    // 案号，如 (2024)京0105民初12345号
