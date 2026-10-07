@@ -38,11 +38,13 @@
 #include <QTimer>
 
 #include <cmath>
+#include <functional>
 
 #include "ui/main_window.h"
 #include "ui/search_page.h"
 #include "ui/library_page.h"
 #include "ui/history_page.h"
+#include "ui/quality_page.h"
 #include "ui/settings_page.h"
 #include "config/app_config.h"
 #include "config/app_settings.h"
@@ -86,6 +88,15 @@ void pump(int ms) {
     QEventLoop loop;
     QTimer::singleShot(ms, &loop, &QEventLoop::quit);
     loop.exec();
+}
+
+/// P1：引擎任务已队列化到引擎线程，断言前等待其真正收尾（带超时护栏）
+void waitUntil(const std::function<bool()>& done, int maxMs = 60000) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!done() && timer.elapsed() < maxMs) {
+        pump(30);
+    }
 }
 
 const char* const kPageNames[] = {
@@ -135,6 +146,7 @@ int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) 
     QElapsedTimer timer;
     timer.start();
     page->importPaths(corpus);
+    waitUntil([&] { return !page->isBusy(); });   // P1：导入在引擎线程异步执行
     const qint64 importMs = timer.elapsed();
     check(lastDocs == corpus.size() && lastChunks > 0, QStringLiteral("导入索引"),
           QStringLiteral("%1 文档 / %2 文本块 / %3 ms")
@@ -162,11 +174,23 @@ int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) 
     check(lastDocs == docsBeforeBusy, QStringLiteral("P0-2：忙碌期导入被拒（引擎无变化）"),
           QStringLiteral("导入前后文档数 %1 / %2").arg(docsBeforeBusy).arg(lastDocs));
 
-    // P0-2：任务进行中关窗被拦截（同步执行模型下强关会在嵌套循环深处析构活动对象）
+    // P0-2：任务进行中关窗被拦截——置于任何事件泵之前，确保必在忙碌窗口内
+    // （引擎线程的检索仅数毫秒，期间不能泵事件，否则可能抢先完成）
     window.close();
-    QApplication::processEvents();
     check(window.isVisible(), QStringLiteral("P0-2：任务进行中关闭被拦截"));
     check(page->isBusy(), QStringLiteral("P0-2：拦截后任务继续运行"));
+
+    // P1：切页即时生效，UI 不被引擎调用阻塞（若检索已抢先完成，
+    // 切页同样应即时生效——本断言验证的是 UI 事件循环始终畅通）
+    if (QListWidget* nav = window.findChild<QListWidget*>("navList")) {
+        clickNavItem(nav, 1);
+        QStackedWidget* stack = window.findChild<QStackedWidget*>();
+        check(stack && stack->currentIndex() == 1,
+              QStringLiteral("P1：切页即时生效（UI 不被引擎阻塞）"),
+              QStringLiteral("stack=%1").arg(stack ? stack->currentIndex() : -1));
+        clickNavItem(nav, 0);
+        QApplication::processEvents();
+    }
 
     pump(3000);                  // 等检索与生成分支走完
     check(!page->isBusy(), QStringLiteral("P0-2：检索完成后忙碌解除"));
@@ -253,6 +277,7 @@ int runLibraryE2E(MainWindow& window, const QString& corpusDir, const QString& o
 
     // 先经检索页导入，验证"共享引擎"——导入的文档文档库页应立刻看到
     searchPage->importPaths(corpus);
+    waitUntil([&] { return !searchPage->isBusy(); });
     QApplication::processEvents();
     libPage->refresh();
     QApplication::processEvents();
@@ -333,6 +358,7 @@ int runPersistenceE2E(const QString& corpusDir, const QString& outDir) {
         }
 
         page->importPaths(collectCorpus(corpusDir));
+        waitUntil([&] { return !page->isBusy(); });
         QApplication::processEvents();
         libPage->refresh();
         QApplication::processEvents();
@@ -449,6 +475,7 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
 
         // 真实的一半：导入 + 检索，命中结果作为落库来源
         searchPage->importPaths(corpus);
+        waitUntil([&] { return !searchPage->isBusy(); });
         QApplication::processEvents();
 
         searchInput->setText(QStringLiteral("民间借贷 交付凭证"));
@@ -671,6 +698,7 @@ int runOverwriteE2E() {
 
     // 首次导入 A：docId 进入引擎
     page->importPaths({paths[0]});
+    waitUntil([&] { return !page->isBusy(); });
     QApplication::processEvents();
     libPage->refresh();
     showFirstRowDetail();
@@ -694,12 +722,14 @@ int runOverwriteE2E() {
 
     // ① 同路径重复导入（更新场景）：静默放行，不触发钩子
     page->importPaths({paths[0]});
+    waitUntil([&] { return !page->isBusy(); });
     QApplication::processEvents();
     check(hook.calls == 0 && libPage->rowCount() == 1,
           QStringLiteral("P0-7：同路径重复导入静默放行（不弹确认）"));
 
     // ② 异路径同名 + 选择「覆盖」：钩子参数正确，A 的内容被 B 替换
     page->importPaths({paths[1]});
+    waitUntil([&] { return !page->isBusy(); });
     QApplication::processEvents();
     libPage->refresh();
     showFirstRowDetail();
@@ -717,6 +747,7 @@ int runOverwriteE2E() {
     // ③ 异路径同名 + 选择「跳过」：C 不入库，内容仍是 B
     hook.answer = SearchPage::OverwriteChoice::Skip;
     page->importPaths({paths[2]});
+    waitUntil([&] { return !page->isBusy(); });
     QApplication::processEvents();
     libPage->refresh();
     showFirstRowDetail();
@@ -728,6 +759,7 @@ int runOverwriteE2E() {
     // ④ 异路径同名（C 未入库，docId 已在库）+ 选择「取消剩余导入」
     hook.answer = SearchPage::OverwriteChoice::CancelAll;
     page->importPaths({paths[2]});
+    waitUntil([&] { return !page->isBusy(); });
     QApplication::processEvents();
     check(hook.calls == 3, QStringLiteral("P0-7：取消路径同样经过确认钩子"));
     check(libPage->rowCount() == 1, QStringLiteral("P0-7：取消后文档数不变"));
@@ -826,6 +858,7 @@ int runSettingsE2E(const QString& corpusDir) {
 
         // 首次检索（默认 k1=1.5）
         searchPage->importPaths(corpus);
+        waitUntil([&] { return !searchPage->isBusy(); });
         QApplication::processEvents();
         searchInput->setText(QStringLiteral("民间借贷 交付凭证"));
         searchBtn->click();
@@ -927,6 +960,7 @@ int runQualityE2E(const QString& corpusDir) {
     QApplication::processEvents();
 
     SearchPage* searchPage = window.findChild<SearchPage*>();
+    QualityPage* qualityPage = window.findChild<QualityPage*>();
     QListWidget* navList = window.findChild<QListWidget*>("navList");
     QLineEdit* queryInput = window.findChild<QLineEdit*>("qualityQueryInput");
     QPushButton* runBtn = window.findChild<QPushButton*>("qualityRunBtn");
@@ -955,6 +989,7 @@ int runQualityE2E(const QString& corpusDir) {
         return g_failures;
     }
     searchPage->importPaths(corpus);
+    waitUntil([&] { return !searchPage->isBusy(); });
     QApplication::processEvents();
 
     const bool vectorReady = !serviceHint->text().contains(QStringLiteral("未配置"));
@@ -967,7 +1002,7 @@ int runQualityE2E(const QString& corpusDir) {
     // ── 单查询四路对比 ──
     queryInput->setText(QStringLiteral("民间借贷 交付凭证"));
     runBtn->click();
-    QApplication::processEvents();
+    waitUntil([&] { return qualityPage && !qualityPage->isBusy(); });
 
     check(listBm25->count() >= 1 && listWeighted->count() >= 1 && listRrf->count() >= 1,
           QStringLiteral("四路对比：BM25 / 加权 / RRF 列有结果"),
@@ -997,9 +1032,9 @@ int runQualityE2E(const QString& corpusDir) {
         check(sameR, QStringLiteral("降级下 RRF 列与 BM25 列逐行一致"));
     }
 
-    // ── 批量评测 ──
+    // ── 批量评测（P1：引擎线程异步执行，等待收尾）──
     evalBtn->click();
-    QApplication::processEvents();
+    waitUntil([&] { return qualityPage && !qualityPage->isBusy(); });
 
     check(metricsTable->rowCount() == 4,
           QStringLiteral("指标表 4 行（四路）"),

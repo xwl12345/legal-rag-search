@@ -8,13 +8,16 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QComboBox>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <vector>
 #include "history/history_record.h"
 #include "rag/retriever.h"
-#include "rag/generator.h"
+#include "ui/engine_worker.h"
 #include "config/app_settings.h"
+
+class QProgressDialog;
 
 /// 检索问答页：保留重构前 MainWindow 的全部检索逻辑
 /// （导入 → 混合检索 → 元数据筛选 → SSE 流式回答），
@@ -37,6 +40,9 @@ public:
 
     /// 本页是否有引擎任务进行中（检索+生成 / 批量导入），供 closeEvent 与 E2E 断言
     bool isBusy() const { return busySelf_; }
+
+    /// 当前 LLM API Key（MainWindow 启动接线后推送给 EngineWorker 的生成器用）
+    QString llmApiKey() const { return llmKey_; }
 
     /// ── P0-7 同名异路径覆盖确认钩子 ──
     /// 返回值决定对新文件的处理；默认实现弹 QMessageBox，测试可注入脚本化应答。
@@ -64,6 +70,16 @@ public slots:
             refreshActionButtons();
         }
     }
+
+    // ── P1：引擎结果回传（EngineWorker 信号 → 队列化到 UI 线程；
+    //        MainWindow 负责接线，故为 public 槽）──
+    void onSearchFinished(const std::vector<rag::SearchResult>& results,
+                          const QString& query);
+    void onGenerationDelta(const QString& text);
+    void onGenerationFinished(bool interrupted, const QString& errorText);
+    void onImportProgress(int done, int total, const QString& fileName);
+    void onImportOcrPage(int page, int total);
+    void onImportFinished(const ui_engine::ImportSummary& summary);
 
     /// ⚠️ 测试钩子（仅供 ui_smoke 的问答历史 E2E 使用，生产逻辑不会调用）。
     ///
@@ -93,6 +109,19 @@ signals:
     /// 关闭窗口时据此拦截「任务进行中就退出」
     void engineBusyChanged(bool busy);
 
+    // ── P1 异步引擎请求（MainWindow 接线到 EngineWorker 的队列化槽）──
+    /// 请求检索（普通检索与聚合宽检索共用，EngineWorker::search）
+    void searchRequested(const QString& query, int topK);
+    /// 请求生成回答（EngineWorker::generateAnswer，流式增量经 generationDelta 回来）
+    void generationRequested(const QString& query, const QString& context,
+                             const QString& metaContext, double temperature);
+    /// 请求中断当前生成（EngineWorker::cancelGeneration）
+    void generationCancelRequested();
+    /// LLM Key 变更（EngineWorker::setLlmApiKey；初始 Key 由 MainWindow 启动时推送）
+    void llmApiKeyChanged(const QString& key);
+    /// 请求批量导入（同名冲突预检已完成，EngineWorker::importDocuments）
+    void importRequested(const QStringList& files);
+
 private slots:
     void onSearch();
     void onPickImportFiles();
@@ -105,6 +134,14 @@ private:
     void displayResults(const std::vector<rag::SearchResult>& results);
     void appendAiAnswer(const QString& text);
     void loadApiKey();
+
+    /// 检索完成后的生成阶段入口：构建上下文与元数据摘要并入队生成请求。
+    /// sources 作为本回合历史落库的命中来源缓存。
+    void startGeneration(std::vector<rag::SearchResult> sources,
+                         const std::string& metaSummary);
+
+    /// 生成/检索链结束后的公共收尾（进度条、忙碌解除、状态栏）
+    void finishSearchRound();
 
     /// ── P0-2 忙碌状态机 ──
     /// 进入/退出引擎任务；busyChanged 广播后由 MainWindow 中转给其他页面。
@@ -173,15 +210,17 @@ private:
     // MainWindow 转发到这里热更新（宽检索 = 基准宽度的 2.5 倍，同比例联动）。
     int searchWidth_ = 20;
     int wideSearchWidth_ = 50;
+    double temperature_ = 0.3;   // 生成温度（随生成请求下发给引擎线程的 Generator）
 
     // ── 核心引擎（retriever_ 非拥有；仅独立测试时才由本页自持）──
+    // P1 起 Generator 归 EngineWorker 所有，本页经信号请求生成。
     rag::Retriever* retriever_ = nullptr;
     std::unique_ptr<rag::Retriever> ownedRetriever_;
-    std::unique_ptr<rag::Generator> generator_;
 
     // ── UI 组件 ──
     QLineEdit* searchInput_ = nullptr;
     QPushButton* searchBtn_ = nullptr;
+    QPushButton* stopGenBtn_ = nullptr;   // P1：生成中显示，点击请求中断
     QPushButton* importBtn_ = nullptr;
     QPushButton* clearBtn_ = nullptr;
 
@@ -206,6 +245,15 @@ private:
     // ── 缓存当前搜索结果（用于筛选）──
     std::vector<rag::SearchResult> cachedResults_;
     QString currentQuery_;
+
+    // ── P1 异步检索/生成链状态 ──
+    enum class SearchStage { Idle, MainSearch, WideSearch, Generating };
+    SearchStage stage_ = SearchStage::Idle;
+    std::vector<rag::SearchResult> pendingSources_;   // 本回合生成/落库的命中来源
+    QString llmKey_;                                  // LLM Key（生成在引擎线程）
+    std::unique_ptr<QProgressDialog> importProgress_; // 异步导入期间的进度对话框
+    std::shared_ptr<std::atomic_bool> importCancel_;  // 导入取消令牌（worker 轮询）
+    int importSkipped_ = 0;                           // 本轮同名跳过数（UI 侧预检产生）
 
     // ── P0-2 忙碌状态：self = 本页任务进行中；external = 其他页面任务进行中 ──
     bool busySelf_ = false;

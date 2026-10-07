@@ -2,6 +2,9 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <QPointer>
+
+class QNetworkReply;
 
 namespace rag {
 
@@ -26,6 +29,11 @@ public:
     std::string generate(const std::string& query,
                          const std::string& context,
                          StreamCallback callback = nullptr);
+
+    /// 中断当前 generate()：对活动应答 abort，等待中的事件循环随即以
+    /// 网络错误收场。⚠️ 仅允许与 generate() 同线程调用（引擎线程内由
+    /// EngineWorker::cancelGeneration 触发；reply 也活在引擎线程上）。
+    void cancel();
 
     /// 检查 API 是否已配置
     bool isReady() const { return !apiKey_.empty(); }
@@ -58,6 +66,9 @@ private:
     std::string apiBaseUrl_ = "https://api.deepseek.com";
     std::string metaContext_;  // 文档元数据摘要
     double temperature_ = 0.3;  // 采样温度（T3 配置中心）
+
+    // generate() 执行期间的活动应答（同线程 cancel() 的作用目标）
+    QPointer<QNetworkReply> activeReply_;
 };
 
 } // namespace rag

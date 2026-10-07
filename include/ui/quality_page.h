@@ -3,6 +3,8 @@
 
 #include <vector>
 
+#include "ui/engine_worker.h"
+
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -49,9 +51,21 @@ public slots:
         }
     }
 
+    // ── P1：引擎结果回传（EngineWorker 信号 → 队列化到 UI 线程；
+    //        MainWindow 负责接线，故为 public 槽）──
+    void onCompareFinished(const ui_engine::CompareResult& result);
+    void onEvalProgress(int done, int total, const QString& query);
+    void onEvalRow(int row, const QString& name,
+                   double p5, double hit5, double r10, double mrr);
+    void onEvalFinished(bool vectorMissing);
+
 signals:
     /// 引擎任务开始/结束（P0-2）：MainWindow 据此让其他页面禁用引擎动作
     void engineBusyChanged(bool busy);
+
+    // ── P1 异步引擎请求（MainWindow 接线到 EngineWorker 的队列化槽）──
+    void compareRequested(const QString& query, int topK);
+    void evalRequested(int width);
 
 private slots:
     void onCompare();     // ① 单查询四路对比

@@ -62,9 +62,10 @@ set(SRC_CONFIG
     src/config/app_settings.cpp
 )
 
-# Qt UI 层（T0 起统一由此三块组成：主题 / 组件 / 页面）
+# Qt UI 层（T0 起统一由此三块组成：主题 / 组件 / 页面；P1 增引擎线程宿主）
 set(SRC_UI
     src/ui/app_theme.cpp
+    src/ui/engine_worker.cpp
     src/ui/navigation_bar.cpp
     src/ui/placeholder_page.cpp
     src/ui/search_page.cpp
@@ -96,6 +97,7 @@ set(HEADERS
     include/rag/retriever.h
     include/rag/generator.h
     include/ui/main_window.h
+    include/ui/engine_worker.h
     include/ui/app_theme.h
     include/ui/navigation_bar.h
     include/ui/placeholder_page.h

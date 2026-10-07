@@ -213,22 +213,17 @@ void QualityPage::onCompare() {
     }
     beginEngineTask();
 
-    const std::string query = q.toStdString();
     constexpr int kTop = 10;
-
     compareStatus_->setText(QStringLiteral("四路检索中…"));
-    QApplication::processEvents();
+    emit compareRequested(q, kTop);   // P1：四路检索在引擎线程执行
+}
 
-    auto bm25 = retriever_->searchWithMode(query, kTop, rag::SearchMode::Bm25Only);
-    auto vec = retriever_->searchWithMode(query, kTop, rag::SearchMode::VectorOnly);
-    auto weighted = retriever_->searchWithMode(query, kTop, rag::SearchMode::WeightedFusion);
-    auto rrf = retriever_->searchWithMode(query, kTop, rag::SearchMode::RrfFusion);
-
+void QualityPage::onCompareFinished(const ui_engine::CompareResult& result) {
     const bool vectorMissing = !retriever_->embeddingReady();
-    fillList(listBm25_, bm25, false);
-    fillList(listVector_, vec, vectorMissing);
-    fillList(listWeighted_, weighted, false);
-    fillList(listRrf_, rrf, false);
+    fillList(listBm25_, result.bm25, false);
+    fillList(listVector_, result.vector, vectorMissing);
+    fillList(listWeighted_, result.weighted, false);
+    fillList(listRrf_, result.rrf, false);
 
     endEngineTask();
     if (vectorMissing) {
@@ -237,7 +232,8 @@ void QualityPage::onCompare() {
     } else {
         compareStatus_->setText(
             QStringLiteral("完成：BM25 %1 条 / 向量 %2 条 / 加权 %3 条 / RRF %4 条。")
-                .arg(bm25.size()).arg(vec.size()).arg(weighted.size()).arg(rrf.size()));
+                .arg(result.bm25.size()).arg(result.vector.size())
+                .arg(result.weighted.size()).arg(result.rrf.size()));
     }
 }
 
@@ -250,58 +246,30 @@ void QualityPage::onBatchEval() {
         return;
     }
     beginEngineTask();
-    const auto& golden = rag::goldenQueries();
-    constexpr int kWidth = 50;   // 评测宽度：文档级排名取 Top 10 指标，检索放宽到 50
 
-    struct ModeRow {
-        const char* name;
-        rag::SearchMode mode;
-        std::vector<rag::QueryMetrics> rows;
+    // P1：评测在引擎线程逐条执行（不再 processEvents 手泵），进度经信号回传
+    evalStatus_->setText(QStringLiteral("评测中…"));
+    emit evalRequested(50);   // 评测宽度：文档级排名取 Top 10 指标，检索放宽到 50
+}
+
+void QualityPage::onEvalProgress(int done, int total, const QString& query) {
+    evalStatus_->setText(QStringLiteral("评测中… 第 %1 / %2 条：%3").arg(done).arg(total).arg(query));
+}
+
+void QualityPage::onEvalRow(int row, const QString& name,
+                            double p5, double hit5, double r10, double mrr) {
+    metricsTable_->setRowCount(std::max(metricsTable_->rowCount(), row + 1));
+    auto put = [this](int row, int col, const QString& text) {
+        metricsTable_->setItem(row, col, new QTableWidgetItem(text));
     };
-    std::vector<ModeRow> modes = {
-        {"① BM25 单路",    rag::SearchMode::Bm25Only,      {}},
-        {"② 向量单路",     rag::SearchMode::VectorOnly,    {}},
-        {"③ 加权融合",     rag::SearchMode::WeightedFusion,{}},
-        {"④ RRF 融合",     rag::SearchMode::RrfFusion,     {}},
-    };
+    put(row, 0, name);
+    put(row, 1, QString::number(p5, 'f', 3));
+    put(row, 2, QString::number(hit5, 'f', 3));
+    put(row, 3, QString::number(r10, 'f', 3));
+    put(row, 4, QString::number(mrr, 'f', 3));
+}
 
-    evalBtn_->setEnabled(false);
-    const bool vectorMissing = !retriever_->embeddingReady();
-
-    for (size_t gi = 0; gi < golden.size(); ++gi) {
-        evalStatus_->setText(QStringLiteral("评测中… 第 %1 / %2 条：%3")
-                                 .arg(gi + 1).arg(golden.size())
-                                 .arg(QString::fromStdString(golden[gi].query)));
-        QApplication::processEvents();
-
-        for (auto& m : modes) {
-            auto results = retriever_->searchWithMode(golden[gi].query, kWidth, m.mode);
-            std::vector<std::string> chunkDocs;
-            chunkDocs.reserve(results.size());
-            for (const auto& r : results) {
-                chunkDocs.push_back(r.docId);
-            }
-            m.rows.push_back(rag::computeQueryMetrics(
-                rag::docLevelRanking(chunkDocs), golden[gi].relevant));
-        }
-    }
-
-    // 填表：4 行（通路）× 5 列
-    metricsTable_->setRowCount(static_cast<int>(modes.size()));
-    for (size_t i = 0; i < modes.size(); ++i) {
-        const rag::QueryMetrics avg = rag::averageMetrics(modes[i].rows);
-        auto put = [this](int row, int col, const QString& text) {
-            metricsTable_->setItem(row, col, new QTableWidgetItem(text));
-        };
-        const int row = static_cast<int>(i);
-        put(row, 0, QString::fromUtf8(modes[i].name));
-        put(row, 1, QString::number(avg.p5, 'f', 3));
-        put(row, 2, QString::number(avg.hit5, 'f', 3));
-        put(row, 3, QString::number(avg.r10, 'f', 3));
-        put(row, 4, QString::number(avg.mrr, 'f', 3));
-    }
-
-    evalBtn_->setEnabled(true);
+void QualityPage::onEvalFinished(bool vectorMissing) {
     endEngineTask();
     evalStatus_->setText(vectorMissing
         ? QStringLiteral("评测完成（Embedding 未配置：② 向量单路无结果，③④ 为降级 BM25 排名，"

@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -86,6 +88,13 @@ enum class SearchMode {
 ///   本类属于"核心检索链路"，**不得** include 任何 ui/ 头、不得持有页面指针。
 ///   展示层只能对 Retriever 做单向只读调用（documentInfos / allDocIds /
 ///   getMetadata / getFullText…），删除任意页面不影响本类。
+///
+/// 线程模型（P1）：内部一把 `std::mutex`，**短临界区**约定——网络等待
+/// （embed 的事件泵）绝不持锁；重操作（导入/检索/生成/评测）由引擎线程串行
+/// 执行，UI 线程只做轻只读（锁内微秒级拷贝）。共享容器的一切触碰（含引擎
+/// 线程内重入序列）都经 mutex_ 串行化；向量缓存另设 vectorEpoch_ 代次，
+/// 删除/清空/换配置时失效，懒重建按代次放弃过期工作。本类保持同步 API——
+/// 单测直接同步调用（单线程，锁无竞争），不经任何线程。
 class Retriever {
 public:
     Retriever();
@@ -125,10 +134,10 @@ public:
     void setSearchParams(double k1, double b, double bm25Weight, double vectorWeight);
 
     /// 当前查询期参数（供设置页回显 / 测试断言）
-    double k1() const { return bm25_.k1(); }
-    double b() const { return bm25_.b(); }
-    double bm25Weight() const { return bm25Weight_; }
-    double vectorWeight() const { return vectorWeight_; }
+    double k1() const;
+    double b() const;
+    double bm25Weight() const;
+    double vectorWeight() const;
 
     /// 分块参数：仅对之后导入的文档生效
     void setChunkParams(int maxSize, int overlap);
@@ -138,30 +147,35 @@ public:
 
     /// Embedding 服务状态（只读，供状态栏 / 质量页展示）：
     /// ready = Key 已配置；host() 取展示用域名；model() 取当前模型名
-    bool embeddingReady() const { return embedding_.isReady(); }
+    bool embeddingReady() const;
     std::string embeddingHost() const;
-    std::string embeddingModel() const { return embedding_.model(); }
+    std::string embeddingModel() const;
 
     /// 向量缓存条数（P0-4 诊断口：换端点/Key 后应为 0，首次向量检索后 = 文本块数）
-    size_t vectorCacheSize() const { return similarity_.size(); }
+    size_t vectorCacheSize() const;
 
     /// ⚠️ 注意：本函数走 InvertedIndex::totalDocs()，而 totalDocs_ 是按
     /// (docId, chunkIndex) 逐块累加的——**它返回的是文本块数，不是文档数**。
     /// 需要真实文档数请用 allDocIds().size() 或 documentCount()。
-    int docCount() const { return index_.totalDocs(); }
+    int docCount() const;
 
     /// 文本块总数
-    int chunkCount() const { return static_cast<int>(chunkStore_.size()); }
+    int chunkCount() const;
 
     /// 真实文档数
-    int documentCount() const { return static_cast<int>(documents_.size()); }
+    int documentCount() const;
 
     /// 获取检索上下文（用于 AI 生成答案）
     std::string buildContext(const std::vector<SearchResult>& results,
                              int maxTokens = 2000);
 
-    /// 获取文档元数据（案号、法院、日期等）
+    /// 获取文档元数据（案号、法院、日期等）。
+    /// ⚠️ 返回内部指针：仅限**无并发写**的场景（单线程测试/工具链路）。
+    /// UI 线程一律用 metadataOf()（锁内拷贝）。
     const document::DocMetadata* getMetadata(const std::string& docId) const;
+
+    /// 线程安全版元数据读取（锁内拷贝）；文档不存在返回 nullopt
+    std::optional<document::DocMetadata> metadataOf(const std::string& docId) const;
 
     /// 已导入的所有文档 ID（按 docId 排序，稳定可复现）
     std::vector<std::string> allDocIds() const;
@@ -214,8 +228,13 @@ public:
     long long lastLoadMs() const { return lastLoadMs_; }
 
 private:
-    /// 把一篇文档的全部内容写入内存索引（导入与落盘恢复共用）
+    /// 把一篇文档的全部内容写入内存索引（导入与落盘恢复共用）。
+    /// ⚠️ 约定：调用方必须已持有 mutex_（短临界区，内部不再加锁）。
     void indexDocument(const StoredDocument& doc);
+
+    /// removeDocument / clearAll 的无锁内核（调用方持锁）
+    int removeDocumentUnlocked(const std::string& docId);
+    void clearAllUnlocked(bool alsoDeletePersistedFile);
 
     document::Tokenizer tokenizer_;
     search_index::InvertedIndex index_;
@@ -253,6 +272,15 @@ private:
     // ── T3：分块参数（仅影响之后导入的文档）──
     int chunkMaxSize_ = 512;
     int chunkOverlap_ = 50;
+
+    // ── P1 线程模型 ──
+    // 一把粗锁串行化全部共享容器访问；网络等待绝不持锁（短临界区约定，
+    // 详见类注释）。mutable：const 只读接口（documentInfos 等）也要加锁。
+    mutable std::mutex mutex_;
+
+    // 向量缓存代次：删除/清空/换 Key/换端点时 +1 并清空缓存；
+    // 懒重建按快照代次提交，期间失效则放弃（防重入导致的向量下标错位）。
+    std::uint64_t vectorEpoch_ = 0;
 };
 
 } // namespace rag

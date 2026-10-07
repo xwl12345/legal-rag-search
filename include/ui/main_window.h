@@ -10,8 +10,10 @@
 
 class QLabel;
 class QStackedWidget;
+class QThread;
 
 class NavigationBar;
+class EngineWorker;
 class SearchPage;
 class LibraryPage;
 class HistoryPage;
@@ -48,6 +50,9 @@ public:
     /// 问答历史存储层（供 ui_smoke 构造历史记录做端到端断言；
     /// 生产代码里本窗口之外的调用者不存在，页面一律靠构造参数注入）
     history::HistoryStore* historyStore() const { return historyStore_.get(); }
+
+    /// 引擎工作线程宿主（供 ui_smoke 等待引擎空闲；生产代码不经此直调重操作）
+    EngineWorker* engineWorker() const { return engineWorker_; }
 
 protected:
     /// 全局 Ctrl+滚轮：调整界面字体缩放
@@ -102,8 +107,11 @@ private:
     NavigationBar* navBar_ = nullptr;
     QStackedWidget* pageStack_ = nullptr;
 
-    // ── 引擎实例（全应用唯一，由本窗口持有；页面只持裸指针借用）──
-    std::unique_ptr<rag::Retriever> retriever_;
+    // ── 引擎实例（P1：由 EngineWorker 持有并在引擎线程上执行重操作；
+    // retriever_ 是其轻只读指针，供状态栏与页面注入）──
+    rag::Retriever* retriever_ = nullptr;
+    EngineWorker* engineWorker_ = nullptr;   // 引擎线程宿主（无 parent，跨线程）
+    QThread* engineThread_ = nullptr;
 
     // ── 问答历史存储实例（T2：同样集中在本窗口创建，历史页只借用）──
     std::unique_ptr<history::HistoryStore> historyStore_;

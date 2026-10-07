@@ -13,6 +13,7 @@
 #include <QWheelEvent>
 
 #include "ui/app_theme.h"
+#include "ui/engine_worker.h"
 #include "ui/navigation_bar.h"
 #include "ui/placeholder_page.h"
 #include "ui/search_page.h"
@@ -23,6 +24,8 @@
 #include "config/app_config.h"
 #include "history/history_store.h"
 #include "rag/retriever.h"
+
+#include <QThread>
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -43,7 +46,14 @@ MainWindow::MainWindow(QWidget* parent)
     restoreIndexOnStartup();
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+    // P1 退出安全：先停引擎线程（忙碌门已保证此时无进行中任务），
+    // 再走基类析构销毁页面树——杜绝"页面已析构而引擎任务还在跑"的悬挂。
+    if (engineThread_) {
+        engineThread_->quit();
+        engineThread_->wait(5000);
+    }
+}
 
 void MainWindow::setupUi() {
     auto* central = new QWidget(this);
@@ -69,10 +79,15 @@ void MainWindow::setupUi() {
 }
 
 void MainWindow::buildPages() {
-    // ── 引擎实例：全应用唯一，集中在这里创建 ──
-    // 多页共享同一份索引，所以检索页导入的文档，文档库页立刻就看得见；
-    // 反过来文档库删掉的文档，检索页也不会再命中。
-    retriever_ = std::make_unique<rag::Retriever>();
+    // ── 引擎线程与 worker（P1）：重操作全部队列化到引擎线程串行执行 ──
+    // Retriever 在 EngineWorker 构造时创建（UI 线程，词典加载与旧行为一致），
+    // 页面拿到的是它的轻只读指针；worker 无 parent（跨线程对象不挂窗口树）。
+    engineWorker_ = new EngineWorker();
+    engineThread_ = new QThread(this);
+    engineWorker_->moveToThread(engineThread_);
+    connect(engineThread_, &QThread::finished, engineWorker_, &QObject::deleteLater);
+    engineThread_->start();
+    retriever_ = engineWorker_->retriever();
 
     // ── 配置中心（T3）：先读参数再建页，引擎带着用户参数起步 ──
     // 文件缺失/损坏时 load 已回落默认值，不会读到 0。
@@ -87,7 +102,7 @@ void MainWindow::buildPages() {
     }
 
     // ── 第 1 页：检索问答 ──
-    searchPage_ = new SearchPage(retriever_.get(), pageStack_);
+    searchPage_ = new SearchPage(retriever_, pageStack_);
     pageStack_->addWidget(searchPage_);
     connect(searchPage_, &SearchPage::engineStatsChanged,
             this, &MainWindow::onEngineStatsChanged);
@@ -99,9 +114,33 @@ void MainWindow::buildPages() {
     // T3：启动时把配置里的 TopK / temperature 下发给检索页
     searchPage_->applySettings(appSettings_);
 
+    // ── P1：页面请求 → 引擎线程（队列化）；引擎结果 → 页面（队列化）──
+    connect(searchPage_, &SearchPage::searchRequested,
+            engineWorker_, &EngineWorker::search);
+    connect(searchPage_, &SearchPage::generationRequested,
+            engineWorker_, &EngineWorker::generateAnswer);
+    connect(searchPage_, &SearchPage::generationCancelRequested,
+            engineWorker_, &EngineWorker::cancelGeneration);
+    connect(searchPage_, &SearchPage::importRequested,
+            engineWorker_, &EngineWorker::importDocuments);
+    connect(searchPage_, &SearchPage::llmApiKeyChanged,
+            engineWorker_, &EngineWorker::setLlmApiKey);
+    connect(engineWorker_, &EngineWorker::searchFinished,
+            searchPage_, &SearchPage::onSearchFinished);
+    connect(engineWorker_, &EngineWorker::generationDelta,
+            searchPage_, &SearchPage::onGenerationDelta);
+    connect(engineWorker_, &EngineWorker::generationFinished,
+            searchPage_, &SearchPage::onGenerationFinished);
+    connect(engineWorker_, &EngineWorker::importProgress,
+            searchPage_, &SearchPage::onImportProgress);
+    connect(engineWorker_, &EngineWorker::importOcrPage,
+            searchPage_, &SearchPage::onImportOcrPage);
+    connect(engineWorker_, &EngineWorker::importFinished,
+            searchPage_, &SearchPage::onImportFinished);
+
     // ── 第 2 页：文档库（T1）──
     // 插件式接入：只注入引擎裸指针，删掉本页只需去掉这两行 + 删页面文件。
-    libraryPage_ = new LibraryPage(retriever_.get(), pageStack_);
+    libraryPage_ = new LibraryPage(retriever_, pageStack_);
     pageStack_->addWidget(libraryPage_);
     connect(libraryPage_, &LibraryPage::libraryChanged,
             this, &MainWindow::onLibraryChanged);
@@ -115,8 +154,20 @@ void MainWindow::buildPages() {
     // ── 第 4 页：检索质量分析（T4）──
     // 维护者看板：对引擎只读调用（searchWithMode），不写索引不发指令。
     // 删掉本页 = 去掉这几行 + 删页面文件，检索功能零影响。
-    qualityPage_ = new QualityPage(retriever_.get(), pageStack_);
+    qualityPage_ = new QualityPage(retriever_, pageStack_);
     pageStack_->addWidget(qualityPage_);
+    connect(qualityPage_, &QualityPage::compareRequested,
+            engineWorker_, &EngineWorker::compareModes);
+    connect(qualityPage_, &QualityPage::evalRequested,
+            engineWorker_, &EngineWorker::runBatchEval);
+    connect(engineWorker_, &EngineWorker::compareFinished,
+            qualityPage_, &QualityPage::onCompareFinished);
+    connect(engineWorker_, &EngineWorker::evalProgress,
+            qualityPage_, &QualityPage::onEvalProgress);
+    connect(engineWorker_, &EngineWorker::evalRow,
+            qualityPage_, &QualityPage::onEvalRow);
+    connect(engineWorker_, &EngineWorker::evalFinished,
+            qualityPage_, &QualityPage::onEvalFinished);
 
     // ── 第 5 页：设置（T3）──
     // 插件式接入：本页只读写配置层，不碰 Retriever——保存后发 settingsChanged，
@@ -126,6 +177,10 @@ void MainWindow::buildPages() {
     connect(settingsPage_, &SettingsPage::settingsChanged,
             this, &MainWindow::onSettingsChanged);
 
+    // 引擎配置应用完成后刷新状态栏服务区（Embedding 可能刚配上 Key）
+    connect(engineWorker_, &EngineWorker::settingsApplied,
+            this, &MainWindow::refreshServiceStatus);
+
     // ── P0-2 跨页忙碌互斥：任一页面开始引擎任务 → 其余页面禁用引擎动作 ──
     // 页面之间零互相引用，广播经本窗口中转（与 answerFinished 同款模式）。
     connect(searchPage_, &SearchPage::engineBusyChanged,
@@ -134,6 +189,10 @@ void MainWindow::buildPages() {
             this, &MainWindow::forwardEngineBusy);
     connect(qualityPage_, &QualityPage::engineBusyChanged,
             this, &MainWindow::forwardEngineBusy);
+
+    // 初始 LLM Key 推送（队列化：与引擎线程上的一切访问串行）
+    QMetaObject::invokeMethod(engineWorker_, "setLlmApiKey", Qt::QueuedConnection,
+                              Q_ARG(QString, searchPage_->llmApiKey()));
 }
 
 void MainWindow::restoreIndexOnStartup() {
@@ -274,21 +333,13 @@ void MainWindow::loadSettingsAndApply() {
 }
 
 void MainWindow::applySettingsToEngine() {
-    if (!retriever_) {
+    if (!engineWorker_) {
         return;
     }
-    const auto& s = appSettings_;
-    // 查询期参数：k1/b/权重，下一次 search 即生效，无需重建索引
-    retriever_->setSearchParams(s.k1, s.b, s.bm25Weight, s.vectorWeight);
-    // 分块参数：只影响之后导入的文档（设置页与配置头文件均有标注）
-    retriever_->setChunkParams(s.chunkSize, s.chunkOverlap);
-    // Embedding 服务（T4 消费；此处先转发，向量路未配置 Key 时仍是降级 BM25）
-    retriever_->setEmbeddingEndpoint(s.embeddingBaseUrl, s.embeddingModel);
-    if (!s.embeddingApiKey.empty()) {
-        retriever_->setApiKey(s.embeddingApiKey);
-    }
-    // 服务状态可能因配置而变（如首次配上 Key），状态栏两行同步刷新
-    refreshServiceStatus();
+    // P1：配置热更新队列化到引擎线程——setSearchParams/Endpoint/ApiKey 都会
+    // 触碰引擎线程正在使用的状态，必须与其串行（写入方与读方同线程）。
+    QMetaObject::invokeMethod(engineWorker_, "applySettings", Qt::QueuedConnection,
+                              Q_ARG(config::AppSettings, appSettings_));
 }
 
 void MainWindow::onSettingsChanged(const config::AppSettings& settings) {
@@ -326,15 +377,19 @@ bool MainWindow::engineBusy() const {
 
 // ── 关闭前落盘 ──
 void MainWindow::closeEvent(QCloseEvent* event) {
-    // P0-2：任务进行中禁止退出。同步执行模型下强行关闭会在嵌套事件循环
-    // 深处析构正在跑 generate()/addDocument() 的对象（未定义行为，直接崩）；
-    // P1 线程模型落地后再放开为「确认后取消任务并退出」。
-    // 注意只做非模态提示：closeEvent 可能发生在嵌套事件循环（生成/导入）内，
+    // P0-2：任务进行中禁止退出。同步等待引擎任务自然收尾（生成可经「■ 停止」
+    // 或此处的取消请求中断；导入可经进度对话框取消）。
+    // 注意只做非模态提示：closeEvent 可能发生在嵌套事件循环内，
     // 在其中再弹模态对话框有重入风险。
     if (engineBusy()) {
+        // 尽力请求中断当前生成（取消令牌经引擎线程事件循环送达活动应答）
+        if (engineWorker_) {
+            QMetaObject::invokeMethod(engineWorker_, "cancelGeneration",
+                                      Qt::QueuedConnection);
+        }
         statusBar()->showMessage(
-            QStringLiteral("检索 / 生成 / 导入任务进行中，暂不能退出；请等待任务结束。"),
-            5000);
+            QStringLiteral("任务进行中已请求取消；请等任务结束（或取消导入）后再次关闭。"),
+            6000);
         event->ignore();
         return;
     }

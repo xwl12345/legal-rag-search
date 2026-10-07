@@ -50,7 +50,6 @@ constexpr int kRecordSnippetChars = 160;
 SearchPage::SearchPage(rag::Retriever* retriever, QWidget* parent)
     : QWidget(parent)
     , retriever_(retriever)
-    , generator_(std::make_unique<rag::Generator>())
 {
     // 未注入引擎时自建一个（仅独立构造本页的测试场景走到这里）；
     // 正常运行时由 MainWindow 注入共享实例，本页只借用不拥有。
@@ -100,8 +99,16 @@ void SearchPage::setupUi() {
     searchBtn_->setMinimumHeight(46);
     searchBtn_->setMinimumWidth(112);
 
+    // P1：生成中的「停止」按钮（默认隐藏；点击请求引擎线程中断当前生成）
+    stopGenBtn_ = new QPushButton(QStringLiteral("■ 停止"), this);
+    stopGenBtn_->setObjectName(QStringLiteral("stopGenBtn"));
+    setButtonRole(stopGenBtn_, "danger");
+    stopGenBtn_->setMinimumHeight(46);
+    stopGenBtn_->setVisible(false);
+
     searchLayout->addWidget(searchInput_, 1);
     searchLayout->addWidget(searchBtn_);
+    searchLayout->addWidget(stopGenBtn_);
     root->addLayout(searchLayout);
 
     // ── API Key 输入行 ──
@@ -275,6 +282,7 @@ void SearchPage::setupUi() {
     // ── 信号连接 ──
     connect(searchBtn_, &QPushButton::clicked, this, &SearchPage::onSearch);
     connect(searchInput_, &QLineEdit::returnPressed, this, &SearchPage::onSearch);
+    connect(stopGenBtn_, &QPushButton::clicked, this, &SearchPage::generationCancelRequested);
     connect(importBtn_, &QPushButton::clicked, this, &SearchPage::onPickImportFiles);
     connect(clearBtn_, &QPushButton::clicked, this, &SearchPage::onClearIndex);
     connect(setApiKeyBtn_, &QPushButton::clicked, this, &SearchPage::onSetApiKey);
@@ -309,28 +317,29 @@ void SearchPage::emitEngineStats() {
 }
 
 // ── API Key ──
-// ⚠️ 本页的 Key 只管 LLM 生成（generator_）。Embedding 与 LLM 是两路独立服务，
-// T4 起不再"一个 Key 灌两处"——embedding_ 的 Key 由 MainWindow 从设置页配置
-// （env DEEPSEEK_API_KEY 兜底）统一下发，本页不得触碰，否则用户在检索页填
-// DeepSeek Key 会把硅基流动的 Embedding Key 覆盖成 401。
+// ⚠️ 本页的 Key 只管 LLM 生成（生成在引擎线程的 Generator 上执行）。
+// Embedding 与 LLM 是两路独立服务，T4 起不再"一个 Key 灌两处"——embedding_ 的
+// Key 由 MainWindow 从设置页配置（env DEEPSEEK_API_KEY 兜底）统一下发。
+// P1 起 Key 的实际生效点在 EngineWorker：本页存副本 + 发 llmApiKeyChanged，
+// 初始 Key 由 MainWindow 接线完成后主动推送一次（构造期信号还没接线，发不得）。
 void SearchPage::loadApiKey() {
     const char* key = std::getenv("DEEPSEEK_API_KEY");
     if (key && std::strlen(key) > 0) {
-        const QString qkey = QString::fromStdString(key);
-        generator_->setApiKey(key);
-        apiKeyInput_->setText(qkey);
+        llmKey_ = QString::fromStdString(key);
+        apiKeyInput_->setText(llmKey_);
         updateApiKeyStatus(true, QStringLiteral("● 已从环境变量加载"));
     } else {
         updateApiKeyStatus(false, QStringLiteral("● 未设置"));
     }
-    emit apiKeyStateChanged(generator_->isReady());
+    emit apiKeyStateChanged(!llmKey_.isEmpty());
 }
 
 void SearchPage::onSetApiKey() {
     const QString key = apiKeyInput_->text().trimmed();
     if (key.isEmpty()) {
         // 清空 API Key（仅 LLM 路；Embedding 归设置页管，此处不碰）
-        generator_->setApiKey("");
+        llmKey_.clear();
+        emit llmApiKeyChanged(QString());
         updateApiKeyStatus(false, QStringLiteral("● 未设置"));
         emit apiKeyStateChanged(false);
         return;
@@ -343,7 +352,8 @@ void SearchPage::onSetApiKey() {
         return;
     }
 
-    generator_->setApiKey(key.toStdString());
+    llmKey_ = key;
+    emit llmApiKeyChanged(key);
     updateApiKeyStatus(true, QStringLiteral("● 已设置"));
     emit apiKeyStateChanged(true);
 }
@@ -408,7 +418,10 @@ SearchPage::OverwriteChoice SearchPage::defaultConfirmOverwrite(
     return OverwriteChoice::CancelAll;
 }
 
-// ── 搜索 ──
+// ── 搜索（P1 异步链）──
+// UI 线程只做入队与渲染：检索在引擎线程（EngineWorker::search），结果经
+// searchFinished 队列化回来；聚合型问题再追加一次宽检索；最后入队生成。
+// 从检索到生成结束全程 busySelf_（P0-2），按钮禁用 + 跨页互斥不变。
 void SearchPage::onSearch() {
     const QString query = searchInput_->text().trimmed();
     if (query.isEmpty()) return;
@@ -423,175 +436,207 @@ void SearchPage::onSearch() {
         return;
     }
 
-    // P0-2：从检索到生成结束全程忙碌——按钮禁用 + 跨页广播。
-    // 这一步同时封住重入链：嵌入向量懒重建期间，导入/删除/再检索都进不来。
     beginEngineTask();
+    stage_ = SearchStage::MainSearch;
     progressBar_->setVisible(true);
     progressBar_->setRange(0, 0);  // 不确定模式
 
     aiAnswerArea_->clear();
     aiAnswerArea_->setHtml(QStringLiteral("<i style='color:#64748B'>正在检索...</i>"));
 
-    // 异步执行检索 + 生成
-    QTimer::singleShot(100, this, [this, query]() {
-        // Step 1: 检索（多取一些结果用于筛选）
-        auto results = retriever_->search(query.toStdString(), searchWidth_);
-        cachedResults_ = results;
-        currentQuery_ = query;
+    emit searchRequested(query, searchWidth_);
+}
 
-        // 填充年份筛选器
-        populateYearFilter(results);
+void SearchPage::onSearchFinished(const std::vector<rag::SearchResult>& results,
+                                  const QString& query) {
+    if (stage_ == SearchStage::Idle) return;   // 迟到的陈旧结果，忽略
 
-        // 应用筛选并显示
-        auto filtered = applyFiltersAndDisplay();
-
-        // Step 2: AI 生成答案（使用筛选后的结果构建上下文）
-        if (generator_->isReady() && !filtered.empty()) {
-            // ── 检测聚合型问题（跨文档查询）──
-            // 仅用明确指向「全部文档」的短语，避免误判聚焦型查询
-            static const std::vector<std::string> AGGREGATE_MARKERS = {
-                "这些案件", "所有案件", "全部案件", "各案件", "各个案件", "每个案件",
-                "这些文档", "所有文档", "全部文档", "各文档", "这些文件", "所有文件",
-                "哪些案件", "汇总", "统计", "总共", "一共"
-            };
-            bool isAggregate = false;
-            const std::string qstr = query.toStdString();
-            for (const auto& marker : AGGREGATE_MARKERS) {
-                if (qstr.find(marker) != std::string::npos) {
-                    isAggregate = true;
-                    break;
-                }
-            }
-
-            if (isAggregate) {
-                // ── 聚合模式 ──
-                // 1. 用更大的 topK 重新检索，并在 UI 层做文档去重
-                auto wideResults = retriever_->search(qstr, wideSearchWidth_);
-                std::vector<rag::SearchResult> deduped;
-                constexpr int perDocLimit = 2;
-                std::unordered_map<std::string, int> docCount;
-                for (auto& r : wideResults) {
-                    int& cnt = docCount[r.docId];
-                    if (cnt >= perDocLimit) continue;
-                    ++cnt;
-                    deduped.push_back(std::move(r));
-                }
-                if (!deduped.empty()) {
-                    filtered = deduped;
-                    displayResults(filtered);
-                }
-
-                // 2. 收集全部文档元数据注入 AI
-                auto allIds = retriever_->allDocIds();
-                std::ostringstream allMeta;
-                for (size_t i = 0; i < allIds.size(); ++i) {
-                    const auto* meta = retriever_->getMetadata(allIds[i]);
-                    if (meta && !meta->isEmpty()) {
-                        allMeta << "- " << allIds[i];
-                        if (!meta->caseNumber.empty()) allMeta << " | 案号: " << meta->caseNumber;
-                        if (!meta->court.empty()) allMeta << " | 法院: " << meta->court;
-                        if (!meta->caseType.empty()) allMeta << " | 类型: " << meta->caseType;
-                        if (!meta->date.empty()) allMeta << " | 日期: " << meta->date;
-                        if (!meta->procedure.empty()) allMeta << " | 程序: " << meta->procedure;
-                        if (!meta->litigants.empty()) allMeta << " | 当事人: " << meta->litigants;
-                        allMeta << "\n";
-                    }
-                }
-                if (allMeta.tellp() > 0) {
-                    allMeta << "\n（以上为全部 " << allIds.size() << " 个已导入文档的元数据汇总）\n";
-                }
-                generator_->setMetadataContext(allMeta.str());
-            } else {
-                // ── 聚焦模式：保持原始排序，不做去重 ──
-                generator_->setMetadataContext(buildMetadataSummary(filtered));
-            }
-
-            const std::string context = retriever_->buildContext(filtered, 2000);
-
-            aiAnswerArea_->clear();
-            aiAnswerArea_->setHtml(
-                QStringLiteral("<b style='color:#14213D'>AI 正在生成回答...</b><br><br>"));
-
-            // 本回合的累计状态复位：流式增量与失败提示都算"用户实际看到的内容"，
-            // 落库时以它为准（见 T2 任务卡的「带状态保存」决策）。
-            answerBuffer_.clear();
-            answerInterrupted_ = false;
-            answerNote_.clear();
-
-            try {
-                generator_->generate(
-                    query.toStdString(),
-                    context,
-                    [this](const std::string& delta) {
-                        QMetaObject::invokeMethod(this, [this, text = QString::fromStdString(delta)]() {
-                            // 剥离模型输出中的 Markdown 标记（** 加粗、行首 # 标题），
-                            // 纯文本区不渲染这些符号
-                            QString cleaned = text;
-                            cleaned.remove(QStringLiteral("**"));
-                            cleaned.replace(QRegularExpression(QStringLiteral("(^|\\n)#{1,6}\\s+")),
-                                            QStringLiteral("\\1"));
-                            answerBuffer_ += cleaned;
-                            aiAnswerArea_->moveCursor(QTextCursor::End);
-                            aiAnswerArea_->insertPlainText(cleaned);
-                            aiAnswerArea_->moveCursor(QTextCursor::End);
-                        }, Qt::QueuedConnection);
-                    }
-                );
-            } catch (const std::exception& e) {
-                const std::string errStr = e.what();
-                // 生成异常终止：已有 content 仍要留痕，但要标清楚"这不是完整回答"
-                answerInterrupted_ = true;
-                if (errStr.find("no response") != std::string::npos ||
-                    errStr.find("timeout") != std::string::npos ||
-                    errStr.find("connection") != std::string::npos) {
-                    answerNote_ = QStringLiteral("网络连接异常或超时，回答未完成");
-                    appendAiAnswer(
-                        QStringLiteral("\n\n✕ 无法连接到 DeepSeek API\n\n"
-                                       "可能原因：\n"
-                                       "• 网络连接异常，请检查是否能访问 api.deepseek.com\n"
-                                       "• API Key 无效或已过期\n"
-                                       "• 请求超时，请稍后重试\n\n"
-                                       "技术细节：") + QString::fromStdString(errStr));
-                } else {
-                    answerNote_ = QStringLiteral("AI 生成失败，回答未完成");
-                    appendAiAnswer(QStringLiteral("\n\n✕ AI 生成失败：")
-                                   + QString::fromStdString(errStr));
-                }
-            }
-
-            // 本回合结束 → 是否落库由 finishAnswerRound 判定并广播；
-            // 本页只发信号，不碰任何存储层（页面解耦第 8 条）。
-            finishAnswerRound(query, filtered);
-        } else if (filtered.empty() && !cachedResults_.empty()) {
-            aiAnswerArea_->setHtml(
-                QStringLiteral("<p style='color:#B7791F; font-weight:600;'>⚠ 筛选后无结果</p>"
-                               "<p style='color:#64748B;'>当前筛选条件下没有匹配的文档（原始搜索找到 ")
-                + QString::number(static_cast<int>(cachedResults_.size()))
-                + QStringLiteral(" 条结果）。请尝试放宽筛选条件。</p>"));
-        } else if (cachedResults_.empty()) {
-            aiAnswerArea_->setHtml(
-                QStringLiteral("<p style='color:#C62828; font-weight:600;'>⚠ 未找到相关文档</p>"
-                               "<p style='color:#64748B;'>你的问题未能匹配到已导入文档中的内容。建议：</p>"
-                               "<ul style='color:#64748B;'>"
-                               "<li>确认已导入相关文档（点击「＋ 导入文档」）</li>"
-                               "<li>尝试用文档中出现过的关键词搜索</li>"
-                               "<li>查看左下角状态栏确认已导入的文档数量</li>"
-                               "</ul>"));
-        } else if (!generator_->isReady()) {
-            aiAnswerArea_->setHtml(
-                QStringLiteral("<p style='color:#B7791F; font-weight:600;'>🔑 未配置 API Key</p>"
-                               "<p style='color:#64748B;'>请在上方输入框中填写 LLM API Key（sk- 开头），</p>"
-                               "<p style='color:#64748B;'>点击「设置」后即可启用 AI 智能回答功能。</p>"
-                               "<p style='color:#94A3B8; font-size:11px;'>获取 Key："
-                               "<a href='https://platform.deepseek.com'>platform.deepseek.com</a></p>"));
+    if (stage_ == SearchStage::WideSearch) {
+        // ── 聚合模式第二跳：宽检索结果 → per-doc 去重 → 生成 ──
+        std::vector<rag::SearchResult> deduped;
+        constexpr int perDocLimit = 2;
+        std::unordered_map<std::string, int> docCount;
+        for (const auto& r : results) {
+            int& cnt = docCount[r.docId];
+            if (cnt >= perDocLimit) continue;
+            ++cnt;
+            deduped.push_back(r);
+        }
+        if (!deduped.empty()) {
+            displayResults(deduped);
         }
 
-        progressBar_->setVisible(false);
-        endEngineTask();
-        statusLabel_->setText(QStringLiteral("检索完成，找到 %1 条结果（筛选后 %2 条）")
-                                  .arg(static_cast<int>(cachedResults_.size()))
-                                  .arg(static_cast<int>(filtered.size())));
-    });
+        // 收集全部文档元数据注入 AI（轻只读，锁内拷贝）
+        auto allIds = retriever_->allDocIds();
+        std::ostringstream allMeta;
+        for (size_t i = 0; i < allIds.size(); ++i) {
+            const auto meta = retriever_->metadataOf(allIds[i]);
+            if (meta && !meta->isEmpty()) {
+                allMeta << "- " << allIds[i];
+                if (!meta->caseNumber.empty()) allMeta << " | 案号: " << meta->caseNumber;
+                if (!meta->court.empty()) allMeta << " | 法院: " << meta->court;
+                if (!meta->caseType.empty()) allMeta << " | 类型: " << meta->caseType;
+                if (!meta->date.empty()) allMeta << " | 日期: " << meta->date;
+                if (!meta->procedure.empty()) allMeta << " | 程序: " << meta->procedure;
+                if (!meta->litigants.empty()) allMeta << " | 当事人: " << meta->litigants;
+                allMeta << "\n";
+            }
+        }
+        if (allMeta.tellp() > 0) {
+            allMeta << "\n（以上为全部 " << allIds.size() << " 个已导入文档的元数据汇总）\n";
+        }
+        // 聚合模式来源 = 去重后的宽检索结果（空则沿用主检索的聚焦结果兜底）
+        auto sources = !deduped.empty() ? std::move(deduped) : std::move(pendingSources_);
+        startGeneration(std::move(sources), allMeta.str());
+        return;
+    }
+
+    // ── 主检索完成（stage_ == MainSearch）──
+    cachedResults_ = results;
+    currentQuery_ = query;
+
+    // 填充年份筛选器
+    populateYearFilter(results);
+
+    // 应用筛选并显示
+    auto filtered = applyFiltersAndDisplay();
+
+    // AI 生成答案（使用筛选后的结果构建上下文）
+    if (!llmKey_.isEmpty() && !filtered.empty()) {
+        // ── 检测聚合型问题（跨文档查询）──
+        // 仅用明确指向「全部文档」的短语，避免误判聚焦型查询
+        static const std::vector<std::string> AGGREGATE_MARKERS = {
+            "这些案件", "所有案件", "全部案件", "各案件", "各个案件", "每个案件",
+            "这些文档", "所有文档", "全部文档", "各文档", "这些文件", "所有文件",
+            "哪些案件", "汇总", "统计", "总共", "一共"
+        };
+        bool isAggregate = false;
+        const std::string qstr = query.toStdString();
+        for (const auto& marker : AGGREGATE_MARKERS) {
+            if (qstr.find(marker) != std::string::npos) {
+                isAggregate = true;
+                break;
+            }
+        }
+
+        if (isAggregate) {
+            // 聚合模式：先记下聚焦结果作为兜底来源，再追加一次宽检索
+            pendingSources_ = std::move(filtered);
+            stage_ = SearchStage::WideSearch;
+            emit searchRequested(query, wideSearchWidth_);
+            return;
+        }
+
+        // ── 聚焦模式：保持原始排序，不做去重 ──
+        auto metaSummary = buildMetadataSummary(filtered);
+        startGeneration(std::move(filtered), metaSummary);
+        return;
+    }
+
+    // 无生成路径：与历史行为一致的提示分支
+    if (filtered.empty() && !cachedResults_.empty()) {
+        aiAnswerArea_->setHtml(
+            QStringLiteral("<p style='color:#B7791F; font-weight:600;'>⚠ 筛选后无结果</p>"
+                           "<p style='color:#64748B;'>当前筛选条件下没有匹配的文档（原始搜索找到 ")
+            + QString::number(static_cast<int>(cachedResults_.size()))
+            + QStringLiteral(" 条结果）。请尝试放宽筛选条件。</p>"));
+    } else if (cachedResults_.empty()) {
+        aiAnswerArea_->setHtml(
+            QStringLiteral("<p style='color:#C62828; font-weight:600;'>⚠ 未找到相关文档</p>"
+                           "<p style='color:#64748B;'>你的问题未能匹配到已导入文档中的内容。建议：</p>"
+                           "<ul style='color:#64748B;'>"
+                           "<li>确认已导入相关文档（点击「＋ 导入文档」）</li>"
+                           "<li>尝试用文档中出现过的关键词搜索</li>"
+                           "<li>查看左下角状态栏确认已导入的文档数量</li>"
+                           "</ul>"));
+    } else if (llmKey_.isEmpty()) {
+        aiAnswerArea_->setHtml(
+            QStringLiteral("<p style='color:#B7791F; font-weight:600;'>🔑 未配置 API Key</p>"
+                           "<p style='color:#64748B;'>请在上方输入框中填写 LLM API Key（sk- 开头），</p>"
+                           "<p style='color:#64748B;'>点击「设置」后即可启用 AI 智能回答功能。</p>"
+                           "<p style='color:#94A3B8; font-size:11px;'>获取 Key："
+                           "<a href='https://platform.deepseek.com'>platform.deepseek.com</a></p>"));
+    }
+
+    pendingSources_ = std::move(filtered);   // 供 finishSearchRound 的状态计数
+    finishSearchRound();
+}
+
+void SearchPage::startGeneration(std::vector<rag::SearchResult> sources,
+                                 const std::string& metaSummary) {
+    pendingSources_ = std::move(sources);
+    const std::string context = retriever_->buildContext(pendingSources_, 2000);
+
+    aiAnswerArea_->clear();
+    aiAnswerArea_->setHtml(
+        QStringLiteral("<b style='color:#14213D'>AI 正在生成回答...</b><br><br>"));
+
+    // 本回合的累计状态复位：流式增量与失败提示都算"用户实际看到的内容"，
+    // 落库时以它为准（见 T2 任务卡的「带状态保存」决策）。
+    answerBuffer_.clear();
+    answerInterrupted_ = false;
+    answerNote_.clear();
+
+    stage_ = SearchStage::Generating;
+    stopGenBtn_->setVisible(true);
+    emit generationRequested(currentQuery_,
+                             QString::fromStdString(context),
+                             QString::fromStdString(metaSummary),
+                             temperature_);
+}
+
+void SearchPage::onGenerationDelta(const QString& text) {
+    // 剥离模型输出中的 Markdown 标记（** 加粗、行首 # 标题），
+    // 纯文本区不渲染这些符号
+    QString cleaned = text;
+    cleaned.remove(QStringLiteral("**"));
+    cleaned.replace(QRegularExpression(QStringLiteral("(^|\\n)#{1,6}\\s+")),
+                    QStringLiteral("\\1"));
+    answerBuffer_ += cleaned;
+    aiAnswerArea_->moveCursor(QTextCursor::End);
+    aiAnswerArea_->insertPlainText(cleaned);
+    aiAnswerArea_->moveCursor(QTextCursor::End);
+}
+
+void SearchPage::onGenerationFinished(bool interrupted, const QString& errorText) {
+    if (stage_ != SearchStage::Generating) return;
+
+    stopGenBtn_->setVisible(false);
+    stage_ = SearchStage::Idle;
+
+    if (interrupted) {
+        const std::string errStr = errorText.toStdString();
+        // 生成异常终止：已有 content 仍要留痕，但要标清楚"这不是完整回答"
+        answerInterrupted_ = true;
+        if (errStr.find("no response") != std::string::npos ||
+            errStr.find("timeout") != std::string::npos ||
+            errStr.find("connection") != std::string::npos) {
+            answerNote_ = QStringLiteral("网络连接异常或超时，回答未完成");
+            appendAiAnswer(
+                QStringLiteral("\n\n✕ 无法连接到 DeepSeek API\n\n"
+                               "可能原因：\n"
+                               "• 网络连接异常，请检查是否能访问 api.deepseek.com\n"
+                               "• API Key 无效或已过期\n"
+                               "• 请求超时，请稍后重试\n\n"
+                               "技术细节：") + errorText);
+        } else {
+            answerNote_ = QStringLiteral("AI 生成失败，回答未完成");
+            appendAiAnswer(QStringLiteral("\n\n✕ AI 生成失败：") + errorText);
+        }
+    }
+
+    // 本回合结束 → 是否落库由 finishAnswerRound 判定并广播；
+    // 本页只发信号，不碰任何存储层（页面解耦第 8 条）。
+    finishAnswerRound(currentQuery_, pendingSources_);
+    finishSearchRound();
+}
+
+void SearchPage::finishSearchRound() {
+    progressBar_->setVisible(false);
+    endEngineTask();
+    statusLabel_->setText(QStringLiteral("检索完成，找到 %1 条结果（筛选后 %2 条）")
+                              .arg(static_cast<int>(cachedResults_.size()))
+                              .arg(static_cast<int>(pendingSources_.size())));
 }
 
 // ── 导入文档 ──
@@ -662,112 +707,92 @@ void SearchPage::importPaths(const QStringList& files) {
     }
 
     beginEngineTask();
+    importSkipped_ = skipped;
     progressBar_->setVisible(true);
     progressBar_->setRange(0, accepted.size());
     statusLabel_->setText(
         QStringLiteral("正在导入文档...（扫描件 OCR 逐页识别，可能需要数分钟，请耐心等待）"));
 
-    // 模态进度对话框：OCR 等待期间事件循环仍在泵输入，用模态对话框阻挡
-    // 主窗口（防重入），并给出可交互的取消出口——避免长时间识别期间
-    // “点击无反应”的假死体验。
-    QProgressDialog progress(
+    // ── P1：导入在引擎线程执行，UI 保持可交互 ──
+    // 进度对话框改为非模态（旧实现的 WindowModal 是为同步执行堵重入的；
+    // 现在忙碌状态机 + 按钮禁用已经挡住了其他引擎动作，无需再锁整个窗口）。
+    // 取消经原子令牌传递给引擎线程（跨线程不能直接读对话框状态）。
+    importCancel_ = std::make_shared<std::atomic_bool>(false);
+    importProgress_ = std::make_unique<QProgressDialog>(
         QStringLiteral("准备导入…"), QStringLiteral("取消"), 0, 0, this);
-    progress.setWindowTitle(QStringLiteral("导入文档"));
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(0);
-    progress.show();
-
-    const std::function<bool()> cancelledQuery = [&progress]() {
-        return progress.wasCanceled();
-    };
-    const std::function<void(int, int)> onPage = [&progress](int page, int totalPages) {
-        progress.setLabelText(
-            QStringLiteral("OCR 逐页识别中：第 %1 / %2 页（每页约 5-10 秒）…")
-                .arg(page).arg(totalPages));
-    };
-
-    int imported = 0;
-    int chunksAdded = 0;
-    int ocrImported = 0;
-    bool userCancelled = false;
-    int stoppedAt = -1;   // 取消发生时的文件下标（用于统计未处理文件数）
-    QStringList errors;
-    for (int i = 0; i < accepted.size(); ++i) {
-        if (cancelledQuery()) {
-            userCancelled = true;
-            stoppedAt = i;
-            break;
+    importProgress_->setWindowTitle(QStringLiteral("导入文档"));
+    importProgress_->setWindowModality(Qt::NonModal);
+    importProgress_->setMinimumDuration(0);
+    importProgress_->show();
+    connect(importProgress_.get(), &QProgressDialog::canceled, this, [this]() {
+        if (importCancel_) {
+            importCancel_->store(true);
         }
-        progress.setLabelText(
-            QStringLiteral("正在导入（%1 / %2）：\n%3")
-                .arg(i + 1).arg(accepted.size())
-                .arg(QFileInfo(accepted[i]).fileName()));
-        try {
-            const auto result = retriever_->addDocument(
-                accepted[i].toStdString(), cancelledQuery, onPage);
-            if (result.imported) {
-                ++imported;
-                chunksAdded += result.chunksAdded;
-                if (result.source == document::ParseSource::Ocr) {
-                    ++ocrImported;
-                }
-            } else if (result.cancelled) {
-                userCancelled = true;
-                stoppedAt = i;
-                break;
-            } else {
-                const QString name = QFileInfo(accepted[i]).fileName();
-                const QString reason = result.diagnostic.empty()
-                    ? QStringLiteral("未能提取可检索文本")
-                    : QString::fromStdString(result.diagnostic);
-                errors.append(name + QStringLiteral("：") + reason);
-            }
-        } catch (const std::exception& e) {
-            errors.append(QFileInfo(accepted[i]).fileName() + QStringLiteral("：") +
-                          QString::fromStdString(e.what()));
-        }
-        progressBar_->setValue(i + 1);
-        QApplication::processEvents();
+    });
+
+    emit importRequested(accepted);
+}
+
+void SearchPage::onImportProgress(int done, int total, const QString& fileName) {
+    if (importProgress_) {
+        importProgress_->setLabelText(
+            QStringLiteral("正在导入（%1 / %2）：\n%3").arg(done).arg(total).arg(fileName));
     }
-    progress.reset();
+    progressBar_->setValue(done);
+}
+
+void SearchPage::onImportOcrPage(int page, int total) {
+    if (importProgress_) {
+        importProgress_->setLabelText(
+            QStringLiteral("OCR 逐页识别中：第 %1 / %2 页（每页约 5-10 秒）…")
+                .arg(page).arg(total));
+    }
+}
+
+void SearchPage::onImportFinished(const ui_engine::ImportSummary& summary) {
+    importProgress_->reset();
+    importProgress_.reset();
+    importCancel_.reset();
 
     progressBar_->setVisible(false);
     endEngineTask();
-    if (userCancelled) {
-        const int remaining =
-            (stoppedAt >= 0) ? (accepted.size() - stoppedAt - 1) : 0;
+    const int skipped = importSkipped_;
+    importSkipped_ = 0;
+
+    if (summary.userCancelled) {
         QString message = QStringLiteral("已取消导入：成功 %1 个文档，新增 %2 个文本块")
-                              .arg(imported).arg(chunksAdded);
-        if (imported == 0) {
+                              .arg(summary.imported).arg(summary.chunksAdded);
+        if (summary.imported == 0) {
             // 说明"为什么是 0"：扫描件按整篇入库，识别中途取消 = 整份未入库
             message += QStringLiteral("。OCR 需整份文档全部页识别完成后才会建立索引，"
                                       "取消的文件不会入库，已识别的页不保留，"
                                       "重新导入时将从第一页重新识别");
         }
-        if (remaining > 0) {
-            message += QStringLiteral("；剩余 %1 个文件未处理").arg(remaining);
+        if (summary.remaining > 0) {
+            message += QStringLiteral("；剩余 %1 个文件未处理").arg(summary.remaining);
         }
         statusLabel_->setText(message);
-    } else if (errors.isEmpty()) {
+    } else if (summary.errors.isEmpty()) {
         QString message = QStringLiteral("✓ 已导入 %1 个文档，新增 %2 个文本块")
-                              .arg(imported)
-                              .arg(chunksAdded);
-        if (ocrImported > 0) {
-            message += QStringLiteral("（其中 %1 个通过 OCR 识别）").arg(ocrImported);
+                              .arg(summary.imported)
+                              .arg(summary.chunksAdded);
+        if (summary.ocrImported > 0) {
+            message += QStringLiteral("（其中 %1 个通过 OCR 识别）").arg(summary.ocrImported);
         }
         if (skipped > 0) {
             message += QStringLiteral("；同名跳过 %1 个").arg(skipped);
         }
         statusLabel_->setText(message);
     } else {
-        const QString summary = imported > 0
+        const QString text = summary.imported > 0
             ? QStringLiteral("⚠ 导入完成：%1 个成功，%2 个失败，新增 %3 个文本块")
-                  .arg(imported).arg(errors.size()).arg(chunksAdded)
+                  .arg(summary.imported).arg(summary.errors.size()).arg(summary.chunksAdded)
             : QStringLiteral("⚠ 未导入任何文档：%1 个文件未能提取可检索文本")
-                  .arg(errors.size());
-        statusLabel_->setText(summary);
+                  .arg(summary.errors.size());
+        statusLabel_->setText(text);
         QMessageBox::warning(this, QStringLiteral("文档导入提示"),
-                             summary + QStringLiteral("\n\n失败原因：\n") + errors.join(QStringLiteral("\n")));
+                             text + QStringLiteral("\n\n失败原因：\n")
+                                 + summary.errors.join(QStringLiteral("\n")));
     }
 
     emitEngineStats();
@@ -869,7 +894,7 @@ std::vector<rag::SearchResult> SearchPage::getFilteredResults() {
 
     std::vector<rag::SearchResult> filtered;
     for (const auto& r : cachedResults_) {
-        const auto* meta = retriever_->getMetadata(r.docId);
+        const auto meta = retriever_->metadataOf(r.docId);
 
         // T5：角色过滤（位标志：跨段块同时归属多段，按位匹配不丢内容）
         if (courtOnly
@@ -955,7 +980,7 @@ void SearchPage::populateYearFilter(const std::vector<rag::SearchResult>& result
     // 导致年份下拉选项残缺且随搜索词变化）
     std::set<QString> years;
     for (const auto& id : retriever_->allDocIds()) {
-        const auto* meta = retriever_->getMetadata(id);
+        const auto meta = retriever_->metadataOf(id);
         if (meta && meta->date.size() >= 4) {
             const std::string y = meta->date.substr(0, 4);
             // 过滤明显非法的年份（元数据提取异常时的兜底）
@@ -988,7 +1013,7 @@ std::string SearchPage::buildMetadataSummary(const std::vector<rag::SearchResult
         if (seenIds.count(r.docId)) continue;
         seenIds.insert(r.docId);
 
-        const auto* meta = retriever_->getMetadata(r.docId);
+        const auto meta = retriever_->metadataOf(r.docId);
         if (!meta || meta->isEmpty()) continue;
 
         oss << "- " << r.docId;
@@ -1063,7 +1088,7 @@ void SearchPage::applySettings(const config::AppSettings& settings) {
     // 检索宽度与聚合宽检索按 2.5 倍联动：默认 20 → 50，与历史行为一致
     searchWidth_ = std::max(1, settings.topK);
     wideSearchWidth_ = std::max(searchWidth_, searchWidth_ * 5 / 2);
-    generator_->setTemperature(settings.temperature);
+    temperature_ = settings.temperature;   // P1：随生成请求下发引擎线程的 Generator
 }
 
 void SearchPage::finishAnswerRound(const QString& query,

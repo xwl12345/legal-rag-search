@@ -13,6 +13,14 @@
 
 namespace rag {
 
+void Generator::cancel() {
+    // 同线程调用（引擎线程内）：直接 abort 活动应答，等待中的事件循环
+    // 以网络错误（OperationCanceled）收场 → generate() 走异常/部分返回路径。
+    if (activeReply_) {
+        activeReply_->abort();
+    }
+}
+
 std::string Generator::generate(const std::string& query,
                                  const std::string& context,
                                  StreamCallback callback)
@@ -59,6 +67,14 @@ std::string Generator::generate(const std::string& query,
 
     QNetworkAccessManager manager;
     QNetworkReply* reply = manager.post(request, data);
+
+    // 活动应答登记（cancel() 的作用目标）+ RAII 清理：generate() 的所有出口
+    // （正常返回 / 异常）都不留悬挂指针
+    activeReply_ = reply;
+    struct ReplyGuard {
+        QPointer<QNetworkReply>& r;
+        ~ReplyGuard() { r = nullptr; }
+    } replyGuard{activeReply_};
 
     std::string fullAnswer;
     std::string sseBuffer;  // buffer for partial SSE lines

@@ -50,31 +50,38 @@ Retriever::Retriever()
     : store_(std::make_unique<index_store::IndexStore>()) {}
 
 void Retriever::setApiKey(const std::string& key) {
-    if (embedding_.apiKey() == key) {
-        return;  // 同 Key 重复下发（如启动时从配置加载）不清缓存，避免无谓的全库重算
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (embedding_.apiKey() == key) {
+            return;  // 同 Key 重复下发（如启动时从配置加载）不清缓存，避免无谓的全库重算
+        }
+        embedding_.setApiKey(key);
+        // Key 指向的服务/配额可能不同，同一模型名下旧向量不再可信：
+        // 失效缓存，下次向量检索按新配置懒重建（P0-4）。
+        ++vectorEpoch_;
+        similarity_.clear();
+        vectorIndexMap_.clear();
     }
-    embedding_.setApiKey(key);
-    // Key 指向的服务/配额可能不同，同一模型名下旧向量不再可信：
-    // 失效缓存，下次向量检索按新配置懒重建（P0-4）。
-    similarity_.clear();
-    vectorIndexMap_.clear();
 }
 
 // ── T3 配置中心：运行时热更新 ──
 
 void Retriever::setSearchParams(double k1, double b,
                                 double bm25Weight, double vectorWeight) {
+    std::lock_guard<std::mutex> lock(mutex_);
     bm25_.setParams(k1, b);
     bm25Weight_ = bm25Weight;
     vectorWeight_ = vectorWeight;
 }
 
 void Retriever::setChunkParams(int maxSize, int overlap) {
+    std::lock_guard<std::mutex> lock(mutex_);
     chunkMaxSize_ = maxSize;
     chunkOverlap_ = overlap;
 }
 
 void Retriever::setEmbeddingEndpoint(const std::string& baseUrl, const std::string& model) {
+    std::lock_guard<std::mutex> lock(mutex_);
     // setEndpoint 对空串字段保持原值，先算出生效值再判断是否真的变了
     const std::string newBase = baseUrl.empty() ? embedding_.apiBaseUrl() : baseUrl;
     const std::string newModel = model.empty() ? embedding_.model() : model;
@@ -85,6 +92,7 @@ void Retriever::setEmbeddingEndpoint(const std::string& baseUrl, const std::stri
     // 模型/服务变了，旧模型的文档向量对新查询向量毫无意义（跨维度恒 0、
     // 同维度是纯噪声分）——必须失效缓存，下次向量检索按新配置懒重建（P0-4）。
     // 这让「改 Key/模型后无需重新导入，下次检索自动按新配置重算」的注释承诺成真。
+    ++vectorEpoch_;
     similarity_.clear();
     vectorIndexMap_.clear();
 }
@@ -103,11 +111,64 @@ std::string Retriever::embeddingHost() const {
     return host;
 }
 
+// ── P1：轻只读口（锁内微秒级拷贝，UI 线程可随时调用）──
+
+bool Retriever::embeddingReady() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return embedding_.isReady();
+}
+
+std::string Retriever::embeddingModel() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return embedding_.model();
+}
+
+size_t Retriever::vectorCacheSize() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return similarity_.size();
+}
+
+double Retriever::k1() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return bm25_.k1();
+}
+
+double Retriever::b() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return bm25_.b();
+}
+
+double Retriever::bm25Weight() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return bm25Weight_;
+}
+
+double Retriever::vectorWeight() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return vectorWeight_;
+}
+
+int Retriever::docCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return index_.totalDocs();
+}
+
+int Retriever::chunkCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<int>(chunkStore_.size());
+}
+
+int Retriever::documentCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<int>(documents_.size());
+}
+
 // ────────────────────────────────────────────────────────────────
 // 索引写入（导入与落盘恢复共用）
 // ────────────────────────────────────────────────────────────────
 
 void Retriever::indexDocument(const StoredDocument& doc) {
+    // ⚠️ 线程约定（P1）：调用方必须已持有 mutex_（短临界区，内部不再加锁）。
     for (size_t i = 0; i < doc.chunks.size(); ++i) {
         const int chunkIndex = static_cast<int>(i);
         const std::string& content = doc.chunks[i];
@@ -128,11 +189,19 @@ void Retriever::indexDocument(const StoredDocument& doc) {
 ImportResult Retriever::addDocument(const std::string& filePath,
                                     const std::function<bool()>& cancelled,
                                     const std::function<void(int, int)>& onPage) {
+    // 分块参数快照（锁内）——解析在锁外做：文件 IO / OCR 等待绝不持锁（P1 短临界区）
+    int chunkMax = 512, chunkOvl = 50;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        chunkMax = chunkMaxSize_;
+        chunkOvl = chunkOverlap_;
+    }
+
     // 使用 DocumentParser::parseWithResult() 统一处理所有文件类型
     // — 文本文件：直接读取
     // — PDF：PdfExtractor 提取文本层 → OCR 回退（扫描件）
     document::DocumentParser parser;
-    parser.setChunkParams(chunkMaxSize_, chunkOverlap_);   // T3：分块参数仅对本次导入生效
+    parser.setChunkParams(chunkMax, chunkOvl);   // T3：分块参数仅对本次导入生效
     auto parseResult = parser.parseWithResult(filePath, cancelled, onPage);
 
     if (!parseResult.isSuccess()) {
@@ -146,12 +215,6 @@ ImportResult Retriever::addDocument(const std::string& filePath,
     }
 
     const std::string docId = chunks[0].docId;
-
-    // 同一 docId 重复导入：先清掉旧记录，避免产生"幽灵块"
-    // （倒排里留着旧块、chunkStore_ 里却已被新块覆盖）。
-    if (documents_.find(docId) != documents_.end()) {
-        removeDocument(docId);
-    }
 
     StoredDocument doc;
     doc.docId = docId;
@@ -171,14 +234,21 @@ ImportResult Retriever::addDocument(const std::string& filePath,
 
     doc.metadata = document::MetadataExtractor::extract(doc.fullText);
 
-    indexDocument(doc);
-
-    if (!doc.metadata.isEmpty()) {
-        docMeta_[docId] = doc.metadata;
+    // 注册段（锁内短临界区）：同 docId 旧记录清除 + 倒排/块/角色/元数据/文档记录
+    // 一并落位。删旧记录会 bump vectorEpoch_，向量缓存随之失效（懒重建）。
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (documents_.find(docId) != documents_.end()) {
+            removeDocumentUnlocked(docId);
+        }
+        indexDocument(doc);
+        if (!doc.metadata.isEmpty()) {
+            docMeta_[docId] = doc.metadata;
+        }
+        documents_[docId] = std::move(doc);
+        documentOrder_.push_back(docId);
+        std::sort(documentOrder_.begin(), documentOrder_.end());
     }
-    documents_[docId] = std::move(doc);
-    documentOrder_.push_back(docId);
-    std::sort(documentOrder_.begin(), documentOrder_.end());
 
     return {true, docId, static_cast<int>(chunks.size()), parseResult.source, ""};
 }
@@ -186,13 +256,17 @@ ImportResult Retriever::addDocument(const std::string& filePath,
 void Retriever::addText(const std::string& text, const std::string& docId) {
     if (text.empty() || docId.empty()) return;
 
-    if (documents_.find(docId) != documents_.end()) {
-        removeDocument(docId);
+    // 分块参数快照（锁内），分块在锁外做（CPU 纯计算，可不持锁）
+    int chunkMax = 512, chunkOvl = 50;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        chunkMax = chunkMaxSize_;
+        chunkOvl = chunkOverlap_;
     }
 
     // 使用已有的 parser 来分块
     document::DocumentParser parser;
-    parser.setChunkParams(chunkMaxSize_, chunkOverlap_);   // T3：分块参数仅对本次导入生效
+    parser.setChunkParams(chunkMax, chunkOvl);   // T3：分块参数仅对本次导入生效
     auto chunks = parser.parseText(text, docId);
 
     StoredDocument doc;
@@ -209,14 +283,19 @@ void Retriever::addText(const std::string& text, const std::string& docId) {
 
     doc.metadata = document::MetadataExtractor::extract(doc.fullText);
 
-    indexDocument(doc);
-
-    if (!doc.metadata.isEmpty()) {
-        docMeta_[docId] = doc.metadata;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (documents_.find(docId) != documents_.end()) {
+            removeDocumentUnlocked(docId);
+        }
+        indexDocument(doc);
+        if (!doc.metadata.isEmpty()) {
+            docMeta_[docId] = doc.metadata;
+        }
+        documents_[docId] = std::move(doc);
+        documentOrder_.push_back(docId);
+        std::sort(documentOrder_.begin(), documentOrder_.end());
     }
-    documents_[docId] = std::move(doc);
-    documentOrder_.push_back(docId);
-    std::sort(documentOrder_.begin(), documentOrder_.end());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -256,61 +335,90 @@ std::vector<std::pair<std::string, double>> Retriever::rrfFuse(
 std::vector<SearchResult> Retriever::searchWithMode(const std::string& query, int topK,
                                                     SearchMode mode)
 {
-    // ── Step 1: BM25 关键词检索（除 VectorOnly 外所有路都需要）──
+    // ═══ P1 线程约定 ═══ 本函数运行在引擎线程（或测试的单线程环境）。
+    // mutex_ 只保护共享容器的短临界区；网络等待（embed/embedBatch 内部泵
+    // 引擎线程事件）一律不持锁——同线程重入的队列化任务（如检索等待期间
+    // 的设置热更新）必须能拿到锁，且重入引发的缓存失效靠 vectorEpoch_ 兜底。
+
+    // ── Step 1: BM25 关键词检索（除 VectorOnly 外所有路都需要；锁内，纯 CPU）──
     auto queryTerms = tokenizer_.cutForIndex(query);
     // 法律文书通常用“住所地”等字段表达地点，补充自然语言位置问法。
     expandLegalLocationTerms(query, queryTerms);
     const int width = std::max(topK * 2, 10);
     std::decay_t<decltype(bm25_.search(queryTerms, index_, width))> bm25Results{};
     if (mode != SearchMode::VectorOnly) {
+        std::lock_guard<std::mutex> lock(mutex_);
         bm25Results = bm25_.search(queryTerms, index_, width);
     }
 
     // ── Step 2: 向量语义检索（未配置 / 异常 → available=false，由各路自行降级）──
     bool vectorAvailable = false;
     std::vector<vector_engine::VectorSearchResult> vectorResults;
+    std::unordered_map<std::string, double> vectorScores;
 
-    if (embedding_.isReady()) {
+    if (embedding_.isReady()) {   // 同线程读自身配置（写方也在引擎线程），无需锁
         try {
-            auto queryVec = embedding_.embed(query);
+            auto queryVec = embedding_.embed(query);   // 网络等待，不持锁
 
-            // 确保向量库和索引同步
-            if (similarity_.size() != static_cast<size_t>(index_.totalDocs())) {
-                // 重建向量库（从 chunkStore 批量生成 embedding，每批最多 20 条）
-                // 注意：懒计算——导入文档不调 API，首次向量检索才批量补算；
-                // 改 Key/模型后无需重新导入，下次检索自动按新配置重算（2026-10-05 实测）。
-                similarity_.clear();
-                vectorIndexMap_.clear();
-
-                auto allDocs = index_.allDocs();
-                std::vector<std::string> allTexts;
-                for (const auto& [docId, chunkIdx] : allDocs) {
-                    std::string key = chunkKey(docId, chunkIdx);
-                    auto it = chunkStore_.find(key);
-                    if (it != chunkStore_.end()) {
-                        allTexts.push_back(it->second);
-                        vectorIndexMap_.emplace_back(docId, chunkIdx);
-                    }
-                }
-
-                if (!allTexts.empty()) {
-                    for (size_t i = 0; i < allTexts.size(); i += 20) {
-                        size_t batchEnd = std::min(i + 20, allTexts.size());
-                        std::vector<std::string> batch(
-                            allTexts.begin() + i,
-                            allTexts.begin() + batchEnd
-                        );
-                        auto vecs = embedding_.embedBatch(batch);
-                        for (size_t j = 0; j < vecs.size(); ++j) {
-                            similarity_.addVector(static_cast<int>(i + j), vecs[j]);
+            // 懒重建：锁内判定 + 取快照，锁外批量调 API，锁内按代次提交。
+            // （导入文档不调 API，首次向量检索才批量补算；改 Key/模型后无需
+            //   重新导入，下次检索自动按新配置重算——P0-4 起该承诺成立。）
+            std::uint64_t epoch = 0;
+            std::vector<std::string> rebuildTexts;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (similarity_.size() != static_cast<size_t>(index_.totalDocs())) {
+                    similarity_.clear();
+                    vectorIndexMap_.clear();
+                    epoch = vectorEpoch_;   // 快照代次：期间失效则放弃本轮
+                    auto allDocs = index_.allDocs();
+                    vectorIndexMap_.reserve(allDocs.size());
+                    rebuildTexts.reserve(allDocs.size());
+                    for (const auto& [docId, chunkIdx] : allDocs) {
+                        auto it = chunkStore_.find(chunkKey(docId, chunkIdx));
+                        if (it != chunkStore_.end()) {
+                            rebuildTexts.push_back(it->second);
+                            vectorIndexMap_.emplace_back(docId, chunkIdx);
                         }
                     }
                 }
             }
 
-            if (similarity_.size() > 0) {
-                vectorResults = similarity_.search(queryVec, width);
-                vectorAvailable = !vectorResults.empty();
+            if (!rebuildTexts.empty()) {
+                for (size_t i = 0; i < rebuildTexts.size(); i += 20) {
+                    size_t batchEnd = std::min(i + 20, rebuildTexts.size());
+                    std::vector<std::string> batch(
+                        rebuildTexts.begin() + i,
+                        rebuildTexts.begin() + batchEnd
+                    );
+                    auto vecs = embedding_.embedBatch(batch);   // 网络等待，不持锁
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (vectorEpoch_ != epoch) {
+                        // 快照之后发生了失效（删除/清空/换 Key/换端点）：
+                        // 放弃本轮提交，留下已被清空的缓存，下次检索整体重建。
+                        break;
+                    }
+                    for (size_t j = 0; j < vecs.size(); ++j) {
+                        similarity_.addVector(static_cast<int>(i + j), vecs[j]);
+                    }
+                }
+            }
+
+            // 向量检索 + key→分数映射（锁内）
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (similarity_.size() > 0) {
+                    vectorResults = similarity_.search(queryVec, width);
+                    vectorAvailable = !vectorResults.empty();
+                }
+                if (vectorAvailable) {
+                    for (const auto& r : vectorResults) {
+                        if (r.index >= 0 && static_cast<size_t>(r.index) < vectorIndexMap_.size()) {
+                            auto [docId, chunkIdx] = vectorIndexMap_[r.index];
+                            vectorScores[chunkKey(docId, chunkIdx)] = r.similarity;
+                        }
+                    }
+                }
             }
         } catch (const std::exception&) {
             // embedding 失败：vectorAvailable 保持 false，各路按降级语义处理
@@ -318,20 +426,10 @@ std::vector<SearchResult> Retriever::searchWithMode(const std::string& query, in
         }
     }
 
-    // chunkKey → 原始分（向量路可用时填充，供各融合路回填展示分）
-    std::unordered_map<std::string, double> vectorScores;
-    if (vectorAvailable) {
-        for (const auto& r : vectorResults) {
-            if (r.index >= 0 && static_cast<size_t>(r.index) < vectorIndexMap_.size()) {
-                auto [docId, chunkIdx] = vectorIndexMap_[r.index];
-                vectorScores[chunkKey(docId, chunkIdx)] = r.similarity;
-            }
-        }
-    }
-
-    // 把 chunkKey 转成 SearchResult 的公共收尾
+    // 把 chunkKey 转成 SearchResult 的公共收尾（锁内查共享容器）
     const auto makeResult = [this](const std::string& key) {
         SearchResult sr;
+        std::lock_guard<std::mutex> lock(mutex_);
         auto colonPos = key.rfind(':');
         sr.docId = key.substr(0, colonPos);
         sr.chunkIndex = std::stoi(key.substr(colonPos + 1));
@@ -450,20 +548,9 @@ std::vector<SearchResult> Retriever::searchWithMode(const std::string& query, in
     // ── 降级：融合路向量不可用 / 融合结果为空时，只用 BM25 ──
     if (combined.empty() && mode != SearchMode::VectorOnly) {
         for (const auto& r : bm25Results) {
-            SearchResult sr;
-            sr.docId = r.docId;
-            sr.chunkIndex = r.chunkIndex;
+            SearchResult sr = makeResult(chunkKey(r.docId, r.chunkIndex));
             sr.bm25Score = r.score;
             sr.finalScore = r.score;
-            std::string key = chunkKey(r.docId, r.chunkIndex);
-            auto it = chunkStore_.find(key);
-            if (it != chunkStore_.end()) {
-                sr.content = it->second;
-            }
-            auto roleIt = chunkRoles_.find(key);
-            if (roleIt != chunkRoles_.end()) {
-                sr.role = roleIt->second;   // T5
-            }
             combined.push_back(sr);
         }
 
@@ -483,6 +570,10 @@ std::vector<SearchResult> Retriever::searchWithMode(const std::string& query, in
 std::string Retriever::buildContext(const std::vector<SearchResult>& results,
                                      int maxTokens)
 {
+    // 锁内拼装（纯 CPU 拼接，微秒级；results 本身是调用方已持有的副本，
+    // 但 chunkStore_ 等共享状态在引擎线程上可能被并发修改——这里虽只读
+    // results，为一致性惯例统一持锁）
+    std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream oss;
     oss << "以下是与用户问题相关的文档内容：\n\n";
 
@@ -508,10 +599,12 @@ std::string Retriever::buildContext(const std::vector<SearchResult>& results,
 }
 
 // ────────────────────────────────────────────────────────────────
-// 只读视图（文档库页 / 全文阅读页消费）
+// 只读视图（文档库页 / 全文阅读页消费；锁内拷贝，UI 线程可随时调用）
 // ────────────────────────────────────────────────────────────────
 
 const document::DocMetadata* Retriever::getMetadata(const std::string& docId) const {
+    // ⚠️ 返回内部指针：仅限无并发写场景（单线程测试/工具）。UI 用 metadataOf()。
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = docMeta_.find(docId);
     if (it != docMeta_.end()) {
         return &it->second;
@@ -519,8 +612,18 @@ const document::DocMetadata* Retriever::getMetadata(const std::string& docId) co
     return nullptr;
 }
 
+std::optional<document::DocMetadata> Retriever::metadataOf(const std::string& docId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = docMeta_.find(docId);
+    if (it != docMeta_.end()) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
 std::vector<std::string> Retriever::allDocIds() const {
     // 按 documentOrder_ 输出，保证跨次运行顺序稳定（unordered_map 遍历顺序不可依赖）
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::string> ids;
     ids.reserve(documentOrder_.size());
     for (const auto& docId : documentOrder_) {
@@ -532,6 +635,7 @@ std::vector<std::string> Retriever::allDocIds() const {
 }
 
 std::vector<DocumentInfo> Retriever::documentInfos() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<DocumentInfo> infos;
     infos.reserve(documentOrder_.size());
 
@@ -554,6 +658,7 @@ std::vector<DocumentInfo> Retriever::documentInfos() const {
 }
 
 bool Retriever::getDocumentInfo(const std::string& docId, DocumentInfo& out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = documents_.find(docId);
     if (it == documents_.end()) return false;
 
@@ -569,6 +674,7 @@ bool Retriever::getDocumentInfo(const std::string& docId, DocumentInfo& out) con
 }
 
 bool Retriever::getFullText(const std::string& docId, std::string& out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = documents_.find(docId);
     if (it == documents_.end()) return false;
     out = it->second.fullText;
@@ -576,6 +682,7 @@ bool Retriever::getFullText(const std::string& docId, std::string& out) const {
 }
 
 bool Retriever::getChunk(const std::string& docId, int chunkIndex, std::string& out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = chunkStore_.find(chunkKey(docId, chunkIndex));
     if (it == chunkStore_.end()) return false;
     out = it->second;
@@ -583,6 +690,7 @@ bool Retriever::getChunk(const std::string& docId, int chunkIndex, std::string& 
 }
 
 document::ChunkRole Retriever::getChunkRole(const std::string& docId, int chunkIndex) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = chunkRoles_.find(chunkKey(docId, chunkIndex));
     return it != chunkRoles_.end() ? it->second : document::ChunkRole::Unknown;
 }
@@ -592,6 +700,12 @@ document::ChunkRole Retriever::getChunkRole(const std::string& docId, int chunkI
 // ────────────────────────────────────────────────────────────────
 
 int Retriever::removeDocument(const std::string& docId) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return removeDocumentUnlocked(docId);
+}
+
+int Retriever::removeDocumentUnlocked(const std::string& docId) {
+    // ⚠️ 线程约定：调用方已持有 mutex_。
     auto it = documents_.find(docId);
     if (it == documents_.end()) return 0;
 
@@ -614,6 +728,8 @@ int Retriever::removeDocument(const std::string& docId) {
 
     // 3. 向量库：槽位与块索引强绑定，删块后按下标对应关系失效，
     //    直接作废整个向量库，下次 search() 时按现有块重建（懒加载）。
+    //    代次 +1：正在进行的懒重建按快照代次察觉失效并放弃提交（P1）。
+    ++vectorEpoch_;
     similarity_.clear();
     vectorIndexMap_.clear();
 
@@ -621,12 +737,19 @@ int Retriever::removeDocument(const std::string& docId) {
 }
 
 void Retriever::clearAll(bool alsoDeletePersistedFile) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    clearAllUnlocked(alsoDeletePersistedFile);
+}
+
+void Retriever::clearAllUnlocked(bool alsoDeletePersistedFile) {
+    // ⚠️ 线程约定：调用方已持有 mutex_。
     index_.clear();
     chunkStore_.clear();
     chunkRoles_.clear();
     docMeta_.clear();
     documents_.clear();
     documentOrder_.clear();
+    ++vectorEpoch_;
     similarity_.clear();
     vectorIndexMap_.clear();
     restoredFromDisk_ = false;
@@ -649,32 +772,39 @@ PersistResult Retriever::saveIndex() const {
         return result;
     }
 
-    // 按 docId 排序写出，保证落盘内容可复现（便于 diff 与测试比对）
+    // 锁内快照（拷贝全部文档记录），文件写入在锁外做（P1 短临界区）
     std::vector<index_store::StoredDocument> records;
-    records.reserve(documentOrder_.size());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // 按 docId 排序写出，保证落盘内容可复现（便于 diff 与测试比对）
+        records.reserve(documentOrder_.size());
 
-    for (const auto& docId : documentOrder_) {
-        auto it = documents_.find(docId);
-        if (it == documents_.end()) continue;
-        const StoredDocument& doc = it->second;
+        for (const auto& docId : documentOrder_) {
+            auto it = documents_.find(docId);
+            if (it == documents_.end()) continue;
+            const StoredDocument& doc = it->second;
 
-        index_store::StoredDocument record;
-        record.docId = doc.docId;
-        record.sourcePath = doc.sourcePath;
-        record.importedAt = doc.importedAt;
-        record.chunkCount = static_cast<int>(doc.chunks.size());
-        record.byteSize = static_cast<std::uint64_t>(doc.fullText.size());
-        record.ocr = doc.ocr;
-        record.metadata = doc.metadata;
-        record.fullText = doc.fullText;
-        record.chunks = doc.chunks;
-        record.chunkRoles.reserve(doc.chunks.size());
-        for (int i = 0; i < static_cast<int>(doc.chunks.size()); ++i) {
-            record.chunkRoles.push_back(
-                static_cast<std::uint8_t>(getChunkRole(doc.docId, i)));   // T5
+            index_store::StoredDocument record;
+            record.docId = doc.docId;
+            record.sourcePath = doc.sourcePath;
+            record.importedAt = doc.importedAt;
+            record.chunkCount = static_cast<int>(doc.chunks.size());
+            record.byteSize = static_cast<std::uint64_t>(doc.fullText.size());
+            record.ocr = doc.ocr;
+            record.metadata = doc.metadata;
+            record.fullText = doc.fullText;
+            record.chunks = doc.chunks;
+            record.chunkRoles.reserve(doc.chunks.size());
+            for (const auto& role : doc.chunkRoles) {   // T5：角色随记录落盘
+                record.chunkRoles.push_back(static_cast<std::uint8_t>(role));
+            }
+            // 容忍角色向量短于块向量（历史数据），缺省补 Unknown
+            while (record.chunkRoles.size() < record.chunks.size()) {
+                record.chunkRoles.push_back(0);
+            }
+
+            records.push_back(std::move(record));
         }
-
-        records.push_back(std::move(record));
     }
 
     auto saveResult = store_->save(records);
@@ -762,16 +892,22 @@ PersistResult Retriever::loadIndex() {
 
         if (doc.chunks.empty()) continue;
 
-        indexDocument(doc);
-
-        if (!doc.metadata.isEmpty()) {
-            docMeta_[doc.docId] = doc.metadata;
+        // 注册段（锁内短临界区；文件读取与重标注都在锁外完成）
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            indexDocument(doc);
+            if (!doc.metadata.isEmpty()) {
+                docMeta_[doc.docId] = doc.metadata;
+            }
+            const std::string id = doc.docId;
+            documents_[id] = std::move(doc);
+            documentOrder_.push_back(id);
         }
-        const std::string id = doc.docId;
-        documents_[id] = std::move(doc);
-        documentOrder_.push_back(id);
     }
-    std::sort(documentOrder_.begin(), documentOrder_.end());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::sort(documentOrder_.begin(), documentOrder_.end());
+    }
 
     const auto end = std::chrono::steady_clock::now();
     result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
