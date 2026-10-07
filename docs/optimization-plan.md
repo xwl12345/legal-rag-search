@@ -246,7 +246,33 @@ MainWindow / 五个页面
 
 ---
 
-## 4. P2 接口抽象与业务下沉（2 天）
+## 4. P2 接口抽象与业务下沉（2 天）——✅ 完成（2026-10-06）
+
+**落地形态**：
+- 新增 `include/net/transport.h`：`IHttpTransport`（onData 0..N 次 SSE 增量 +
+  onFinished 恰好一次）+ `ITransportHandle::cancel()`（同线程语义）+ `HttpResponse`；
+  生产实现 `QtTransport`（QNetworkAccessManager 懒创建、按线程亲和校正，接收者
+  上下文挂 reply——P0-8 的结构化版本）。接口含 QByteArray/QUrl 等 QtCore 类型，
+  引擎头文件的「纯 std 边界」在 net 层有意放宽（换取可读性，已记录）。
+- `Generator`：传输注入；URL/模型成员化（`apiBaseUrl_` 死成员转正）；SSE 解析与
+  错误归并重写——HTTP≥400 / 网络错误 / **200 包错误体**一律如实抛出（修体检 #20）。
+- `EmbeddingService`：传输注入；`embedBatch` 按响应 `index` 字段重排（修体检 #8
+  静默错位）；200 错误体抛出。
+- **业务下沉**：`Retriever::isAggregateQuery`（聚合短语表）/ `searchAggregate`
+  （宽检索 + per-doc 去重）/ `metadataSummary`（两份 UI 拼装合一）/
+  `document::courtLevelOf`（法院四级判定）——UI 层 grep 无业务常量表。
+- **删 simulateAnswer 后门**（决策 ④）：`test/fake_transport.h` 可编程假传输
+  （回放/应答器/挂起三模式）注入 EngineWorker，历史 E2E 改走**真实生成链路**——
+  完整回合（SSE 流式 → 落库）+ 挂起回合点「■ 停止」→ interrupted 残卷落库
+  （**P1 遗留的联网人工验证项就此自动化**）。
+
+**验收证据（实测）**：
+- `run_tests` **90/90**（新增 7 组：SSE 分块跨行/CRLF/无尾换行、200 错误体、
+  5xx/网络错误、生成中取消、embedBatch 乱序重排、向量路全链路——P0-4 换模型/Key
+  失效缓存首次获得真断言、聚合/层级/摘要下沉）；
+- `ui_smoke --e2e` 1x / 1.5x **95 项 OK 全过**（历史组 27 项断言全部改在真实
+  生成路径上）；`eval_retrieval` 指标与基线逐位一致（零漂移）；
+- 真实主程序离屏启动冒烟正常。
 
 ### 4.1 网络传输抽象 `IHttpTransport`
 - **接口**（QtCore-only，头文件放 `include/net/transport.h`）：
