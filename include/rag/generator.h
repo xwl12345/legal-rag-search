@@ -8,6 +8,14 @@
 
 namespace rag {
 
+/// 回答立场（T6 立场化 Prompt 第 3 层）。
+/// Neutral 是默认且唯一不改行为的档位——中立态 Prompt 与改造前逐字节一致。
+enum class Perspective {
+    Neutral,         // 中立（默认）
+    PlaintiffSide,   // 原告方立场
+    DefendantSide,   // 被告方立场
+};
+
 /// AI 生成答案（流式回调）
 class Generator {
 public:
@@ -16,6 +24,15 @@ public:
 
     /// 设置 API Key
     void setApiKey(const std::string& key) { apiKey_ = key; }
+
+    /// 回答立场（T6）。只影响生成层 Prompt 组装，不影响检索召回与排序；
+    /// 中立态（默认）走原 Prompt 路径，保证行为与改造前一致。
+    void setPerspective(Perspective p) { perspective_ = p; }
+    Perspective perspective() const { return perspective_; }
+
+    /// 立场指令段（追加在 user prompt 尾部；中立态返回空串）。
+    /// public static：单测直接断言指令文案，不依赖网络。
+    static std::string perspectiveDirective(Perspective p);
 
     /// 运行时热更新采样温度（T3 配置中心）；默认 0.3，合法范围 (0, 2]
     void setTemperature(double t) { temperature_ = t; }
@@ -78,6 +95,7 @@ private:
     std::string chatModel_ = "deepseek-chat";
     std::string metaContext_;  // 文档元数据摘要
     double temperature_ = 0.3;  // 采样温度（T3 配置中心）
+    Perspective perspective_ = Perspective::Neutral;  // T6：回答立场（默认中立）
 
     // P2：网络出口可注入；空 = 未注入，generate() 首次使用时懒创建 QtTransport
     std::shared_ptr<IHttpTransport> transport_;

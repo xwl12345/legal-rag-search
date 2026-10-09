@@ -32,6 +32,12 @@ std::string Generator::generate(const std::string& query,
 
     std::string prompt = buildPrompt(query, context, metaContext_);
 
+    // T6 立场化 Prompt：中立态（默认）不追加任何内容，与改造前逐字节一致；
+    // 立场态在 user prompt 尾部追加独立指令块（不改 system 与既有模板）。
+    if (perspective_ != Perspective::Neutral) {
+        prompt += "\n\n" + perspectiveDirective(perspective_);
+    }
+
     bool legal = isLegalContext(context);
 
     // Build request body
@@ -179,6 +185,26 @@ std::string Generator::generate(const std::string& query,
 // ═══════════════════════════════════════════════════════════════
 // Prompt 模板
 // ═══════════════════════════════════════════════════════════════
+
+std::string Generator::perspectiveDirective(Perspective p) {
+    // 两种立场均带「如实引用、不得虚构」护栏：立场只改变论述组织方式，
+    // 不允许模型替文书发明不存在的事实。
+    if (p == Perspective::PlaintiffSide) {
+        return
+            "【回答视角】本次回答站在原告方立场组织论述：\n"
+            "1. 优先归纳支持原告诉请的事实与法律依据；\n"
+            "2. 逐一提示被告可能提出的抗辩点，并给出原告方的应对思路；\n"
+            "3. 仍须如实引用文档来源，不得虚构文书中未出现的事实。";
+    }
+    if (p == Perspective::DefendantSide) {
+        return
+            "【回答视角】本次回答站在被告方立场组织论述：\n"
+            "1. 优先归纳有利于被告的事实与法律依据；\n"
+            "2. 逐一提示原告主张中的薄弱环节，并给出被告方的抗辩思路；\n"
+            "3. 仍须如实引用文档来源，不得虚构文书中未出现的事实。";
+    }
+    return {};
+}
 
 bool Generator::isLegalContext(const std::string& context) {
     // 检测法律关键词

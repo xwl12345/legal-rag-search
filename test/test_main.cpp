@@ -34,6 +34,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QTimer>
 
 // ── 模块头文件 ──
@@ -1447,9 +1449,20 @@ void test_history_append_and_get() {
         CHECK(!back.interrupted);
         CHECK(back.note.empty());
 
+        // T6：立场字段往返（补一条带立场的写入读回）
+        {
+            history::HistoryRecord withP = makeSampleRecord("股东会决议效力问题？", "决议成立。");
+            withP.perspective = "原告方";
+            const long long pid = store.append(withP);
+            history::HistoryRecord pback;
+            CHECK(store.get(pid, pback));
+            CHECK(pback.perspective == "原告方");
+        }
+
+        CHECK_EQ(store.count(), 2);
         // 不存在的 id 必须如实返回 false，而不是给条空记录
         history::HistoryRecord none;
-        CHECK(!store.get(id + 1, none));
+        CHECK(!store.get(id + 100, none));
     }
 
     removeTestHistoryDb();
@@ -2510,6 +2523,142 @@ void test_p2_error_body_surfaces() {
     PASS();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// T6：立场化 Prompt（三态视角）——FakeTransport 抓请求体做 golden 断言
+// ═══════════════════════════════════════════════════════════════
+
+namespace {
+
+/// golden：buildLegalPrompt（metaContext 为空）对固定输入的期望输出。
+/// 模板任何无意识改动都会在这里显式暴露——更新 golden 必须是有意识的决策。
+std::string t6GoldenLegalPrompt() {
+    std::string g = "【法律文档内容】\n人民法院 民事判决书 测试上下文\n\n";
+    g += "【用户问题】\n测试问题\n\n";
+    g += "请基于以上法律文档，按以下结构回答：\n\n";
+    g += "## 一、案件概述\n（如涉及具体案件，简述案由、当事人、审理法院和程序）\n\n";
+    g += "## 二、法律分析\n（结合文档中的裁判观点或法律条文，进行分点分析）\n\n";
+    g += "## 三、结论\n（总结要点，必要时给出建议。如为非法律建议性质的问题，可省略建议部分）\n\n";
+    g += "## 四、参考来源\n（列出回答引用的文档来源，格式：【来源 N】案号或文档名 + 具体引用内容）";
+    return g;
+}
+
+/// 从请求体 JSON 提取 user 消息内容（messages[1]）
+std::string t6UserContent(const QByteArray& body) {
+    QJsonDocument doc = QJsonDocument::fromJson(body);
+    const QJsonArray messages = doc.object()["messages"].toArray();
+    if (messages.size() < 2) return {};
+    return messages[1].toObject()["content"].toString().toStdString();
+}
+
+/// 发一次生成请求，捕获 user prompt 内容
+std::string t6CaptureUserPrompt(rag::Perspective perspective) {
+    auto fake = std::make_shared<FakeTransport>();
+    QByteArray captured;
+    fake->setResponder([&captured](const QUrl&, const QByteArray& body) {
+        captured = body;
+        FakeTransport::Reply r;
+        r.chunks.push_back(sseDelta("回答"));
+        r.finish = FakeTransport::Finish{200, QByteArray(), false, QString()};
+        return r;
+    });
+    rag::Generator gen;
+    gen.setApiKey("sk-t6-fake-key-1234567890");
+    gen.setTransport(fake);
+    gen.setPerspective(perspective);
+    gen.generate("测试问题", "人民法院 民事判决书 测试上下文");
+    return t6UserContent(captured);
+}
+
+}  // namespace
+
+void test_t6_perspective_prompt() {
+    TEST("T6：三态视角——中立 golden 快照逐字节一致，立场态追加指令块");
+
+    // 1. 中立态（默认）：prompt 与改造前 golden 逐字节一致
+    const std::string golden = t6GoldenLegalPrompt();
+    const std::string neutral = t6CaptureUserPrompt(rag::Perspective::Neutral);
+    if (neutral != golden) {
+        std::cout << "    (中立态与 golden 不一致！实际前 80 字节=["
+                  << neutral.substr(0, 80) << "]) ";
+    }
+    CHECK(neutral == golden);
+
+    // 2. 原告方态 = golden + 空行 + 原告指令段（追加关系锁死，不改既有模板）
+    const std::string plaintiff = t6CaptureUserPrompt(rag::Perspective::PlaintiffSide);
+    CHECK(plaintiff == golden + "\n\n" + rag::Generator::perspectiveDirective(
+                                            rag::Perspective::PlaintiffSide));
+    CHECK(plaintiff.find("站在原告方立场") != std::string::npos);
+    CHECK(plaintiff.find("支持原告诉请") != std::string::npos);
+    CHECK(plaintiff.find("抗辩点") != std::string::npos);
+    CHECK(plaintiff.find("不得虚构") != std::string::npos);
+
+    // 3. 被告方态对称
+    const std::string defendant = t6CaptureUserPrompt(rag::Perspective::DefendantSide);
+    CHECK(defendant == golden + "\n\n" + rag::Generator::perspectiveDirective(
+                                            rag::Perspective::DefendantSide));
+    CHECK(defendant.find("站在被告方立场") != std::string::npos);
+    CHECK(defendant.find("有利于被告") != std::string::npos);
+    CHECK(defendant.find("薄弱环节") != std::string::npos);
+
+    // 4. 中立指令段为空串；两立场指令互不相同
+    CHECK(rag::Generator::perspectiveDirective(rag::Perspective::Neutral).empty());
+    CHECK(rag::Generator::perspectiveDirective(rag::Perspective::PlaintiffSide) !=
+          rag::Generator::perspectiveDirective(rag::Perspective::DefendantSide));
+
+    PASS();
+}
+
+void test_t6_history_schema_migration() {
+    TEST("T6：历史库旧表结构自动补列（perspective），旧记录读回为空串");
+    removeTestHistoryDb();
+
+    // 手工建一个 T6 之前的旧结构表（无 perspective 列）并预置一行
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(
+            "QSQLITE", "t6_migration_conn");
+        db.setDatabaseName(QString::fromStdString(kTestHistoryDb));
+        CHECK(db.open());
+        QSqlQuery q(db);
+        CHECK(q.exec(
+            "CREATE TABLE history ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  created_at TEXT NOT NULL, query TEXT NOT NULL, answer TEXT NOT NULL,"
+            "  sources TEXT NOT NULL, hit_count INTEGER NOT NULL,"
+            "  interrupted INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '')"));
+        CHECK(q.exec(
+            "INSERT INTO history (created_at, query, answer, sources, hit_count, interrupted, note) "
+            "VALUES ('2026-10-09 10:00:00', '旧记录问题', '旧记录回答', '[]', 0, 0, '')"));
+    }
+
+    // HistoryStore::open 应通过 ALTER 自动补列，且不影响已有数据
+    {
+        history::HistoryStore store(kTestHistoryDb);
+        CHECK(store.open());
+        CHECK_EQ(store.count(), 1);
+
+        // 旧行读回：perspective 为空串（历史页不显示立场行）
+        history::HistoryRecord old;
+        CHECK(store.get(1, old));
+        CHECK(old.perspective.empty());
+
+        // 新写入带立场的记录正常落库读回
+        history::HistoryRecord rec = makeSampleRecord("新立场问题", "新立场回答");
+        rec.perspective = "被告方";
+        const long long id = store.append(rec);
+        CHECK(id > 0);
+        history::HistoryRecord back;
+        CHECK(store.get(id, back));
+        CHECK(back.perspective == "被告方");
+    }
+
+    // 必须移除连接再让后续用例删库文件——Windows 上被占用文件删不掉，
+    // 会把 T2 组的"删库重建"计数断言全部污染（本用例首跑踩坑实录）
+    QSqlDatabase::removeDatabase("t6_migration_conn");
+
+    removeTestHistoryDb();
+    PASS();
+}
+
 void test_p2_http_error_throws() {
     TEST("P2：HTTP 5xx / 网络错误抛异常，错误文本可分类");
     {
@@ -2813,6 +2962,10 @@ void run_all_tests() {
     std::cout << "\n── 法律 Prompt 模板 ──" << std::endl;
     test_prompt_legal_detection();
     test_prompt_metadata_summary();
+
+    std::cout << "\n── T6: 立场化 Prompt（三态视角）──" << std::endl;
+    test_t6_perspective_prompt();
+    test_t6_history_schema_migration();
 
     std::cout << "\n── 端到端测试 ──" << std::endl;
     test_e2e_import_all_demo_docs();
