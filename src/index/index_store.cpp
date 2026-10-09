@@ -159,7 +159,7 @@ std::string nowTimestamp() {
 }
 
 IndexStore::IndexStore(std::string filePath)
-    : filePath_(filePath.empty() ? std::string(config::INDEX_FILE) : std::move(filePath)) {}
+    : filePath_(filePath.empty() ? config::dataFilePath(config::INDEX_FILE) : std::move(filePath)) {}
 
 bool IndexStore::exists() const {
     const QFileInfo info(QString::fromStdString(filePath_));

@@ -12,7 +12,8 @@ namespace rag {
 
 void Generator::cancel() {
     // 同线程调用（引擎线程内）：中断活动传输；onFinished 仍会恰好一次，
-    // 等待中的事件循环以网络错误（OperationCanceled）收场 → generate() 走异常路径。
+    // 等待中的事件循环以网络错误（OperationCanceled）收场 → generate() 抛中断。
+    cancelRequested_ = true;
     if (activeHandle_) {
         activeHandle_->cancel();
     }
@@ -120,6 +121,7 @@ std::string Generator::generate(const std::string& query,
         });
 
     // 活动句柄登记（cancel 的作用目标）；generate 的所有出口都不留悬挂
+    cancelRequested_ = false;
     activeHandle_ = handle;
     loop.exec();
     activeHandle_.reset();
@@ -132,6 +134,12 @@ std::string Generator::generate(const std::string& query,
     }
 
     // ── 错误归并（P2：与旧语义对齐 + 新增错误体解析）──
+    // 用户主动停止恒抛中断：增量已经由回调送进调用方的缓冲，抛出让上层
+    // 把本回合标记为 interrupted——绝不能把"用户停止"伪装成完整回答。
+    if (cancelRequested_) {
+        throw std::runtime_error("LLM API request failed: Operation canceled");
+    }
+
     // 传输层失败 / HTTP >= 400 / 200 包错误体，都走"有增量则保残卷、无增量则抛"
     QString failReason;
     if (finalResp.networkError || finalResp.statusCode >= 400) {

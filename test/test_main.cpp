@@ -49,6 +49,7 @@
 #include "rag/generator.h"
 #include "rag/eval_metrics.h"
 #include "history/history_store.h"
+#include "config/app_config.h"
 #include "config/app_settings.h"
 #include "../test/fake_transport.h"
 #include <algorithm>
@@ -2556,16 +2557,16 @@ void test_p2_generation_cancel() {
 
     QTimer::singleShot(50, [&gen]() { gen.cancel(); });   // 挂起期间（事件循环内）取消
 
+    // P3：用户取消恒抛中断（增量已由回调送出，返回值无意义）——
+    // 保证「■ 停止」的回合一定被上层标记为 interrupted
     bool threw = false;
     try {
         gen.generate("测试问题", "人民法院 测试上下文");
-        // 部分内容 + 网络错误 → 旧语义返回残卷；本实现 cancel 时增量已在
-        // buffer，fullAnswer 非空走残卷返回路径，两种都可接受：
     } catch (const std::exception& e) {
         threw = true;
         CHECK(std::string(e.what()).find("canceled") != std::string::npos);
     }
-    // canceled 时若已有增量 → 残卷路径（不抛）；无增量 → 抛。二者只取其一。
+    CHECK(threw);
     PASS();
 }
 
@@ -2663,6 +2664,86 @@ void test_p2_aggregate_and_court_level() {
     // addText 走提取器，这里直接验证 summary 的行格式：
     auto summary = r.metadataSummary({"p2_meta_doc"});
     CHECK(summary.find("p2_meta_doc") != std::string::npos);
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// P3：配置合一与工程卫生
+// ═══════════════════════════════════════════════════════════════
+
+void test_p3_settings_sanitize() {
+    TEST("P3：AppSettings 越界/非法值钳制（load 与保存同一漏斗）");
+    const std::string path = "build/test_p3_sanitize.json";
+    {
+        std::ofstream f(path, std::ios::binary);
+        f << "{\"k1\": -5, \"b\": 7, \"bm25Weight\": 3, \"vectorWeight\": -1, "
+             "\"topK\": 0, \"chunkSize\": 100, \"chunkOverlap\": 200, "
+             "\"temperature\": 99, \"chatModel\": \"\"}";
+    }
+
+    config::AppSettings s;
+    CHECK(config::AppSettings::load(path, s));
+    // NaN/越界回落默认
+    CHECK_CLOSE(s.k1, 1.5, 1e-9);
+    CHECK_CLOSE(s.b, 0.75, 1e-9);
+    // 权重：负值回落默认（0.4/0.6），再归一化 → 3/(3+0.6)=0.833、0.6/3.6=0.167
+    CHECK_CLOSE(s.bm25Weight, 0.8333333, 1e-6);
+    CHECK_CLOSE(s.vectorWeight, 0.1666667, 1e-6);
+    CHECK_CLOSE(s.bm25Weight + s.vectorWeight, 1.0, 1e-9);
+    // 越界整数回落默认
+    CHECK_EQ(s.topK, 20);
+    // chunkSize=100 在合法区间 [64, 65536] 内 → 保留；overlap 200 ≥ 100 → 钳为 1/4
+    CHECK_EQ(s.chunkSize, 100);
+    CHECK_EQ(s.chunkOverlap, 25);
+    CHECK_CLOSE(s.temperature, 0.3, 1e-9);
+    CHECK(s.chatModel == "deepseek-chat");   // 空串回落默认
+
+    // 合法值原样保留
+    {
+        std::ofstream f(path, std::ios::binary);
+        f << "{\"k1\": 2.0, \"b\": 0.5, \"topK\": 33}";
+    }
+    CHECK(config::AppSettings::load(path, s));
+    CHECK_CLOSE(s.k1, 2.0, 1e-9);
+    CHECK_CLOSE(s.b, 0.5, 1e-9);
+    CHECK_EQ(s.topK, 33);
+    std::remove(path.c_str());
+    PASS();
+}
+
+void test_p3_settings_chat_fields_roundtrip() {
+    TEST("P3：生成服务字段（chatBaseUrl/chatModel）落盘往返");
+    const std::string path = "build/test_p3_chat_fields.json";
+    config::AppSettings w;
+    w.chatBaseUrl = "https://llm.example.com";
+    w.chatModel = "my-custom-model";
+    CHECK(config::AppSettings::save(path, w));
+
+    config::AppSettings r;
+    CHECK(config::AppSettings::load(path, r));
+    CHECK(r.chatBaseUrl == "https://llm.example.com");
+    CHECK(r.chatModel == "my-custom-model");
+    std::remove(path.c_str());
+    PASS();
+}
+
+void test_p3_data_file_exe_dir_migration() {
+    TEST("P3：数据文件解析到 exe 目录 + 旧文件自动迁移");
+    // 1) 默认解析落在 exe 目录（build/），而非工作目录
+    const std::string resolved = config::dataFilePath("p3_probe_migrate.dat");
+    CHECK(resolved.find("build") != std::string::npos);
+
+    // 2) 工作目录放一个"旧文件"→ 下次解析自动搬移到 exe 目录
+    const std::string legacy = "p3_probe_migrate.dat";
+    {
+        std::ofstream f(legacy, std::ios::binary);
+        f << "legacy-data";
+    }
+    const std::string resolved2 = config::dataFilePath("p3_probe_migrate.dat");
+    CHECK(resolved2 == resolved);
+    CHECK(QFile::exists(QString::fromStdString(resolved2)));
+    CHECK(!QFile::exists(QString::fromStdString(legacy)));   // 旧文件已被搬走
+    CHECK(QFile::remove(QString::fromStdString(resolved2)));
     PASS();
 }
 
@@ -2800,6 +2881,11 @@ void run_all_tests() {
     test_p2_embed_batch_reorder();
     test_p2_vector_full_link();
     test_p2_aggregate_and_court_level();
+
+    std::cout << "\n── P3：配置合一与工程卫生 ──" << std::endl;
+    test_p3_settings_sanitize();
+    test_p3_settings_chat_fields_roundtrip();
+    test_p3_data_file_exe_dir_migration();
 
     std::cout << "\n── T5: 段落角色标注 ──" << std::endl;
     test_t5_role_annotation_basic();

@@ -1,40 +1,31 @@
 #pragma once
 #include <string>
-#include <cstdint>
 
 namespace config {
 
-// ── AI API 配置 ──
-constexpr const char* AI_API_BASE_URL = "https://api.deepseek.com";
+// ── 仍被引用的常量（P3 清理：9 个无引用死常量已删除，检索参数以
+//    AppSettings::defaults() 为唯一事实来源，见 include/config/app_settings.h）──
+
+/// LLM API Key 的环境变量名（检索页启动加载用）
 constexpr const char* AI_API_KEY_ENV = "DEEPSEEK_API_KEY";
-constexpr const char* CHAT_MODEL = "deepseek-chat";
-constexpr const char* EMBEDDING_MODEL = "text-embedding-3-small";  // or use DeepSeek embedding
 
-// ── 检索配置 ──
-constexpr int DEFAULT_TOP_K = 5;
-constexpr int MAX_CHUNK_SIZE = 512;      // 每个文本块最大字符数
-constexpr int CHUNK_OVERLAP = 50;        // 文本块重叠字符数
-constexpr double BM25_WEIGHT = 0.4;      // BM25 权重
-constexpr double VECTOR_WEIGHT = 0.6;    // 向量检索权重
+// ── 数据文件名（P3 起存放于 **exe 所在目录**，经 dataFilePath() 解析）──
 
-// ── 数据库配置 ──
-constexpr const char* DB_PATH = "rag_index.db";
-
-// ── 索引持久化（T1）──
-// 落盘文件默认位于程序工作目录；关闭程序时写出，启动时自动恢复，
-// 免去每次重开都要重新导入语料。
+/// 索引落盘文件（T1）：关闭程序时写出，启动时自动恢复
 constexpr const char* INDEX_FILE = "rag_index.dat";
 
-// ── 问答历史持久化（T2）──
-// SQLite 库文件，同样位于工作目录；与 rag_index.dat 同属运行期产物，不入库。
+/// 问答历史 SQLite 库（T2）：运行期产物，不入库
 constexpr const char* HISTORY_DB = "rag_history.db";
 
-// ── 检索参数配置文件（T3）──
-// JSON 格式，位于工作目录；可手工编辑，字段缺失/损坏一律回落默认值。
-// 因可含 API Key，绝不入库（.gitignore）。
+/// 检索参数配置（T3）：JSON 可手工编辑；因可含 API Key，绝不入库
 constexpr const char* SETTINGS_FILE = "rag_settings.json";
 
-// ── 请求超时 (秒) ──
+/// 请求超时（秒）：embedding 1x，LLM 2x（流式）
 constexpr int HTTP_TIMEOUT = 30;
+
+/// 数据文件路径解析（P3 决策 ③：exe 所在目录）。
+/// 整个程序目录拷走即带走全部数据，答辩/换机演示不依赖工作目录。
+/// 首次解析时若 exe 目录缺该文件而**工作目录**存在旧文件，自动搬移（一次性迁移）。
+std::string dataFilePath(const char* fileName);
 
 } // namespace config

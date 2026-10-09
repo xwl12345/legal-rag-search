@@ -82,6 +82,7 @@ private:
     // P2：网络出口可注入；空 = 未注入，generate() 首次使用时懒创建 QtTransport
     std::shared_ptr<IHttpTransport> transport_;
     std::shared_ptr<ITransportHandle> activeHandle_;
+    bool cancelRequested_ = false;   // P3：用户主动停止 → generate 恒抛中断（不伪装成完整回答）
 };
 
 } // namespace rag

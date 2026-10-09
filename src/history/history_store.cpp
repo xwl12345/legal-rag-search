@@ -127,7 +127,7 @@ HistoryStore::HistoryStore(std::string dbPath)
 }
 
 HistoryStore::HistoryStore()
-    : HistoryStore(std::string(config::HISTORY_DB))
+    : HistoryStore(config::dataFilePath(config::HISTORY_DB))
 {
 }
 

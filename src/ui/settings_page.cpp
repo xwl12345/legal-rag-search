@@ -16,11 +16,6 @@
 
 namespace {
 
-/// 给按钮打 role 属性，配色交给全局 QSS 的属性选择器（与 history_page 同款）
-void setButtonRole(QPushButton* button, const char* role) {
-    button->setProperty("role", QString::fromUtf8(role));
-}
-
 /// 统一构造一张参数卡片：card 外框 + cardTitle 标题 + 表单体
 QLayout* makeCard(QWidget* parent, QVBoxLayout* root,
                   const QString& title,
@@ -74,14 +69,11 @@ QLabel* makeHint(QWidget* parent, const QString& text) {
 
 }  // namespace
 
-SettingsPage::SettingsPage(QWidget* parent)
+SettingsPage::SettingsPage(const config::AppSettings& settings, QWidget* parent)
     : QWidget(parent) {
     setupUi();
-
-    // 启动时读一次配置文件；读不到（首次运行 / 文件损坏）就填默认值，
-    // 与 AppSettings::load 的容错约定一致——绝不让表单空着或读到 0。
-    config::AppSettings settings;
-    config::AppSettings::load(config::SETTINGS_FILE, settings);
+    // P3：配置由 MainWindow 注入（组合根已 load 过一次），本页不再自读 JSON——
+    // 消灭"两处加载时序间文件变化则状态分叉"的隐患。
     populate(settings);
 }
 
@@ -145,7 +137,27 @@ void SettingsPage::setupUi() {
         QStringLiteral("已导入文档的块边界在导入时已固定：改小参数不会把现有文本块重新切，")
             + QStringLiteral("只影响之后导入的文档；需要全库生效请清空索引后重新导入。")));
 
-    // ── 卡片三：Embedding 服务 ──
+    // ── 卡片三：生成（LLM）服务（P3 新增；Key 在检索页，此处只配服务）──
+    QFormLayout* formChat = nullptr;
+    makeCard(this, root, QStringLiteral("生成服务（DeepSeek Chat，Key 在检索问答页配置）"), formChat);
+
+    chatUrlEdit_ = new QLineEdit(this);
+    chatUrlEdit_->setObjectName(QStringLiteral("settingsChatUrl"));
+    chatUrlEdit_->setPlaceholderText(QStringLiteral("https://api.deepseek.com"));
+    chatUrlEdit_->setMinimumHeight(32);
+
+    chatModelEdit_ = new QLineEdit(this);
+    chatModelEdit_->setObjectName(QStringLiteral("settingsChatModel"));
+    chatModelEdit_->setPlaceholderText(QStringLiteral("deepseek-chat"));
+    chatModelEdit_->setMinimumHeight(32);
+
+    formChat->addRow(QStringLiteral("服务地址"), chatUrlEdit_);
+    formChat->addRow(QStringLiteral("模型名"), chatModelEdit_);
+    formChat->addRow(makeHint(this,
+        QStringLiteral("模型名随配置保存，下一次生成即生效；OpenAI 兼容端点可换")
+            + QStringLiteral("（服务地址 + 模型名成对修改）。")));
+
+    // ── 卡片四：Embedding 服务 ──
     QFormLayout* form3 = nullptr;
     makeCard(this, root, QStringLiteral("Embedding 服务（检索质量分析 T4 将消费）"), form3);
 
@@ -179,7 +191,7 @@ void SettingsPage::setupUi() {
     defaultsBtn_->setObjectName(QStringLiteral("settingsDefaultsBtn"));
     saveBtn_ = new QPushButton(QStringLiteral("保存并生效"), this);
     saveBtn_->setObjectName(QStringLiteral("settingsSaveBtn"));
-    setButtonRole(saveBtn_, "primary");
+    AppTheme::setButtonRole(saveBtn_, "primary");
     statusLabel_ = new QLabel(this);
     statusLabel_->setObjectName(QStringLiteral("settingsStatus"));
 
@@ -206,6 +218,8 @@ void SettingsPage::populate(const config::AppSettings& s) {
     temperatureSpin_->setValue(s.temperature);
     chunkSizeSpin_->setValue(s.chunkSize);
     chunkOverlapSpin_->setValue(s.chunkOverlap);
+    chatUrlEdit_->setText(QString::fromStdString(s.chatBaseUrl));
+    chatModelEdit_->setText(QString::fromStdString(s.chatModel));
     embedUrlEdit_->setText(QString::fromStdString(s.embeddingBaseUrl));
     embedModelEdit_->setText(QString::fromStdString(s.embeddingModel));
     embedKeyEdit_->setText(QString::fromStdString(s.embeddingApiKey));
@@ -222,6 +236,8 @@ config::AppSettings SettingsPage::valuesFromForm() const {
     s.chunkSize = chunkSizeSpin_->value();
     // 重叠必须小于块长，否则会切出无限循环——这里直接钳住，不留静默坏配置
     s.chunkOverlap = std::min(chunkOverlapSpin_->value(), s.chunkSize - 1);
+    s.chatBaseUrl = chatUrlEdit_->text().trimmed().toStdString();
+    s.chatModel = chatModelEdit_->text().trimmed().toStdString();
     s.embeddingBaseUrl = embedUrlEdit_->text().trimmed().toStdString();
     s.embeddingModel = embedModelEdit_->text().trimmed().toStdString();
     s.embeddingApiKey = embedKeyEdit_->text().toStdString();
@@ -231,7 +247,7 @@ config::AppSettings SettingsPage::valuesFromForm() const {
 void SettingsPage::onSave() {
     const config::AppSettings settings = valuesFromForm();
     std::string error;
-    if (!config::AppSettings::save(config::SETTINGS_FILE, settings, &error)) {
+    if (!config::AppSettings::save(config::dataFilePath(config::SETTINGS_FILE), settings, &error)) {
         statusLabel_->setText(QStringLiteral("保存失败：%1").arg(
             QString::fromStdString(error)));
         return;

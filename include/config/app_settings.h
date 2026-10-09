@@ -41,14 +41,23 @@ struct AppSettings {
     // ── AI 生成参数（查询期）──
     double temperature = 0.3;
 
-    // ── Embedding 服务（T4 消费的预留项）──
+    // ── 生成（LLM）服务（P3：Key 分家后服务分家补齐；Key 归检索页管）──
+    std::string chatBaseUrl = "https://api.deepseek.com";
+    std::string chatModel = "deepseek-chat";
+
+    // ── Embedding 服务（T4 消费）──
     std::string embeddingBaseUrl = "https://api.deepseek.com";
     std::string embeddingModel = "text-embedding-3-small";
     // 留空 = 沿用检索页 / DEEPSEEK_API_KEY 环境变量的既有流程；非空时覆盖。
     std::string embeddingApiKey;
 
-    /// 默认值实例
+    /// 默认值实例（P3 起是全部检索/服务参数的唯一事实来源）
     static AppSettings defaults();
+
+    /// 字段钳制（P3）：数值越界/NaN 回落默认，融合权重非负且重归一化，
+    /// chunkOverlap < chunkSize，服务地址/模型空串回落默认。
+    /// load() 与 save() 内部统一调用——两条路径一套钳制，别处不再各写一遍。
+    void sanitize();
 
     /// 从 JSON 文件加载。文件不存在 / 解析失败返回 false（out 保持默认值）；
     /// 单个字段缺失或类型不对时该字段回落默认，其余字段照常生效。

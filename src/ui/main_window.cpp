@@ -174,7 +174,7 @@ void MainWindow::buildPages() {
     // ── 第 5 页：设置（T3）──
     // 插件式接入：本页只读写配置层，不碰 Retriever——保存后发 settingsChanged，
     // 由本窗口中转给引擎（热更新）与检索页（检索宽度/温度），两页互不引用。
-    settingsPage_ = new SettingsPage(pageStack_);
+    settingsPage_ = new SettingsPage(appSettings_, pageStack_);   // P3：注入启动配置
     pageStack_->addWidget(settingsPage_);
     connect(settingsPage_, &SettingsPage::settingsChanged,
             this, &MainWindow::onSettingsChanged);
@@ -325,7 +325,7 @@ void MainWindow::onAnswerRecorded(const history::HistoryRecord& record) {
 // ── T3 配置中心 ──
 
 void MainWindow::loadSettingsAndApply() {
-    const bool loaded = config::AppSettings::load(config::SETTINGS_FILE, appSettings_);
+    const bool loaded = config::AppSettings::load(config::dataFilePath(config::SETTINGS_FILE), appSettings_);
     if (!loaded) {
         // 首次运行（文件不存在）或配置被改坏：静默用默认值，不打扰启动流程。
         // AppSettings::load 已保证 out 处于默认值状态，不读到 0。

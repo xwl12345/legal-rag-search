@@ -7,3 +7,7 @@ set DEEPSEEK_API_KEY=请填写你的API Key
 
 cd /d "%~dp0build"
 start "" "legal_rag_search.exe"
+
+REM P3 起数据文件（rag_index.dat / rag_history.db / rag_settings.json）
+REM 一律存放在 exe 所在目录（build/），整个 build 文件夹拷走即带走全部数据。
+REM 首次运行会自动把工作目录下的旧数据文件搬移到 exe 目录。

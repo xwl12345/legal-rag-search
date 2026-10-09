@@ -23,7 +23,9 @@ class SettingsPage : public QWidget {
     Q_OBJECT
 
 public:
-    explicit SettingsPage(QWidget* parent = nullptr);
+    /// @param settings 启动配置（P3：由 MainWindow 注入，本页不再自读 JSON 文件——
+    ///                 消灭同一文件双 load 的状态分叉隐患）
+    explicit SettingsPage(const config::AppSettings& settings, QWidget* parent = nullptr);
 
     /// 把一组配置回填进表单（启动时 / 恢复默认后）
     void populate(const config::AppSettings& settings);
@@ -52,6 +54,10 @@ private:
     // ── 分块参数（仅对之后导入的文档生效）──
     QSpinBox* chunkSizeSpin_ = nullptr;
     QSpinBox* chunkOverlapSpin_ = nullptr;
+
+    // ── 生成（LLM）服务（P3：与 Embedding 卡片并列；Key 归检索页管）──
+    QLineEdit* chatUrlEdit_ = nullptr;
+    QLineEdit* chatModelEdit_ = nullptr;
 
     // ── Embedding 服务（T4 消费预留）──
     QLineEdit* embedUrlEdit_ = nullptr;

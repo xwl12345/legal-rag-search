@@ -155,6 +155,8 @@ void EngineWorker::applySettings(config::AppSettings settings) {
                                settings.bm25Weight, settings.vectorWeight);
     retriever_.setChunkParams(settings.chunkSize, settings.chunkOverlap);
     retriever_.setEmbeddingEndpoint(settings.embeddingBaseUrl, settings.embeddingModel);
+    // P3：生成服务与 Embedding 分家后的另一半——chat 端点/模型随配置热更新
+    generator_.setEndpoint(settings.chatBaseUrl, settings.chatModel);
     if (!settings.embeddingApiKey.empty()) {
         retriever_.setApiKey(settings.embeddingApiKey);
     }
