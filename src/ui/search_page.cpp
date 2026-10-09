@@ -26,13 +26,9 @@
 #include <unordered_set>
 
 #include "ui/app_theme.h"
+#include "config/app_config.h"
 
 namespace {
-
-/// 给按钮打 role 属性，具体配色由 QSS 的属性选择器负责。
-void setButtonRole(QPushButton* button, const char* role) {
-    button->setProperty("role", QString::fromUtf8(role));
-}
 
 /// 结果倾向下拉项的显示文案（Unknown 显示"全部"以外的"—"，不显示空洞）
 QString tendencyFilterText(document::ResultTendency tendency) {
@@ -91,14 +87,14 @@ void SearchPage::setupUi() {
 
     searchBtn_ = new QPushButton(QStringLiteral("检 索"), this);
     searchBtn_->setObjectName(QStringLiteral("searchBtn"));
-    setButtonRole(searchBtn_, "primary");
+    AppTheme::setButtonRole(searchBtn_, "primary");
     searchBtn_->setMinimumHeight(46);
     searchBtn_->setMinimumWidth(112);
 
     // P1：生成中的「停止」按钮（默认隐藏；点击请求引擎线程中断当前生成）
     stopGenBtn_ = new QPushButton(QStringLiteral("■ 停止"), this);
     stopGenBtn_->setObjectName(QStringLiteral("stopGenBtn"));
-    setButtonRole(stopGenBtn_, "danger");
+    AppTheme::setButtonRole(stopGenBtn_, "danger");
     stopGenBtn_->setMinimumHeight(46);
     stopGenBtn_->setVisible(false);
 
@@ -207,11 +203,11 @@ void SearchPage::setupUi() {
 
     importBtn_ = new QPushButton(QStringLiteral("＋ 导入文档"), this);
     importBtn_->setObjectName(QStringLiteral("importBtn"));
-    setButtonRole(importBtn_, "primary");
+    AppTheme::setButtonRole(importBtn_, "primary");
 
     clearBtn_ = new QPushButton(QStringLiteral("清空索引"), this);
     clearBtn_->setObjectName(QStringLiteral("clearBtn"));
-    setButtonRole(clearBtn_, "danger");
+    AppTheme::setButtonRole(clearBtn_, "danger");
 
     statusLabel_ = new QLabel(QStringLiteral("就绪，请先导入文档"), this);
     statusLabel_->setObjectName(QStringLiteral("hint"));
@@ -320,7 +316,7 @@ void SearchPage::emitEngineStats() {
 // P1 起 Key 的实际生效点在 EngineWorker：本页存副本 + 发 llmApiKeyChanged，
 // 初始 Key 由 MainWindow 接线完成后主动推送一次（构造期信号还没接线，发不得）。
 void SearchPage::loadApiKey() {
-    const char* key = std::getenv("DEEPSEEK_API_KEY");
+    const char* key = std::getenv(config::AI_API_KEY_ENV);
     if (key && std::strlen(key) > 0) {
         llmKey_ = QString::fromStdString(key);
         apiKeyInput_->setText(llmKey_);

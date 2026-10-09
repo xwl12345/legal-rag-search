@@ -157,7 +157,11 @@ std::vector<std::string> Tokenizer::cutForIndex(const std::string& text) {
     std::vector<std::string> raw;
     impl_->cut(text, raw);
 
-    // 过滤停用词、单字、纯数字、纯标点
+    // 过滤停用词、纯数字、过短英文词。
+    // ⚠️ 如实说明（决策 ②，2026-10-06 拍板）：下方 size()<3 的本意是滤掉单字，
+    // 但单个汉字在 UTF-8 中恰为 3 字节，等于 3 不满足 <3——所以**单个汉字并未
+    // 被过滤**，会进入倒排索引（仅停用词表兜底）。经评测权衡，维持现状不改行为：
+    // 改动会波及 BM25 指标与论文数字；如需真过滤，作为远期任务重跑评测后再上。
     std::vector<std::string> filtered;
     for (auto& w : raw) {
         if (w.empty()) continue;
@@ -171,9 +175,8 @@ std::vector<std::string> Tokenizer::cutForIndex(const std::string& text) {
 
         if (stopWords_.count(w)) continue;
 
-        // 过滤单字
-        // 注意：中文字符占 3 个字节（UTF-8），英文单个字母占 1 个字节
-        // 这里简单判断：UTF-8 中文字符长度 ≥ 3
+        // 过滤过短 token（注意：单汉字 3 字节不满足 <3，见函数头注释——
+        // 实际生效的是滤掉单字节英文单字母与 2 字节残片）
         if (w.size() < 3) {
             // 可能是英文单词
             bool allAscii = true;

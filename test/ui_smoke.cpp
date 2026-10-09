@@ -30,6 +30,7 @@
 #include <QMouseEvent>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
@@ -121,6 +122,16 @@ QStringList collectCorpus(const QString& dirPath) {
     return files;
 }
 
+/// P3-5.2：疑似副本检测（Windows 复制粘贴「 - 副本 / - Copy」、拖拽「(1)」等后缀）。
+/// 历史事故：语料目录混入副本后，按 21 篇等值断言的用例被破坏。
+/// 现导入断言改为 ≥21 下限，副本只告警不判失败，便于人工清理。
+bool looksLikeDuplicate(const QString& fileName) {
+    static const QRegularExpression dupPattern(
+        QStringLiteral("( - 副本| - copy|\\(\\d+\\))\\.(txt|md|pdf)$"),
+        QRegularExpression::CaseInsensitiveOption);
+    return dupPattern.match(fileName).hasMatch();
+}
+
 int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) {
     SearchPage* page = window.findChild<SearchPage*>();
     QListWidget* resultList = window.findChild<QListWidget*>("resultList");
@@ -149,13 +160,26 @@ int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) 
         return g_failures;
     }
 
+    // P3-5.2：疑似副本只告警不判失败（导入断言按 ≥21 下限执行）
+    QStringList duplicates;
+    for (const QString& f : corpus) {
+        if (looksLikeDuplicate(QFileInfo(f).fileName())) {
+            duplicates << QFileInfo(f).fileName();
+        }
+    }
+    if (!duplicates.isEmpty()) {
+        qInfo().noquote() << QStringLiteral("         ⚠ 语料目录含 %1 个疑似副本：%2（建议清理后重跑）")
+                                 .arg(duplicates.size())
+                                 .arg(duplicates.join(QStringLiteral("、")));
+    }
+
     // ── 1. 导入 ──
     QElapsedTimer timer;
     timer.start();
     page->importPaths(corpus);
     waitUntil([&] { return !page->isBusy(); });   // P1：导入在引擎线程异步执行
     const qint64 importMs = timer.elapsed();
-    check(lastDocs == corpus.size() && lastChunks > 0, QStringLiteral("导入索引"),
+    check(lastDocs >= 21 && lastChunks > 0, QStringLiteral("导入索引"),
           QStringLiteral("%1 文档 / %2 文本块 / %3 ms")
               .arg(lastDocs).arg(lastChunks).arg(importMs));
 
@@ -240,9 +264,11 @@ int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) 
     const int opinionCount = resultList->count();
     bool allOpinion = opinionCount > 0;
     for (int i = 0; i < opinionCount; ++i) {
-        // 标签按位组合：跨段块显示「本院认为|判决」，同样以 [本院认为 开头
+        // 位过滤不变式：保留块必持法院认定位。跨段块标签可为
+        // 「本院认为|判决」「诉称|本院认为」等组合，因此匹配子串"本院认为"
+        // 而非前缀"[本院认为"（P3 冒烟发现：检索宽度变化会让跨段块进前列）
         allOpinion = allOpinion
-            && resultList->item(i)->text().contains(QStringLiteral("[本院认为"));
+            && resultList->item(i)->text().contains(QStringLiteral("本院认为"));
     }
     check(allOpinion, QStringLiteral("T5：只看本院认为过滤生效（结果全为法院认定块）"),
           QStringLiteral("%1 条").arg(opinionCount));
@@ -344,7 +370,7 @@ int runLibraryE2E(MainWindow& window, const QString& corpusDir, const QString& o
 /// rag_index.dat），这里不做路径注入——真实验证的就是上线那条代码路径。
 /// 跑完把文件删掉，避免污染工作目录。
 int runPersistenceE2E(const QString& corpusDir, const QString& outDir) {
-    const QString indexPath = QStringLiteral("rag_index.dat");
+    const QString indexPath = QString::fromStdString(config::dataFilePath(config::INDEX_FILE));   // P3：exe 目录
 
     // 先清掉可能存在的旧索引，保证"会话 1 从空库起"这个前提成立
     QFile::remove(indexPath);
@@ -435,7 +461,7 @@ int runPersistenceE2E(const QString& corpusDir, const QString& outDir) {
 /// 于是上一轮残留的记录会被下一轮读进来，整套断言级联假失败。
 /// 用行级清理则不依赖文件系统状态，连跑多少次都从 0 条起步。
 int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
-    const QString dbPath = QStringLiteral("rag_history.db");
+    const QString dbPath = QString::fromStdString(config::dataFilePath(config::HISTORY_DB));   // P3：exe 目录
 
     const QString exportPath = outDir + QStringLiteral("/11-history-export.md");
     QFile::remove(exportPath);
@@ -552,10 +578,11 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
               QStringLiteral("真实生成后历史列表自动出现记录（无需手动刷新）"),
               QStringLiteral("%1 行").arg(historyPage->rowCount()));
 
-        // 回合 2：中断——fake 挂起不收场 → 点「■ 停止」→ 残卷带 interrupted 落库。
-        // 换一个不同查询，保证关键词阶段「交付凭证」只命中回合 1。
+        // 回合 2：中断——fake 先吐一段再挂起（非空残卷）→ 点「■ 停止」→
+        // interrupted 落库。换一个不同查询，保证关键词阶段「交付凭证」只命中回合 1。
+        // 注：纯挂起不吐字会被 T2「空回合不入库」规则正确跳过，故必须先给一段。
         searchInput->setText(QStringLiteral("劳动争议 仲裁时效"));
-        g_fakeTransport->setHangNext(true);
+        g_fakeTransport->setHangAfterChunks(1);
         searchBtn->click();
         pump(500);   // 等检索完成并进入生成阶段（生成已被 fake 挂起）
         check(searchPage->isBusy(), QStringLiteral("P2：挂起的生成保持忙碌态"));
@@ -592,8 +619,9 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
                   QStringLiteral("完整回合回答来自真实 SSE 流"));
         }
 
-        // ── 关键词搜索 ──
-        keyword->setText(QStringLiteral("交付凭证"));
+        // ── 关键词搜索（命中回合 1 的查询；round 2 残卷恰好含「交付凭证」，
+        //    故选只出现在回合 1 查询里的「民间借贷」）──
+        keyword->setText(QStringLiteral("民间借贷"));
         QApplication::processEvents();
         check(historyPage->rowCount() == 1, QStringLiteral("关键词搜索命中"),
               QStringLiteral("%1 行").arg(historyPage->rowCount()));
@@ -723,7 +751,7 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
 /// P0-7 同名异路径覆盖确认 E2E：同路径更新静默放行；异路径同名经确认钩子
 /// 完成 覆盖 / 跳过 / 取消 三种选择，引擎内容与之一致。
 int runOverwriteE2E() {
-    QFile::remove(QStringLiteral("rag_index.dat"));
+    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
 
     // ── 准备三个目录下的同名文件（内容互不相同，各带独有标记词）──
     struct FileSpec { QString dir; QString marker; };
@@ -840,7 +868,7 @@ int runOverwriteE2E() {
     QApplication::processEvents();
 
     // 收尾：清掉本组写出的索引与临时文件
-    QFile::remove(QStringLiteral("rag_index.dat"));
+    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
     for (const auto& spec : specs) {
         QDir(QDir::current().absoluteFilePath(spec.dir)).removeRecursively();
     }
@@ -877,7 +905,7 @@ double firstRelevance(QListWidget* resultList, QString* debugText = nullptr) {
 }
 
 int runSettingsE2E(const QString& corpusDir) {
-    const QString settingsPath = QStringLiteral("rag_settings.json");
+    const QString settingsPath = QString::fromStdString(config::dataFilePath(config::SETTINGS_FILE));   // P3：exe 目录
     const QString backupPath = settingsPath + QStringLiteral(".e2e_backup");
     // T4：rag_settings.json 现在含用户真实 Key，绝不能删——先备份，跑完还原。
     // 工作文件照旧删除（保证从默认值起步的断言语义不变），用户数据零风险。
@@ -1024,7 +1052,7 @@ int runSettingsE2E(const QString& corpusDir) {
 /// （向量列非空即过），批量评测不做数值断言——避免消耗大量代金券。
 int runQualityE2E(const QString& corpusDir) {
     // 起步清掉工作目录残留索引，保证从语料全量导入（此刻无窗口持有该文件，安全）
-    QFile::remove(QStringLiteral("rag_index.dat"));
+    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
 
     MainWindow window;
     window.resize(1180, 760);
@@ -1146,7 +1174,7 @@ int runQualityE2E(const QString& corpusDir) {
     window.grab().save(QStringLiteral("docs/screenshots/14-quality-page.png"));
 
     // 收尾：不留测试期间写出的索引
-    QFile::remove(QStringLiteral("rag_index.dat"));
+    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
     return g_failures;
 }
 
@@ -1175,6 +1203,20 @@ int main(int argc, char* argv[]) {
     }
     const QString outDirPath = args.value(0);
     const QString scaleTag = args.value(1, QStringLiteral("1x"));
+
+    // P3：用户设置全局隔离——各分组必须在默认参数下运行（迁移进 build/ 的
+    // 开发者配置若带 Embedding Key 会意外激活向量路，吞掉 fake 的挂起标记）。
+    // 设置组自带备份/还原逻辑，但其余分组没有；统一在套件层处理。
+    const QString userSettingsPath =
+        QString::fromStdString(config::dataFilePath(config::SETTINGS_FILE));
+    const QString userSettingsBackup = userSettingsPath + QStringLiteral(".suite_backup");
+    const bool hadUserSettings = QFile::exists(userSettingsPath);
+    if (hadUserSettings) {
+        QFile::remove(userSettingsBackup);
+        check(QFile::copy(userSettingsPath, userSettingsBackup),
+              QStringLiteral("套件级：用户配置已备份"));
+        QFile::remove(userSettingsPath);
+    }
 
     if (!QDir().mkpath(outDirPath)) {
         qCritical() << "cannot create output dir:" << outDirPath;
@@ -1236,6 +1278,13 @@ int main(int argc, char* argv[]) {
 
         qInfo().noquote() << QStringLiteral("── P0 同名覆盖确认 E2E（覆盖 / 跳过 / 取消 + 内容一致）──");
         runOverwriteE2E();
+    }
+
+    // 套件级收尾：还原用户配置
+    if (hadUserSettings) {
+        QFile::remove(userSettingsPath);
+        QFile::copy(userSettingsBackup, userSettingsPath);
+        QFile::remove(userSettingsBackup);
     }
 
     qInfo().noquote() << (g_failures == 0

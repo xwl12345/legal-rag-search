@@ -2,6 +2,7 @@
 #include <QString>
 
 class QLabel;
+class QPushButton;
 
 /// 全局视觉主题入口（藏青 #14213D + 铜金 #B7791F）。
 ///
@@ -21,4 +22,8 @@ public:
 
     /// 给状态标签打 ok / error 标记，实际配色由 QSS 的属性选择器负责
     static void setStatusFlag(QLabel* label, bool ok);
+
+    /// 给按钮打 role 属性（primary / danger 等），配色由 QSS 属性选择器负责。
+    /// P3 收敛：此前本函数在 5 个页面文件里逐字重复。
+    static void setButtonRole(QPushButton* button, const char* role);
 };

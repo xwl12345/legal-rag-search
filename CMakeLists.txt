@@ -60,9 +60,10 @@ set(SRC_STORE
     src/history/history_store.cpp
 )
 
-# 配置层（T3：检索参数配置中心；只依赖 QtCore，测试目标复用）
+# 配置层（T3：检索参数配置中心 + P3 数据文件路径解析；只依赖 QtCore，测试目标复用）
 set(SRC_CONFIG
     src/config/app_settings.cpp
+    src/config/data_paths.cpp
 )
 
 # Qt UI 层（T0 起统一由此三块组成：主题 / 组件 / 页面；P1 增引擎线程宿主）
@@ -91,6 +92,8 @@ set(SOURCES
 set(HEADERS
     include/document/parser.h
     include/document/tokenizer.h
+    include/document/metadata.h
+    include/document/pdf_extractor.h
     include/document/ocr_client.h
     include/index/inverted_index.h
     include/index/bm25_ranker.h
@@ -99,6 +102,8 @@ set(HEADERS
     include/vector/similarity.h
     include/rag/retriever.h
     include/rag/generator.h
+    include/rag/eval_metrics.h
+    include/rag/golden_queries.h
     include/net/transport.h
     include/net/qt_transport.h
     include/ui/main_window.h
@@ -204,20 +209,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 # Focused regression for UTF-8 chunk boundaries and legal location queries.
+# P3：源列表统一复用 SRC_ENGINE（此前手抄 5 份，新增文件要改 5 处）
 add_executable(test_utf8_location_regression
     test/test_utf8_location_regression.cpp
-    src/document/parser.cpp
-    src/document/tokenizer.cpp
-    src/document/pdf_extractor.cpp
-    src/document/ocr_client.cpp
-    src/document/metadata.cpp
-    src/index/inverted_index.cpp
-    src/index/bm25_ranker.cpp
-    src/index/index_store.cpp
-    src/vector/embedding.cpp
-    src/vector/similarity.cpp
-    src/rag/retriever.cpp
-    src/net/qt_transport.cpp
+    ${SRC_ENGINE}
+    ${SRC_CONFIG}
 )
 target_include_directories(test_utf8_location_regression PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -242,21 +238,7 @@ endif()
 # ── Unit tests ──
 set(TEST_SOURCES
     test/test_main.cpp
-
-    # Reuse core sources (without main + UI)
-    src/document/parser.cpp
-    src/document/tokenizer.cpp
-    src/document/pdf_extractor.cpp
-    src/document/ocr_client.cpp
-    src/document/metadata.cpp
-    src/index/inverted_index.cpp
-    src/index/bm25_ranker.cpp
-    src/index/index_store.cpp
-    src/vector/embedding.cpp
-    src/vector/similarity.cpp
-    src/rag/retriever.cpp
-    src/rag/generator.cpp
-    src/net/qt_transport.cpp
+    ${SRC_ENGINE}      # P3：与主程序同源复用（无 main + 无 UI）
     ${SRC_STORE}
     ${SRC_CONFIG}
 )
@@ -286,19 +268,8 @@ endif()
 
 # ── 检索质量量化评测 ──
 add_executable(eval_retrieval test/eval_retrieval.cpp
-    src/config/app_settings.cpp
-    src/document/parser.cpp
-    src/document/tokenizer.cpp
-    src/document/pdf_extractor.cpp
-    src/document/ocr_client.cpp
-    src/document/metadata.cpp
-    src/index/inverted_index.cpp
-    src/index/bm25_ranker.cpp
-    src/index/index_store.cpp
-    src/vector/embedding.cpp
-    src/vector/similarity.cpp
-    src/rag/retriever.cpp
-    src/net/qt_transport.cpp
+    ${SRC_ENGINE}
+    ${SRC_CONFIG}
 )
 target_include_directories(eval_retrieval PRIVATE
     ${CMAKE_SOURCE_DIR}/include

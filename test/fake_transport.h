@@ -44,6 +44,9 @@ public:
     }
     void setResponder(Responder r) { responder_ = std::move(r); }
     void setHangNext(bool h) { hangNext_ = h; }
+    /// 应答器模式下：下一次 post 先投递前 n 个分片，然后**不带结束帧**挂起
+    /// （模拟"吐了一段就卡住"，供「■ 停止」中断测试构造非空残卷）
+    void setHangAfterChunks(int n) { hangAfter_ = n; }
 
     // ── IHttpTransport ──
     std::shared_ptr<ITransportHandle> post(
@@ -65,10 +68,17 @@ public:
             hangNext_ = false;   // 不投递、不收场：挂起直到 cancel()
         } else if (responder_) {
             const Reply r = responder_(url, body);
-            for (const auto& c : r.chunks) {
-                pending->steps.push_back(Step{c, nullptr});
+            const int deliverAll = (hangAfter_ >= 0)
+                ? std::min<int>(hangAfter_, static_cast<int>(r.chunks.size()))
+                : static_cast<int>(r.chunks.size());
+            for (int i = 0; i < deliverAll; ++i) {
+                pending->steps.push_back(Step{r.chunks[i], nullptr});
             }
-            pending->steps.push_back(Step{{}, std::make_shared<Finish>(r.finish)});
+            if (hangAfter_ < 0) {
+                pending->steps.push_back(Step{{}, std::make_shared<Finish>(r.finish)});
+            } else {
+                hangAfter_ = -1;   // 消费一次：分片投完即挂起（无结束帧）
+            }
         } else {
             pending->steps = steps_;
             steps_.clear();
@@ -156,4 +166,5 @@ private:
     std::deque<Step> steps_;
     Responder responder_;
     bool hangNext_ = false;
+    int hangAfter_ = -1;   // >=0：应答器模式下先投 n 段再挂起（消费一次）
 };

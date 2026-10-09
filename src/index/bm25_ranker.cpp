@@ -20,6 +20,11 @@ std::vector<RankedResult> BM25Ranker::search(
     // 计算所有相关文档的 BM25 分数
     std::unordered_map<std::string, double> scores;  // docKey → score
 
+    // P3 性能修复（体检 #15）：avgDocLength() 本身要遍历全部 docLengths_，
+    // 原先写在内层 posting 循环里是 O(命中数 × 文档数)。它对固定索引是常量，
+    // 提出来一次计算即可。
+    const double avgdl = index.avgDocLength();
+
     for (const auto& term : queryTerms) {
         const auto* postings = index.getPostings(term);
         if (!postings) continue;
@@ -32,7 +37,6 @@ std::vector<RankedResult> BM25Ranker::search(
         for (const auto& posting : *postings) {
             std::string docKey = posting.docId + ":" + std::to_string(posting.chunkIndex);
             int dl = index.docLength(posting.docId, posting.chunkIndex);
-            double avgdl = index.avgDocLength();
 
             double tfComponent =
                 (posting.termFreq * (k1_ + 1.0)) /

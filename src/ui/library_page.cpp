@@ -18,11 +18,6 @@
 
 namespace {
 
-/// 给按钮打 role 属性，配色交给全局 QSS 的属性选择器
-void setButtonRole(QPushButton* button, const char* role) {
-    button->setProperty("role", QString::fromUtf8(role));
-}
-
 /// 字节数可读化（1.2 KB / 3.4 MB）
 QString humanBytes(std::uint64_t bytes) {
     if (bytes < 1024) {
@@ -86,11 +81,11 @@ void LibraryPage::setupUi() {
 
     removeBtn_ = new QPushButton(QStringLiteral("删除选中"), this);
     removeBtn_->setObjectName(QStringLiteral("libraryRemoveBtn"));
-    setButtonRole(removeBtn_, "danger");
+    AppTheme::setButtonRole(removeBtn_, "danger");
 
     clearBtn_ = new QPushButton(QStringLiteral("清空重建"), this);
     clearBtn_->setObjectName(QStringLiteral("libraryClearBtn"));
-    setButtonRole(clearBtn_, "danger");
+    AppTheme::setButtonRole(clearBtn_, "danger");
 
     summary_ = new QLabel(this);
     summary_->setObjectName(QStringLiteral("hint"));

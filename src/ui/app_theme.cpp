@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFont>
 #include <QLabel>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QStyle>
 
@@ -63,6 +64,12 @@ void AppTheme::apply(int scalePercent) {
 
     // ── 全项目唯一的 setStyleSheet 调用点 ──
     qApp->setStyleSheet(scaledSource(scalePercent));
+}
+
+void AppTheme::setButtonRole(QPushButton* button, const char* role) {
+    if (button) {
+        button->setProperty("role", QString::fromUtf8(role));
+    }
 }
 
 void AppTheme::setStatusFlag(QLabel* label, bool ok) {

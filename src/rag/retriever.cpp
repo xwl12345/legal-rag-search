@@ -613,9 +613,16 @@ std::string Retriever::buildContext(const std::vector<SearchResult>& results,
         const auto& r = results[i];
         std::string snippet = r.content;
 
-        // 截断过长的内容（粗略按字符数估计 token）
+        // 截断过长的内容（粗略按字节数估计 token；P3：回退到 UTF-8 边界，
+        // 不把多字节汉字切一半——切半的字节会让 prompt 尾部变成替换符乱码）
         if (totalChars + static_cast<int>(snippet.size()) > maxTokens * 4) {
-            snippet = snippet.substr(0, maxTokens * 4 - totalChars) + "...";
+            size_t cut = static_cast<size_t>(maxTokens * 4 - totalChars);
+            cut = std::min(cut, snippet.size());
+            while (cut > 0 &&
+                   (static_cast<unsigned char>(snippet[cut]) & 0xC0) == 0x80) {
+                --cut;   // 停在 UTF-8 首字节上（切点落在连续字节中间则回退）
+            }
+            snippet = snippet.substr(0, cut) + "...";
         }
 
         oss << "【来源 " << (i + 1) << "】" << r.docId

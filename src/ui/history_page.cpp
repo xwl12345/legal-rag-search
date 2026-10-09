@@ -1,4 +1,5 @@
 #include "ui/history_page.h"
+#include "ui/app_theme.h"
 
 #include <QAbstractItemView>
 #include <QDateTime>
@@ -18,11 +19,6 @@
 #include "history/history_store.h"
 
 namespace {
-
-/// 给按钮打 role 属性，配色交给全局 QSS 的属性选择器
-void setButtonRole(QPushButton* button, const char* role) {
-    button->setProperty("role", QString::fromUtf8(role));
-}
 
 /// 详情页里列的片段预览长度（超出折叠，避免右侧被长文本撑爆）
 constexpr int kMaxSnippetChars = 160;
@@ -88,15 +84,15 @@ void HistoryPage::setupUi() {
 
     exportBtn_ = new QPushButton(QStringLiteral("导出 Markdown"), this);
     exportBtn_->setObjectName(QStringLiteral("historyExportBtn"));
-    setButtonRole(exportBtn_, "primary");
+    AppTheme::setButtonRole(exportBtn_, "primary");
 
     removeBtn_ = new QPushButton(QStringLiteral("删除选中"), this);
     removeBtn_->setObjectName(QStringLiteral("historyRemoveBtn"));
-    setButtonRole(removeBtn_, "danger");
+    AppTheme::setButtonRole(removeBtn_, "danger");
 
     clearBtn_ = new QPushButton(QStringLiteral("清空历史"), this);
     clearBtn_->setObjectName(QStringLiteral("historyClearBtn"));
-    setButtonRole(clearBtn_, "danger");
+    AppTheme::setButtonRole(clearBtn_, "danger");
 
     refreshBtn_ = new QPushButton(QStringLiteral("刷新"), this);
     refreshBtn_->setObjectName(QStringLiteral("historyRefreshBtn"));
