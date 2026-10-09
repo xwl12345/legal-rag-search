@@ -1,4 +1,5 @@
 #include "ui/quality_page.h"
+#include "ui/app_theme.h"
 
 #include "rag/retriever.h"
 #include "rag/golden_queries.h"
@@ -17,11 +18,6 @@
 #include <algorithm>
 
 namespace {
-
-/// 给按钮打 role 属性，配色交给全局 QSS 的属性选择器（与设置页同款）
-void setButtonRole(QPushButton* button, const char* role) {
-    button->setProperty("role", QString::fromUtf8(role));
-}
 
 /// 构造一张卡片：card 外框 + cardTitle 标题，返回卡片内部布局
 QVBoxLayout* makeCard(QWidget* parent, QVBoxLayout* root, const QString& title) {
@@ -76,7 +72,7 @@ void QualityPage::setupUi() {
         queryInput_->setMinimumHeight(34);
         compareBtn_ = new QPushButton(QStringLiteral("对比检索"), this);
         compareBtn_->setObjectName(QStringLiteral("qualityRunBtn"));
-        setButtonRole(compareBtn_, "primary");
+        AppTheme::setButtonRole(compareBtn_, "primary");
         compareBtn_->setMinimumHeight(34);
         row->addWidget(queryInput_, 1);
         row->addWidget(compareBtn_);
@@ -122,7 +118,7 @@ void QualityPage::setupUi() {
         row->setSpacing(10);
         evalBtn_ = new QPushButton(QStringLiteral("批量评测"), this);
         evalBtn_->setObjectName(QStringLiteral("qualityEvalBtn"));
-        setButtonRole(evalBtn_, "primary");
+        AppTheme::setButtonRole(evalBtn_, "primary");
         evalBtn_->setMinimumHeight(34);
         row->addWidget(evalBtn_);
         row->addStretch(1);
