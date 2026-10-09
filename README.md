@@ -1,272 +1,200 @@
 # ⚖️ Legal RAG Search — 法律文档智能检索引擎
 
-基于 **BM25 + 向量语义** 混合检索的法律文档智能搜索引擎，集成 **DeepSeek 大模型** 实现 RAG（Retrieval-Augmented Generation）智能问答。支持 PDF/TXT/MD 等多格式文档导入，自动提取案号、法院、裁判日期等元数据，提供结构化法律 Prompt 模板。
+基于 **BM25 + 向量语义** 混合检索的法律文档智能检索引擎（C++17 / Qt 5.15.2 桌面应用），集成大模型流式问答实现 RAG（Retrieval-Augmented Generation）。支持 PDF/TXT/MD 文档导入（含扫描件 OCR）、元数据自动提取、索引持久化、会话历史落库与检索质量对比分析。
+
+> 核心检索链路（分词、倒排索引、BM25、向量相似度、RRF 融合、PDF 解析）全部手写实现，零重型第三方检索依赖。
 
 ## 核心特性
 
-- 🔍 **混合检索** — BM25 关键词匹配 + 余弦相似度向量语义检索，加权融合排序（BM25 0.4 / 向量 0.6）
-- 📄 **PDF 文本提取** — 轻量级 PDF 解析引擎，支持 FlateDecode / ASCII85Decode 压缩流，零外部 PDF 库依赖
-- ⚖️ **法律分词词典** — 250+ 法律专业术语自定义词典（涵盖刑法、民法、商法、知识产权法等 10 大类别），精准识别裁判文书用语
-- 🏷️ **元数据自动提取** — 从裁判文书中自动提取案号、审理法院、裁判日期、案件类型、当事人、审判程序
-- 🔎 **UI 筛选栏** — 按案件类型（民事/刑事/行政/知识产权/商事）、法院级别（最高/高级/中级/基层）、年份快速过滤检索结果
-- 📋 **法律 Prompt 模板** — 自动检测法律上下文，切换结构化四段式法律问答格式（案件概述 → 法律分析 → 结论 → 参考来源）
-- 🤖 **流式 AI 回答** — 基于 DeepSeek Chat API 的 SSE 流式生成，实时逐字展示
-- 🇨🇳 **中文分词** — 集成 cppjieba + 法律自定义词典，精准的中文分词和关键词提取
-- 🎨 **现代桌面 UI** — 藏青 + 铜金主题，五页导航架构（检索问答 / 文档库 / 问答历史 / 检索质量分析 / 设置），左右分栏（检索结果 + AI 回答），支持 API Key 界面配置
-- 🧪 **完整测试** — 45 个单元测试 + 端到端测试，21 篇模拟裁判文书 Demo 数据集
+- 🔍 **混合检索** — BM25 关键词匹配 + 余弦相似度向量语义检索，加权融合排序（权重可配置）
+- 🧪 **四路对比** — BM25 单路 / 向量单路 / 加权融合 / RRF（倒数排名）融合四种检索模式并列，支撑检索质量分析
+- 💾 **索引持久化** — `rag_index.dat` 落盘（magic + version + CRC32 校验，QSaveFile 原子写），重启自动恢复，毫秒级
+- 📚 **文档库管理** — 文档级列表、四维筛选、单篇删除（倒排/块/元数据/全文同步清理）
+- 🕘 **问答历史** — Qt SQLite 落库（含命中来源、中断状态标记），关键词搜索、删除、导出 Markdown
+- 📈 **检索质量分析** — 23 条标注查询批量跑四路，输出 Hit@5 / R@10 / MRR 对比指标（维护者可靠性看板）
+- ⚙️ **检索参数配置中心** — k1/b、融合权重、TopK、分块参数、生成温度、Embedding/生成服务地址与模型，全部界面可配、运行时热更新、范围钳制
+- 📄 **PDF 文本提取 + 扫描件 OCR** — 轻量 PDF 解析引擎（FlateDecode / ASCII85Decode），文本型 PDF 直接提取，扫描件调起本地 OCR
+- ⚖️ **法律分词词典** — 250+ 法律专业术语自定义词典，精准识别裁判文书用语
+- 🏷️ **元数据自动提取** — 案号、审理法院、裁判日期、案件类型、当事人、审判程序、裁判结果倾向
+- 🤖 **流式 AI 回答** — SSE 流式生成，法律结构化四段式 Prompt（案件概述 → 法律分析 → 结论 → 参考来源）
+- 🎨 **现代桌面 UI** — 藏青 + 铜金主题，五页导航全部实现（检索问答 / 文档库 / 问答历史 / 检索质量分析 / 设置），Ctrl+滚轮整体缩放
 
 ## 技术架构
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                      Qt6 Desktop UI                       │
-│    (搜索栏 / 筛选下拉框 / API Key 配置 / 结果列表 / AI 回答)   │
+│                     Qt 5.15.2 Desktop UI                  │
+│   检索问答 / 文档库 / 问答历史 / 检索质量分析 / 设置 五页      │
 └────────────────────────┬─────────────────────────────────┘
-                         │
+                         │ 信号槽（跨页联动经 MainWindow 中转）
 ┌────────────────────────▼─────────────────────────────────┐
-│                    RAG 检索引擎 (Retriever)                 │
+│              检索引擎 Worker 线程 (EngineWorker)             │
+│                    RAG 检索器 (Retriever)                   │
 │       ┌──────────────┐  ┌──────────────┐                  │
 │       │  BM25 排序器   │  │ 向量相似度引擎 │                  │
-│       │  (关键词匹配)  │  │  (语义检索)   │                  │
 │       └──────┬───────┘  └──────┬───────┘                  │
-│              │                 │                           │
-│       ┌──────▼───────┐  ┌──────▼───────┐                  │
-│       │  倒排索引      │  │ Embedding API │                 │
-│       └──────┬───────┘  └──────┬───────┘                  │
-│              │                 │                           │
-│       ┌──────▼───────────────▼──────────┐                  │
-│       │  文档元数据提取 (案号/法院/日期等)  │                  │
-│       └──────────────┬─────────────────┘                  │
-│                      │                                    │
-│       ┌──────────────▼──────────────┐                     │
-│       │  中文分词 (cppjieba + 法律词典) │                    │
-│       └─────────────────────────────┘                     │
-└──────────────────────────────────────────────────────────┘
-                         │
-┌────────────────────────▼─────────────────────────────────┐
-│                AI 生成器 (Generator)                       │
-│   法律 Prompt 模板 / SSE 流式解析 / DeepSeek Chat API       │
-└──────────────────────────────────────────────────────────┘
+│       ┌──────▼───────┐  ┌──────▼─────────┐                │
+│       │  倒排索引      │  │ Embedding 服务  │──┐             │
+│       └──────────────┘  └────────────────┘  │             │
+│       ┌─────────────────────────────┐       │             │
+│       │ 中文分词 (cppjieba + 法律词典) │       │             │
+│       └─────────────────────────────┘       │             │
+└─────────────────────────────────────────────┼─────────────┘
+                                              │ IHttpTransport 抽象
+                    ┌─────────────────────────▼────────────┐
+                    │  Embedding：硅基流动 (BAAI/bge-large)  │
+                    │  生成：DeepSeek Chat（端点均可配置）     │
+                    └──────────────────────────────────────┘
 ```
 
 ### 检索流程
 
-1. **文档导入** → 格式识别（TXT/MD/PDF）+ 文本分块（512 字符/块，50 字符重叠）
-2. **元数据提取** → 案号、法院、日期、案件类型、当事人、审判程序
-3. **分词** → cppjieba + 250+ 法律术语词典 → 去停用词
-4. **建索引** → 倒排索引 + Embedding 向量
-5. **搜索** → BM25 关键词检索 + 余弦相似度向量检索 → 加权融合排序 → 超过阈值（BM25 0.15 + 向量 0.25）
-6. **筛选** → 客户端本地按案件类型 / 法院级别 / 年份过滤
-7. **生成** → 自动检测法律上下文 → 拼接元数据摘要 + 检索上下文 → 法律/通用双 Prompt 模板 → DeepSeek 流式生成
+1. **文档导入** → 格式识别（TXT/MD/PDF，扫描件走 OCR）+ 文本分块（512 字符/块，50 字符重叠，可配置）→ 元数据提取 → 建倒排索引。**导入不调用任何网络 API**
+2. **向量懒计算** → 首次带 Key 的检索时，按当前配置批量嵌入文本块并缓存向量库（改 Key/模型自动重算）
+3. **检索** → 按所选模式跑 BM25 / 向量 / 加权融合 / RRF 融合，阈值过滤后排序
+4. **筛选** → 客户端本地按案件类型 / 法院级别 / 年份过滤
+5. **生成** → 拼接检索上下文（UTF-8 安全截断）→ 法律/通用双 Prompt → SSE 流式生成；无 LLM Key 时检索结果照常展示
+6. **落库** → 回答完成自动写入问答历史（含命中来源与中断状态）
 
 ## 项目结构
 
 ```
-rag-search-engine/
-├── include/
+legal-rag-search/
+├── include/                          # 头文件（与 src/ 一一对应）
 │   ├── config/
-│   │   └── app_config.h              # 全局配置（检索参数、API 配置）
-│   ├── document/
-│   │   ├── parser.h                  # 文档解析 + 文本分块
-│   │   ├── tokenizer.h               # 中文分词器（Pimpl 封装 cppjieba）
-│   │   ├── pdf_extractor.h           # PDF 文本提取器
-│   │   └── metadata.h                # 法律文档元数据提取器
-│   ├── index/
-│   │   ├── inverted_index.h          # 倒排索引数据结构
-│   │   └── bm25_ranker.h             # BM25 排序算法
-│   ├── vector/
-│   │   ├── embedding.h               # 向量嵌入服务（DeepSeek API）
-│   │   └── similarity.h              # 余弦相似度计算
-│   ├── rag/
-│   │   ├── retriever.h               # 混合检索器（BM25 + 向量融合）
-│   │   └── generator.h               # AI 答案生成器（SSE 流式 + Prompt 模板）
-│   └── ui/
-│       ├── main_window.h             # 主窗口骨架（导航 + QStackedWidget + 状态栏）
-│       ├── navigation_bar.h          # 左侧导航栏（藏青底 / 铜金选中）
-│       ├── search_page.h             # 检索问答页（导入 / 检索 / 筛选 / 流式回答）
-│       ├── placeholder_page.h        # 占位页（文档库 / 历史 / 评测 / 设置 待实现）
-│       └── app_theme.h               # 全局主题（加载 QSS + Ctrl+滚轮缩放）
-├── src/                              # 实现文件（与 include/ 一一对应）
-│   ├── main.cpp                      # 程序入口
-│   ├── document/
-│   │   ├── parser.cpp                # TXT/MD 文本解析
-│   │   ├── tokenizer.cpp             # 分词器 + 法律词典加载
-│   │   ├── pdf_extractor.cpp         # PDF FlateDecode/ASCII85 解码
-│   │   └── metadata.cpp              # 案号/法院/日期等提取
-│   ├── index/
-│   ├── vector/
-│   ├── rag/
-│   │   ├── retriever.cpp             # 混合检索 + 元数据管理
-│   │   └── generator.cpp             # Prompt 模板 + SSE 解析
-│   └── ui/
-│       ├── app_theme.cpp             # 全局 QSS 加载与字号缩放（唯一 setStyleSheet 调用点）
-│       ├── app.qss                   # 主题样式表（Qt 资源 :/theme/app.qss）
-│       ├── theme.qrc                 # 资源清单
-│       ├── navigation_bar.cpp        # 左侧导航栏
-│       ├── search_page.cpp           # 检索问答页（自旧 MainWindow 整体迁入）
-│       ├── placeholder_page.cpp      # 占位页
-│       └── main_window.cpp           # 主窗口骨架 + 状态栏汇总
-├── third_party/
-│   ├── cppjieba/                     # 中文分词（MIT）含法律自定义词典
-│   │   └── dict/
-│   │       ├── legal_dict.utf8       # 250+ 法律专业术语
-│   │       └── ...                   # 其他标准词典
-│   ├── limonp/                       # cppjieba 依赖（MIT）
-│   └── nlohmann/                     # JSON 库（MIT）
+│   │   ├── app_config.h              # 少量常量 + dataFilePath()（数据文件 → exe 目录）
+│   │   └── app_settings.h            # AppSettings：defaults() 唯一事实源 + 范围钳制
+│   │                                 # （实现在 src/config/app_settings.cpp、data_paths.cpp）
+│   ├── document/                     # parser / tokenizer / pdf_extractor / ocr_client / metadata
+│   ├── history/
+│   │   ├── history_record.h          # 问答记录结构（含命中来源、中断标记）
+│   │   └── history_store.h           # Qt SQLite 会话历史存储
+│   ├── index/                        # inverted_index / bm25_ranker / index_store（持久化）
+│   ├── net/
+│   │   └── http_transport.h          # IHttpTransport 网络传输抽象（可注入 Fake 离线测试）
+│   ├── rag/                          # retriever（四路混合检索）/ generator（SSE 生成）/ eval_metrics / golden_queries
+│   ├── ui/                           # main_window / navigation_bar / search_page / library_page /
+│   │                                 #   history_page / quality_page / settings_page / app_theme
+│   └── vector/                       # embedding / similarity
+├── src/                              # 实现文件（模块结构与 include/ 相同）
+│   ├── config/data_paths.cpp         # 数据路径解析 + 一次性迁移（互斥保护）
+│   └── ui/engine_worker.cpp          # 引擎线程封装（P1 线程模型：导入/检索异步、可取消、退出安全）
+├── third_party/                      # cppjieba + limonp + nlohmann/json（MIT，随仓库分发）
 ├── test/
-│   ├── test_main.cpp                 # 43 个测试用例
-│   └── data/
-│       └── legal_cases/              # 21 篇模拟裁判文书（5 种案件类型）
-├── CMakeLists.txt                    # CMake 构建配置（C++17 / Qt6）
-├── run.bat                           # Windows 一键启动脚本
-└── PITFALLS.md                       # 开发踩坑记录
+│   ├── test_main.cpp                 # 93 个单元/集成测试用例
+│   ├── ui_smoke.cpp                  # UI 冒烟 + 五组 E2E（离屏渲染，可无 Key 运行）
+│   └── data/legal_cases/             # 21 篇模拟裁判文书（5 大案件类型）
+├── docs/                             # optimization-plan.md（四期优化方案）、screenshots/、defense/
+├── CMakeLists.txt                    # C++17 / Qt 5.15.2 / MinGW
+└── run.bat.example                   # 启动脚本模板（复制为 run.bat 使用）
 ```
 
 ## 环境要求
 
 | 依赖 | 版本 | 说明 |
 |------|------|------|
-| **Qt** | 6.x (MinGW) | Widgets + Core + Network 模块 |
+| **Qt** | 5.15.2 (MinGW 8.1.0) | Widgets + Core + Network + Sql 模块 |
 | **CMake** | ≥ 3.16 | 构建工具 |
-| **编译器** | GCC 13+ / MSVC 2022 | 需支持 C++17 |
+| **编译器** | MinGW GCC 8.1.0 | C++17 |
 | **操作系统** | Windows 10/11 | 当前仅 Win32 构建 |
-| **DeepSeek API Key** | — | 向量检索 + AI 回答（可在界面配置） |
+| **Embedding Key** | 硅基流动等 OpenAI 兼容服务 | 向量语义检索（可选，无 Key 自动降级纯 BM25） |
+| **LLM Key** | DeepSeek 等兼容服务 | AI 流式回答（可选） |
 
 ## 快速开始
 
-### 1. 安装 Qt6
+### 1. 安装 Qt 5.15.2
 
-从 [Qt 官网](https://www.qt.io/download-qt-installer) 下载安装 Qt 6.x，选择 MinGW 64-bit 组件。
+从 [Qt 官网](https://www.qt.io/download) 安装 Qt 5.15.2，勾选 **MinGW 8.1.0 64-bit** 与 **MinGW 8.1.0 工具链**组件。
 
-### 2. 克隆项目
+### 2. 克隆与编译
 
 ```bash
-git clone <repo-url> rag-search-engine
-cd rag-search-engine
+git clone <repo-url> legal-rag-search
+cd legal-rag-search
+cmake -B build -G "MinGW Makefiles" ^
+  -DCMAKE_PREFIX_PATH="D:/Qt/5.15.2/mingw81_64" ^
+  -DCMAKE_CXX_COMPILER="D:/Qt/Tools/mingw810_64/bin/g++.exe" ^
+  -DCMAKE_MAKE_PROGRAM="D:/Qt/Tools/mingw810_64/bin/mingw32-make.exe"
+cmake --build build -j 8
 ```
 
-第三方库（cppjieba + limonp + nlohmann）已随项目分发，无需额外下载。
+构建脚本会自动把 Qt 运行时 DLL（含 sqldrivers/qsqlite.dll）部署到 exe 同级目录，无需手动 windeployqt。
 
-### 3. 编译
+### 3. 运行测试
 
 ```bash
-mkdir build && cd build
-
-# 配置 CMake（替换为你的 Qt 路径）
-cmake .. -G "MinGW Makefiles" \
-  -DCMAKE_PREFIX_PATH="D:/Qt/6.10.2/mingw_64" \
-  -DCMAKE_CXX_COMPILER="D:/Qt/Tools/mingw1310_64/bin/g++.exe" \
-  -DCMAKE_MAKE_PROGRAM="D:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe"
-
-# 编译（4 线程并行）
-mingw32-make -j4
+build\run_tests.exe        # 预期 93/93 全绿
 ```
 
-### 4. 运行测试
+UI 冒烟 + 端到端（离屏渲染，不弹窗）：
 
 ```bash
-# 确保工作目录在项目根（词典路径依赖相对路径）
-cd D:\graduation_project\rag-search-engine
-build\run_tests.exe
+set QT_QPA_FONTDIR=C:\Windows\Fonts
+build\ui_smoke.exe -platform offscreen docs/screenshots 1x --e2e test/data/legal_cases
 ```
 
-### 5. 设置 API Key
+### 4. 配置 Key（两把 Key 分家）
 
-**方式一：界面配置（推荐）**
-启动程序后在顶部输入框填入 API Key，点击「设置」。
+| 服务 | 用途 | 配置入口 |
+|------|------|----------|
+| **Embedding** | 向量语义检索 | **设置页**「Embedding 服务」卡片（服务地址 / 模型名 / API Key） |
+| **LLM** | AI 流式回答 | **检索问答页**顶部 Key 输入框，或环境变量 `DEEPSEEK_API_KEY` |
 
-**方式二：环境变量**
-```bash
-set DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
-```
+LLM 生成服务的端点与模型名也可在设置页「生成服务」卡片调整（默认 DeepSeek `deepseek-chat`）。两把 Key 相互独立：只有 Embedding Key 时纯检索可用（BM25+向量），只有 LLM Key 时退化为纯 BM25 检索 + AI 回答。
 
-> 📌 获取 API Key：访问 [platform.deepseek.com](https://platform.deepseek.com) 注册并创建。
-
-### 6. 启动
+### 5. 启动
 
 ```bash
-# 方式一：使用启动脚本（自动设置 API Key + 启动）
+copy run.bat.example run.bat   # 首次：复制模板并填入 LLM Key
 run.bat
-
-# 方式二：手动启动
-set PATH=D:\Qt\6.10.2\mingw_64\bin;%PATH%
-build\rag_search_engine.exe
 ```
 
 ## 使用指南
 
-### 导入文档
+五页导航（Ctrl+滚轮缩放全局字号）：
 
-1. 点击 **「📂 导入文档」** 按钮
-2. 支持格式：`.txt` / `.md` / `.pdf` / `.csv` / `.json` / `.xml`
-3. 导入时自动提取元数据（案号、法院、日期等）
-4. 状态栏显示导入进度和已索引文本块数量
+| 页面 | 功能 |
+|------|------|
+| **🔍 检索问答** | 导入文档、混合检索、三维筛选、流式 AI 回答、LLM Key 配置 |
+| **📚 文档库** | 文档列表（含裁判结果倾向列）、四维筛选、单篇删除（同步清理索引/块/全文） |
+| **🕘 问答历史** | 历史列表与详情、关键词搜索、删除/清空、导出 Markdown（含命中来源表） |
+| **📈 检索质量分析** | 输入查询并列跑四路（BM25/向量/加权/RRF）对比，23 条标注查询批量指标 |
+| **⚙️ 设置** | 检索参数（k1/b/权重/TopK/分块）、Embedding 与生成服务配置、恢复默认 |
 
-### 搜索问答
-
-1. 在搜索框输入问题（例：「合同纠纷中违约金如何计算？」）
-2. 点击 **「🔍 搜索」** 或按 Enter
-3. **左侧** 展示检索结果列表（含文档名 + 元数据 + 相关度分数）
-4. **右侧** AI 法律助手按结构化格式实时流式作答
-
-### 筛选功能
-
-检索后可快速过滤结果，无需重新搜索：
-
-| 筛选项 | 选项 | 说明 |
-|--------|------|------|
-| **案件类型** | 全部 / 民事 / 刑事 / 行政 / 知识产权 / 商事 | 按案由分类筛选 |
-| **法院级别** | 全部 / 最高人民法院 / 高级人民法院 / 中级人民法院 / 基层人民法院 | 按审理法院层级筛选 |
-| **年份** | 全部 / 动态生成 | 仅显示检索结果中存在的年份 |
-
-### 检索结果分数
-
-| 字段 | 权重 | 说明 |
-|------|------|------|
-| `finalScore` | — | 加权融合最终分数 |
-| `bm25Score` | 0.4 | 关键词匹配度 |
-| `vectorScore` | 0.6 | 语义相似度 |
-
-### 清空索引
-
-点击 **「🗑 清空索引」** → 确认后清除所有已导入文档。
+检索结果条目显示融合相关度与分项（BM25 / 向量），设置页修改参数**运行时热更新**，无需重启或重建索引。
 
 ## 配置说明
 
-编辑 `include/config/app_config.h` 可调整以下参数：
+检索参数与 AI 服务配置在**设置页**修改，持久化到数据目录的 `rag_settings.json`：
 
-```cpp
-// ── AI API ──
-constexpr const char* CHAT_MODEL = "deepseek-chat";
-constexpr const char* EMBEDDING_MODEL = "text-embedding-3-small";
-constexpr int HTTP_TIMEOUT = 30;              // API 请求超时（秒）
+- `AppSettings::defaults()` 是唯一事实源，配置文件缺失/字段缺失/值损坏时逐项回落默认值；
+- 所有数值经范围钳制（k1>0、0≤b≤1、权重非负且自动重归一化、TopK≥1、chunkOverlap<chunkSize、0≤temperature≤2）；
+- 修改**查询期参数**（k1/b/权重/TopK）即时生效；**分块参数**只对之后导入的文档生效。
 
-// ── 检索 ──
-constexpr int DEFAULT_TOP_K = 5;              // 默认返回结果数
-constexpr int MAX_CHUNK_SIZE = 512;           // 文本块最大字符数
-constexpr int CHUNK_OVERLAP = 50;             // 文本块重叠字符数
-constexpr double BM25_WEIGHT = 0.4;           // BM25 权重
-constexpr double VECTOR_WEIGHT = 0.6;         // 向量检索权重
+## 数据文件位置
 
-// ── 数据库 ──
-constexpr const char* DB_PATH = "rag_index.db";
-```
+P3 起三件数据文件存放在 **exe 所在目录**（便携设计，整个文件夹拷走即带走全部数据）：
 
-修改后需重新编译。
+| 文件 | 内容 |
+|------|------|
+| `rag_index.dat` | 倒排索引 + 分块 + 元数据 + 全文（CRC32 校验，原子写） |
+| `rag_history.db` | 问答历史（SQLite） |
+| `rag_settings.json` | 检索参数与 AI 服务配置 |
+
+首次启动若在工作目录检测到旧版本数据文件，会**自动迁移**到 exe 目录并打日志提示；迁移失败则沿用旧文件继续运行。上述文件均不参与版本控制。
 
 ## 功能矩阵
 
-| 功能 | 有 API Key | 无 API Key |
-|------|-----------|-----------|
-| 文档导入 + 分词 | ✅ | ✅ |
-| PDF 文本提取 | ✅ | ✅ |
-| 元数据提取（案号/法院等） | ✅ | ✅ |
-| BM25 关键词搜索 | ✅ | ✅ |
-| 筛选栏（类型/级别/年份） | ✅ | ✅ |
-| 向量语义检索 | ✅ | ❌ |
-| AI 智能回答 | ✅ | ❌ |
+| 功能 | Embedding Key | 无任何 Key |
+|------|:---:|:---:|
+| 文档导入（PDF/TXT/MD）+ 分词 + 元数据 | ✅ | ✅ |
+| BM25 关键词检索 + 筛选 | ✅ | ✅ |
+| 向量语义检索 / 加权融合 | ✅ | 降级纯 BM25 |
+| 四路对比 + 质量指标 | ✅ | BM25 路可用 |
+| 索引持久化 / 文档库 / 问答历史 | ✅ | ✅ |
+| AI 流式回答 | 需 LLM Key | ❌ |
 
-无 API Key 时，仅展示 BM25 关键词检索结果列表，筛选、元数据等功能均正常可用。
+降级是**静默且如实**的：向量路不可用时检索照常返回 BM25 结果，状态栏与结果分数明确区分。
 
 ## Demo 数据集
 
@@ -275,7 +203,7 @@ constexpr const char* DB_PATH = "rag_index.db";
 | 类型 | 数量 | 示例 |
 |------|------|------|
 | 民事 | 8 篇 | 借贷纠纷、合同纠纷、侵权纠纷、离婚、继承、劳动、房产、交通事故 |
-| 刑事 | 5 篇 | 诈骗、盗窃、故意伤害、贪污、危险驾驶 |
+| 刑事 | 5 篇 | 诈骗、盗窃、故意伤害、职务侵占、危险驾驶 |
 | 行政 | 3 篇 | 行政许可、行政处罚、行政赔偿 |
 | 知识产权 | 3 篇 | 商标侵权、专利纠纷、著作权纠纷 |
 | 商事 | 2 篇 | 公司纠纷、破产清算 |
@@ -284,123 +212,40 @@ constexpr const char* DB_PATH = "rag_index.db";
 
 ## 法律词典
 
-自定义词典位于 `third_party/cppjieba/dict/legal_dict.utf8`，包含 250+ 法律专业术语，分 10 大类：
-
-| 类别 | 示例术语 |
-|------|----------|
-| 诉讼程序 | 管辖权异议、诉讼时效、举证责任、强制执行 |
-| 法院机关 | 最高人民法院、中级人民法院、人民法院、合议庭 |
-| 实体法 | 违约责任、侵权责任、不当得利、表见代理 |
-| 刑法 | 故意伤害、数额巨大、数罪并罚、自首立功 |
-| 合同法/民法 | 格式条款、合同解除、善意第三人、不可抗力 |
-| 公司法/商法 | 股权转让、法人代表、注册资本、破产清算 |
-| 知识产权 | 商标侵权、专利无效、著作权登记、商业秘密 |
-| 劳动法 | 劳动合同、经济补偿、工伤认定、竞业限制 |
-| 行政法 | 行政复议、行政许可、行政处罚、强制措施 |
-| 证据 | 书证物证、鉴定意见、电子数据、证人证言 |
-
-## 开发
-
-### 编译测试
-
-```bash
-cd build
-mingw32-make run_tests
-build\run_tests.exe
-```
-
-### 构建 Release 版本
-
-```bash
-cmake .. -G "MinGW Makefiles" \
-  -DCMAKE_PREFIX_PATH="D:/Qt/6.10.2/mingw_64" \
-  -DCMAKE_CXX_COMPILER="D:/Qt/Tools/mingw1310_64/bin/g++.exe" \
-  -DCMAKE_MAKE_PROGRAM="D:/Qt/Tools/mingw1310_64/bin/mingw32-make.exe" \
-  -DCMAKE_BUILD_TYPE=Release
-mingw32-make -j4
-```
-
-### 技术要点
-
-- **多页 UI 架构** — `MainWindow` 只保留骨架（左侧导航 + `QStackedWidget` + `QStatusBar`），业务逻辑全部收敛到页面类；`SearchPage` 承载原有的导入 / 检索 / 筛选 / 流式回答
-- **全局 QSS 主题** — 全项目仅 `AppTheme::apply()` 一处调用 `setStyleSheet`；组件配色统一靠 `objectName` 与动态属性（`role="primary"`、`status="ok"`）在 `src/ui/app.qss` 中匹配，样式调整不必改 C++
-- **Pimpl 模式** — `Tokenizer` 通过 `Impl` 封装 cppjieba，避免头文件暴露第三方库依赖
-- **静态链接** — MinGW 运行时（libstdc++/libgcc/libwinpthread）全部静态链接，消除 DLL 版本冲突
-- **UTF-8 字节扫描** — 元数据提取中 Unicode 字符匹配使用手动 UTF-8 字节扫描，规避 GCC `<regex>` 的 Unicode 兼容问题
-- **中文数字解析** — 区分位置记数法（「二〇二四」→ 2024）与叠加记数法（「十五」→ 15）
-- **SSE 流式解析** — 非完整行缓冲 + `QEventLoop` 同步阻塞，确保流式输出的可靠拼接
-
-## UI 架构
-
-```
-MainWindow
-├── NavigationBar          # 190px 固定宽，藏青 #14213D，选中项铜金 #B7791F
-└── QStackedWidget
-    ├── [0] SearchPage     # 已实现：导入 / 混合检索 / 三维筛选 / SSE 流式回答
-    ├── [1] 文档库          # 占位 → T1 持久化 + 文档生命周期管理
-    ├── [2] 问答历史        # 占位 → T2 Qt SQLite 落库
-    ├── [3] 检索质量分析    # 占位 → T4 四路并列对比 + 可靠性验证
-    └── [4] 设置            # 占位 → T3 检索参数配置中心
-QStatusBar                 # 索引规模 / Embedding 与 LLM 可用性 / 版本号
-```
-
-主题色板（与开题 PPT、论文同源）：藏青 `#14213D`、铜金 `#B7791F`、内容区 `#F4F6F9`、
-卡片 `#FFFFFF` 圆角 10px、分割线 `#E2E7EE`；字号层级 标题 18px / 正文 13px / 辅助 11px。
-
-`Ctrl + 滚轮` 可整体缩放界面字号（60%–250%），QSS 中的 px 字号由 `AppTheme::scaledSource()` 等比重算。
-
-### UI 冒烟测试
-
-```bash
-# 导航切换 + 五页渲染 + 高分屏档位（离屏渲染，不弹窗）
-build\ui_smoke.exe -platform offscreen docs/screenshots 1x
-QT_SCALE_FACTOR=1.5 build\ui_smoke.exe -platform offscreen docs/screenshots 1.5
-
-# 追加「导入 → 检索 → 筛选」端到端校验
-build\ui_smoke.exe -platform offscreen docs/screenshots 1x --e2e test/data/legal_cases
-```
-
-截图输出到指定目录；`--e2e` 需要 `test/data/legal_cases` 语料。配了 `DEEPSEEK_API_KEY` 时
-会一并发出流式生成请求，未配置则跳过该步（不算失败）。
+自定义词典位于 `third_party/cppjieba/dict/legal_dict.utf8`，包含 250+ 法律专业术语，分 10 大类（诉讼程序 / 法院机关 / 实体法 / 刑法 / 合同法 / 公司法 / 知识产权 / 劳动法 / 行政法 / 证据）。
 
 ## 常见问题
 
-### Q: 启动时提示「找不到 Qt6Widgets.dll」？
+### Q: 启动时提示「找不到 Qt5Widgets.dll」？
 
-A: 将 Qt 的 `bin` 目录加入 `PATH`，或使用 `windeployqt` 部署依赖：
-```bash
-windeployqt --release build/rag_search_engine.exe
-```
+A: 使用仓库提供的 `run.bat` 启动（CMake 构建时已自动部署 Qt DLL 到 exe 目录）；手动运行请将 `Qt/5.15.2/mingw81_64/bin` 加入 PATH。
 
-### Q: 分词异常或程序崩溃？
+### Q: 分词异常或启动即崩？
 
-A: 确认 `third_party/cppjieba/dict/` 目录包含以下文件：
-- `jieba.dict.utf8`、`hmm_model.utf8`、`user.dict.utf8`
-- `idf.utf8`、`stop_words.utf8`
-- `legal_dict.utf8`（法律自定义词典）
+A: 确认 `third_party/cppjieba/dict/` 词典齐全（`jieba.dict.utf8`、`hmm_model.utf8`、`user.dict.utf8`、`idf.utf8`、`stop_words.utf8`、`legal_dict.utf8`）。详见 TROUBLESHOOTING.md「词典缺失」节。
 
-### Q: AI 回答很慢或超时？
+### Q: TXT 导入乱码？
 
-A: ① 检查网络是否能访问 `api.deepseek.com`；② 增大 `HTTP_TIMEOUT` 配置；③ 减少导入文档量
+A: 引擎支持 UTF-8 与 GBK 自动检测；个别编码异常文件见 TROUBLESHOOTING.md「GBK 导入」节。
 
-### Q: PDF 导入后文本为空或乱码？
+### Q: 数据文件去哪了？
 
-A: 本引擎仅支持**文本型 PDF**（可选中文字的），不支持扫描版/图片型 PDF。后者需要 OCR 处理。也不支持加密 PDF。
+A: 一律在 **exe 所在目录**（通常为 `build/`）。旧版本存在工作目录的文件会在首次启动时自动迁移。详见 TROUBLESHOOTING.md「数据文件位置」节。
 
-### Q: 如何添加新的文件格式支持？
+### Q: PDF 导入后文本为空？
 
-A: 在 `src/document/parser.cpp` 的 `parse()` 方法中添加对应格式扩展名判断和解析逻辑。
+A: 仅支持**文本型 PDF**，不支持扫描版/加密 PDF（扫描件可走 OCR 路径）。
 
 ## 依赖许可
 
 | 库 | 许可 | 用途 |
 |----|------|------|
-| [Qt 6](https://www.qt.io) | LGPLv3 / GPLv3 / Commercial | GUI + 网络 |
+| [Qt 5.15.2](https://www.qt.io) | LGPLv3 / Commercial | GUI + 网络 + SQLite |
 | [cppjieba](https://github.com/yanyiwu/cppjieba) | MIT | 中文分词 |
 | [limonp](https://github.com/yanyiwu/limonp) | MIT | cppjieba 依赖 |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT | JSON 解析 |
 | [zlib](https://www.zlib.net/) | zlib License | PDF 流解压（MinGW 自带） |
-| [DeepSeek API](https://platform.deepseek.com) | 商业 API | Embedding + Chat |
+| DeepSeek API / 硅基流动 | 商业 API | LLM 生成 / Embedding（均为可选外部服务） |
 
 ## License
 
