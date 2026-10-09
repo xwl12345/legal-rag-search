@@ -160,6 +160,23 @@ int runE2E(MainWindow& window, const QString& corpusDir, const QString& outDir) 
         return g_failures;
     }
 
+    // T6：三态视角选择器——存在性、默认中立、语义值与文案分离（userData）
+    QComboBox* perspectiveSelector =
+        window.findChild<QComboBox*>(QStringLiteral("perspectiveSelector"));
+    check(perspectiveSelector != nullptr, QStringLiteral("T6 视角选择器存在"));
+    if (perspectiveSelector) {
+        check(perspectiveSelector->currentIndex() == 0 &&
+                  perspectiveSelector->currentData().toInt() == 0,
+              QStringLiteral("T6 默认档位为中立（语义值 0）"),
+              QStringLiteral("实际 index=%1 data=%2")
+                  .arg(perspectiveSelector->currentIndex())
+                  .arg(perspectiveSelector->currentData().toInt()));
+        perspectiveSelector->setCurrentIndex(2);
+        check(perspectiveSelector->currentData().toInt() == 2,
+              QStringLiteral("T6 切换被告方后语义值 2"));
+        perspectiveSelector->setCurrentIndex(0);   // 还原中立：后续断言按默认态
+    }
+
     // P3-5.2：疑似副本只告警不判失败（导入断言按 ≥21 下限执行）
     QStringList duplicates;
     for (const QString& f : corpus) {

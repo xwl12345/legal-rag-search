@@ -30,6 +30,7 @@ struct HistoryRecord {
     std::vector<SourceItem> sources;
     bool interrupted = false;      // 回答异常终止（网络中断 / 生成失败…）
     std::string note;              // 终止原因短语（可空）
+    std::string perspective;       // T6：本次回答的立场标签（中立/原告方/被告方；可空=旧记录）
 
     /// 命中块数（等于 sources.size()，取签名表达业务语义）
     int hitCount() const { return static_cast<int>(sources.size()); }

@@ -319,6 +319,10 @@ void HistoryPage::showDetails(long long id) {
     if (record.interrupted && !record.note.empty()) {
         text += QStringLiteral("　　（%1）\n").arg(QString::fromStdString(record.note));
     }
+    // T6：本次回答的立场（旧记录为空则不显示，避免噪音）
+    if (!record.perspective.empty()) {
+        text += QStringLiteral("◆ 回答视角：%1\n").arg(QString::fromStdString(record.perspective));
+    }
 
     text += QStringLiteral("\n── 检索问题 ──\n%1\n").arg(QString::fromStdString(record.query));
 

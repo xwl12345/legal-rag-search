@@ -107,8 +107,10 @@ signals:
     /// 请求聚合检索（宽检索 + per-doc 去重在引擎内完成，EngineWorker::searchAggregate）
     void aggregateSearchRequested(const QString& query, int width);
     /// 请求生成回答（EngineWorker::generateAnswer，流式增量经 generationDelta 回来）
+    /// perspective：T6 回答立场（0 中立 / 1 原告方 / 2 被告方，rag::Perspective 序数值）
     void generationRequested(const QString& query, const QString& context,
-                             const QString& metaContext, double temperature);
+                             const QString& metaContext, double temperature,
+                             int perspective);
     /// 请求中断当前生成（EngineWorker::cancelGeneration）
     void generationCancelRequested();
     /// LLM Key 变更（EngineWorker::setLlmApiKey；初始 Key 由 MainWindow 启动时推送）
@@ -234,6 +236,9 @@ private:
     QComboBox* yearFilter_ = nullptr;
     QComboBox* tendencyFilter_ = nullptr;
     QCheckBox* courtOnlyFilter_ = nullptr;   // T5：只看本院认为（角色 = 法院认定）
+
+    // ── T6 三态视角选择器（搜索框旁：中立 / 原告方 / 被告方，默认中立）──
+    QComboBox* perspectiveSelector_ = nullptr;
 
     // ── 缓存当前搜索结果（用于筛选）──
     std::vector<rag::SearchResult> cachedResults_;

@@ -101,6 +101,7 @@ HistoryRecord recordFromQuery(QSqlQuery& query) {
     record.sources = sourcesFromJson(toS(query.value(4).toString()));
     record.interrupted = query.value(6).toInt() != 0;
     record.note = toS(query.value(7).toString());
+    record.perspective = toS(query.value(8).toString());   // T6：旧库/旧行为为空串
     return record;
 }
 
@@ -169,12 +170,16 @@ bool HistoryStore::open() {
         "  sources     TEXT NOT NULL,"
         "  hit_count   INTEGER NOT NULL,"
         "  interrupted INTEGER NOT NULL DEFAULT 0,"
-        "  note        TEXT NOT NULL DEFAULT ''"
+        "  note        TEXT NOT NULL DEFAULT '',"
+        "  perspective TEXT NOT NULL DEFAULT ''"
         ")";
     if (!query.exec(QString::fromUtf8(kCreateTable))) {
         opened_ = false;
         return false;
     }
+    // T6：旧库无 perspective 列 —— ALTER 补列；列已存在时报错属预期，静默吞掉
+    query.exec(QStringLiteral(
+        "ALTER TABLE history ADD COLUMN perspective TEXT NOT NULL DEFAULT ''"));
     if (!query.exec(QStringLiteral(
             "CREATE INDEX IF NOT EXISTS idx_history_created_at ON history(created_at DESC)"))) {
         opened_ = false;
@@ -193,8 +198,8 @@ long long HistoryStore::append(const HistoryRecord& record) {
     QSqlDatabase db = QSqlDatabase::database(connectionName_, /*open=*/false);
     QSqlQuery query(db);
     query.prepare(QStringLiteral(
-        "INSERT INTO history (created_at, query, answer, sources, hit_count, interrupted, note) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)"));
+        "INSERT INTO history (created_at, query, answer, sources, hit_count, interrupted, note, perspective) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"));
     query.addBindValue(record.createdAt.empty() ? currentTimestamp()
                                                 : QString::fromStdString(record.createdAt));
     query.addBindValue(toQ(record.query));
@@ -203,6 +208,7 @@ long long HistoryStore::append(const HistoryRecord& record) {
     query.addBindValue(record.hitCount());
     query.addBindValue(record.interrupted ? 1 : 0);
     query.addBindValue(toQ(record.note));
+    query.addBindValue(toQ(record.perspective));
 
     if (!query.exec()) {
         return 0;
@@ -219,7 +225,7 @@ std::vector<HistoryRecord> HistoryStore::recent(int limit) const {
     QSqlDatabase db = QSqlDatabase::database(connectionName_, /*open=*/false);
     QSqlQuery query(db);
     query.prepare(QStringLiteral(
-        "SELECT id, created_at, query, answer, sources, hit_count, interrupted, note "
+        "SELECT id, created_at, query, answer, sources, hit_count, interrupted, note, perspective "
         "FROM history ORDER BY created_at DESC, id DESC LIMIT ?"));
     query.addBindValue(limit > 0 ? limit : kRecentDefault);
     if (!query.exec()) {
@@ -246,7 +252,7 @@ std::vector<HistoryRecord> HistoryStore::search(const std::string& keyword, int 
     QSqlDatabase db = QSqlDatabase::database(connectionName_, /*open=*/false);
     QSqlQuery query(db);
     query.prepare(QStringLiteral(
-        "SELECT id, created_at, query, answer, sources, hit_count, interrupted, note "
+        "SELECT id, created_at, query, answer, sources, hit_count, interrupted, note, perspective "
         "FROM history WHERE query LIKE ? ESCAPE '\\' OR answer LIKE ? ESCAPE '\\' "
         "ORDER BY created_at DESC, id DESC LIMIT ?"));
     query.addBindValue(pattern);
@@ -269,7 +275,7 @@ bool HistoryStore::get(long long id, HistoryRecord& out) const {
     QSqlDatabase db = QSqlDatabase::database(connectionName_, /*open=*/false);
     QSqlQuery query(db);
     query.prepare(QStringLiteral(
-        "SELECT id, created_at, query, answer, sources, hit_count, interrupted, note "
+        "SELECT id, created_at, query, answer, sources, hit_count, interrupted, note, perspective "
         "FROM history WHERE id = ?"));
     query.addBindValue(qlonglong(id));
     if (!query.exec() || !query.next()) {

@@ -130,9 +130,12 @@ void EngineWorker::importDocuments(const QStringList& files) {
 }
 
 void EngineWorker::generateAnswer(const QString& query, const QString& context,
-                                  const QString& metaContext, double temperature) {
+                                  const QString& metaContext, double temperature,
+                                  int perspective) {
     generator_.setTemperature(temperature);
     generator_.setMetadataContext(metaContext.toStdString());
+    // T6：三态视角随请求下发（int = rag::Perspective 序数；引擎线程内 setter，无竞争）
+    generator_.setPerspective(static_cast<rag::Perspective>(perspective));
     try {
         generator_.generate(query.toStdString(), context.toStdString(),
                             [this](const std::string& delta) {

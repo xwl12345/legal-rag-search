@@ -103,6 +103,27 @@ void SearchPage::setupUi() {
     searchLayout->addWidget(stopGenBtn_);
     root->addLayout(searchLayout);
 
+    // ── T6 三态视角选择器（搜索框正下方，独立成行避免挤压输入框）──
+    auto* perspectiveLayout = new QHBoxLayout();
+    perspectiveLayout->setSpacing(8);
+    auto* perspectiveLabel = new QLabel(QStringLiteral("回答视角"), this);
+    perspectiveLabel->setObjectName(QStringLiteral("fieldLabel"));
+    perspectiveSelector_ = new QComboBox(this);
+    perspectiveSelector_->setObjectName(QStringLiteral("perspectiveSelector"));
+    // 语义值走 userData（rag::Perspective 序数：0 中立 / 1 原告方 / 2 被告方），
+    // 禁止 currentText 中文匹配
+    perspectiveSelector_->addItem(QStringLiteral("中立（默认）"),
+                                  QVariant::fromValue(0));
+    perspectiveSelector_->addItem(QStringLiteral("原告方立场"),
+                                  QVariant::fromValue(1));
+    perspectiveSelector_->addItem(QStringLiteral("被告方立场"),
+                                  QVariant::fromValue(2));
+    perspectiveSelector_->setMinimumHeight(32);
+    perspectiveLayout->addWidget(perspectiveLabel);
+    perspectiveLayout->addWidget(perspectiveSelector_, 1);
+    perspectiveLayout->addStretch(1);
+    root->addLayout(perspectiveLayout);
+
     // ── API Key 输入行 ──
     auto* apiKeyLayout = new QHBoxLayout();
     apiKeyLayout->setSpacing(10);
@@ -539,7 +560,8 @@ void SearchPage::startGeneration(std::vector<rag::SearchResult> sources,
     emit generationRequested(currentQuery_,
                              QString::fromStdString(context),
                              QString::fromStdString(metaSummary),
-                             temperature_);
+                             temperature_,
+                             perspectiveSelector_->currentData().toInt());
 }
 
 void SearchPage::onGenerationDelta(const QString& text) {
@@ -806,6 +828,22 @@ void SearchPage::displayResults(const std::vector<rag::SearchResult>& results) {
         const auto& r = results[i];
         std::ostringstream oss;
         oss << "【" << (i + 1) << "】";
+        // T6：裁判结果倾向标记（展示层只读，不影响引擎排序与指标基线）
+        {
+            rag::DocumentInfo info;
+            if (retriever_->getDocumentInfo(r.docId, info)) {
+                switch (info.tendency) {
+                case document::ResultTendency::FavorPlaintiff:
+                    oss << "[利原告] "; break;
+                case document::ResultTendency::PartialSupport:
+                    oss << "[部分支持] "; break;
+                case document::ResultTendency::FavorDefendant:
+                    oss << "[利被告] "; break;
+                default:
+                    break;   // Unknown / Other 不标
+                }
+            }
+        }
         // T5：结构段角色标签（Unknown 不显示），支撑证据效力分级
         if (r.role != document::ChunkRole::Unknown) {
             oss << "[" << document::chunkRoleLabel(r.role) << "] ";
@@ -986,6 +1024,12 @@ history::HistoryRecord SearchPage::buildHistoryRecord(
     record.answer = answer.toStdString();
     record.interrupted = interrupted;
     record.note = note.toStdString();
+    // T6：回溯「这条回答站在谁的角度」——按语义值映射固定标签（不用 UI 文案，防文案改动污染历史）
+    switch (perspectiveSelector_->currentData().toInt()) {
+    case 1:  record.perspective = "原告方"; break;
+    case 2:  record.perspective = "被告方"; break;
+    default: record.perspective = "中立";   break;
+    }
 
     record.sources.reserve(sources.size());
     for (const auto& hit : sources) {

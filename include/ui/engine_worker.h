@@ -83,7 +83,8 @@ public slots:
     void runBatchEval(int width);
     void importDocuments(const QStringList& files);
     void generateAnswer(const QString& query, const QString& context,
-                        const QString& metaContext, double temperature);
+                        const QString& metaContext, double temperature,
+                        int perspective);   // T6：rag::Perspective 序数
     void cancelGeneration();          // 与 generateAnswer 同线程，直接 abort
     void applySettings(config::AppSettings settings);
     void setLlmApiKey(const QString& key);
