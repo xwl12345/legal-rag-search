@@ -144,6 +144,14 @@ QLineEdit#searchInput {
 
 /* ── T3 设置页：数值输入与卡片内表单 ──────────────────────────────────── */
 
+/* T6 期修复：参数卡片包进滚动区（窗口高度不足时出滚动条而非压缩表单行），
+   滚动区本体与内容容器全部透明，只透出页面底色 */
+QScrollArea#settingsScroll,
+QScrollArea#settingsScroll > QWidget > QWidget {
+    background: transparent;
+    border: none;
+}
+
 QSpinBox, QDoubleSpinBox {
     background: #FFFFFF;
     border: 1px solid #E2E7EE;

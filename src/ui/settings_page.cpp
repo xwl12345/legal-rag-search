@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
@@ -95,9 +96,27 @@ void SettingsPage::setupUi() {
     head->addStretch();
     root->addLayout(head);
 
+    // ── 修复（T6 期）：四张卡片包进滚动区 ──
+    // 窗口高度不足以容纳全部表单时，QVBoxLayout 会强压 QFormLayout 行距，
+    // 标签与输入框叠印（"小窗正常、放大窗口反而重叠"的实测现象）。
+    // 改为内容可滚：空间不足 = 出滚动条，物理上不再压缩任何表单行。
+    auto* scrollContent = new QWidget(this);
+    auto* contentLayout = new QVBoxLayout(scrollContent);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    contentLayout->setSpacing(10);
+
+    auto* scroll = new QScrollArea(this);
+    scroll->setObjectName(QStringLiteral("settingsScroll"));
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->viewport()->setAutoFillBackground(false);
+    scrollContent->setAutoFillBackground(false);
+    scroll->setWidget(scrollContent);
+
     // ── 卡片一：检索参数 ──
     QFormLayout* form1 = nullptr;
-    makeCard(this, root, QStringLiteral("检索参数（保存后立即生效，无需重建索引）"), form1);
+    makeCard(this, contentLayout, QStringLiteral("检索参数（保存后立即生效，无需重建索引）"), form1);
 
     k1Spin_ = makeDoubleSpin(this, 0.0, 10.0, 0.1);
     k1Spin_->setObjectName(QStringLiteral("settingsK1"));
@@ -124,7 +143,7 @@ void SettingsPage::setupUi() {
 
     // ── 卡片二：分块参数 ──
     QFormLayout* form2 = nullptr;
-    makeCard(this, root, QStringLiteral("分块参数（仅对之后导入的文档生效）"), form2);
+    makeCard(this, contentLayout, QStringLiteral("分块参数（仅对之后导入的文档生效）"), form2);
 
     chunkSizeSpin_ = makeIntSpin(this, 64, 4096);
     chunkSizeSpin_->setObjectName(QStringLiteral("settingsChunkSize"));
@@ -139,7 +158,7 @@ void SettingsPage::setupUi() {
 
     // ── 卡片三：生成（LLM）服务（P3 新增；Key 在检索页，此处只配服务）──
     QFormLayout* formChat = nullptr;
-    makeCard(this, root, QStringLiteral("生成服务（DeepSeek Chat，Key 在检索问答页配置）"), formChat);
+    makeCard(this, contentLayout, QStringLiteral("生成服务（DeepSeek Chat，Key 在检索问答页配置）"), formChat);
 
     chatUrlEdit_ = new QLineEdit(this);
     chatUrlEdit_->setObjectName(QStringLiteral("settingsChatUrl"));
@@ -159,7 +178,7 @@ void SettingsPage::setupUi() {
 
     // ── 卡片四：Embedding 服务 ──
     QFormLayout* form3 = nullptr;
-    makeCard(this, root, QStringLiteral("Embedding 服务（检索质量分析 T4 将消费）"), form3);
+    makeCard(this, contentLayout, QStringLiteral("Embedding 服务（检索质量分析 T4 将消费）"), form3);
 
     embedUrlEdit_ = new QLineEdit(this);
     embedUrlEdit_->setObjectName(QStringLiteral("settingsEmbedUrl"));
@@ -199,9 +218,9 @@ void SettingsPage::setupUi() {
     actions->addWidget(saveBtn_);
     actions->addStretch();
     actions->addWidget(statusLabel_);
+    // 滚动区夹在页头与操作行之间（保存/恢复按钮常驻页底，不随内容滚动）
+    root->addWidget(scroll, 1);
     root->addLayout(actions);
-
-    root->addStretch();
 
     connect(defaultsBtn_, &QPushButton::clicked,
             this, &SettingsPage::onRestoreDefaults);
