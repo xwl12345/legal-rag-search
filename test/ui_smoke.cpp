@@ -35,6 +35,7 @@
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTableWidget>
+#include <QTextBrowser>
 #include <QTextEdit>
 #include <QTimer>
 
@@ -54,6 +55,11 @@
 #include "config/app_config.h"
 #include "config/app_settings.h"
 #include "history/history_store.h"
+#include "law/law_store.h"
+#include "rag/retriever.h"
+
+#include <QLabel>
+#include <QTreeWidget>
 
 namespace {
 
@@ -1195,6 +1201,125 @@ int runQualityE2E(const QString& corpusDir) {
     return g_failures;
 }
 
+// ── T9 法条速查 E2E：导航 → 目录树 → 条号精确定位 → 关键词检索 → 主检索零污染 ──
+int runLawE2E(MainWindow& window, const QString& outDir) {
+    pump(30);
+
+    QListWidget* navList = window.findChild<QListWidget*>(QStringLiteral("navList"));
+    QStackedWidget* stack = window.findChild<QStackedWidget*>();
+    if (!navList || !stack) {
+        check(false, QStringLiteral("T9：导航容器存在"));
+        return g_failures;
+    }
+
+    // ── 导航到第 5 页（05-law）──
+    clickNavItem(navList, 4);
+    check(stack->currentIndex() == 4,
+          QStringLiteral("T9：导航 05-law → 第 4 页"),
+          QStringLiteral("stack=%1").arg(stack->currentIndex()));
+
+    auto* queryInput = window.findChild<QLineEdit*>(QStringLiteral("lawQueryInput"));
+    auto* searchBtn = window.findChild<QPushButton*>(QStringLiteral("lawSearchBtn"));
+    auto* tree = window.findChild<QTreeWidget*>(QStringLiteral("lawTree"));
+    auto* resultList = window.findChild<QListWidget*>(QStringLiteral("lawResultList"));
+    auto* detail = window.findChild<QTextBrowser*>(QStringLiteral("lawDetail"));
+    auto* stats = window.findChild<QLabel*>(QStringLiteral("lawStats"));
+    check(queryInput && searchBtn && tree && resultList && detail && stats,
+          QStringLiteral("T9：法条页控件齐全"));
+
+    law::LawStore* store = window.lawStore();
+    check(store != nullptr && store->isOpen() &&
+              store->lawCount() == 3 && store->articleCount() == 284,
+          QStringLiteral("T9：法条库加载 3 部 / 284 条"),
+          store ? QStringLiteral("%1 部 / %2 条")
+                      .arg(store->lawCount()).arg(store->articleCount())
+                : QStringLiteral("store 为空"));
+    check(stats != nullptr && stats->text().contains(QStringLiteral("3 部法律 / 284 条")),
+          QStringLiteral("T9：统计标签如实显示收录规模"));
+    check(tree != nullptr && tree->topLevelItemCount() == 3,
+          QStringLiteral("T9：目录树 3 部法律"),
+          tree ? QStringLiteral("%1").arg(tree->topLevelItemCount()) : QString());
+
+    // ── 主检索零污染基线 ──
+    rag::Retriever* mainRetriever = window.engineWorker()->retriever();
+    const int docsBefore = mainRetriever->documentCount();
+    const int chunksBefore = mainRetriever->chunkCount();
+    const auto docIdsBefore = mainRetriever->allDocIds();
+
+    // ── 1) 条号精确定位（法律名 + 条号）──
+    if (queryInput && searchBtn && detail) {
+        queryInput->setText(QStringLiteral("民法典 第一千零七十九条"));
+        searchBtn->click();
+        pump(50);
+        const QString text = detail->toPlainText();
+        check(text.contains(QStringLiteral("第一千零七十九条")) &&
+                  text.contains(QStringLiteral("离婚诉讼")),
+              QStringLiteral("T9：条号精确定位（民法典 第一千零七十九条）"));
+        check(text.contains(QStringLiteral("文本来源")),
+              QStringLiteral("T9：详情页脚带来源说明"));
+    }
+
+    // ── 2) 仅条号 → 跨法律定位（劳动法 第一百零七条；劳动合同法仅 98 条不命中）──
+    if (queryInput && searchBtn && detail) {
+        queryInput->setText(QStringLiteral("第一百零七条"));
+        searchBtn->click();
+        pump(50);
+        check(detail->toPlainText().contains(QStringLiteral("第一百零七条")),
+              QStringLiteral("T9：仅条号跨法律定位（第一百零七条）"));
+    }
+
+    // ── 3) 未收录条号如实提示（不静默转关键词）──
+    if (queryInput && searchBtn && detail) {
+        queryInput->setText(QStringLiteral("民法典 第九百九十九条"));
+        searchBtn->click();
+        pump(50);
+        check(detail->toPlainText().contains(QStringLiteral("未收录")),
+              QStringLiteral("T9：未收录条号如实提示"));
+    }
+
+    // ── 4) 关键词检索 → 结果列表 → 选中看详情 ──
+    if (queryInput && searchBtn && resultList && detail) {
+        queryInput->setText(QStringLiteral("试用期 不得超过"));
+        searchBtn->click();
+        pump(80);
+        check(resultList->isVisible() && resultList->count() > 0,
+              QStringLiteral("T9：关键词检索出结果列表"),
+              QStringLiteral("%1 条").arg(resultList->count()));
+        if (resultList->count() > 0) {
+            resultList->setCurrentRow(0);
+            QApplication::processEvents();
+            check(detail->toPlainText().contains(QStringLiteral("试用期")),
+                  QStringLiteral("T9：结果选中后详情展示条文"));
+        }
+    }
+
+    // ── 5) 主检索零污染断言（T9 选型：独立实例，主引擎必须纹丝不动）──
+    check(mainRetriever->documentCount() == docsBefore &&
+              mainRetriever->chunkCount() == chunksBefore,
+          QStringLiteral("T9：主引擎文档/块计数零漂移"),
+          QStringLiteral("%1/%2 → %3/%4")
+              .arg(docsBefore).arg(chunksBefore)
+              .arg(mainRetriever->documentCount())
+              .arg(mainRetriever->chunkCount()));
+    check(mainRetriever->allDocIds() == docIdsBefore,
+          QStringLiteral("T9：主引擎 docId 集合不变"));
+    bool lawLeak = false;
+    for (const auto& r : mainRetriever->search(QStringLiteral("试用期 不得超过").toStdString(), 20)) {
+        if (QString::fromStdString(r.docId).contains(QLatin1Char('#'))) {
+            lawLeak = true;
+        }
+    }
+    check(!lawLeak, QStringLiteral("T9：主检索结果无法条 docId（零污染）"));
+
+    // 截图留证
+    check(window.grab().save(outDir + QStringLiteral("/16-law-page.png")),
+          QStringLiteral("T9：截图 16-law-page"));
+
+    // 回到检索页，不影响后续分组
+    clickNavItem(navList, 0);
+    return g_failures;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -1292,6 +1417,9 @@ int main(int argc, char* argv[]) {
 
         qInfo().noquote() << QStringLiteral("── 质量分析 E2E（四路对比 → 降级语义 → 批量评测）──");
         runQualityE2E(parser.value(e2eOption));
+
+        qInfo().noquote() << QStringLiteral("── 法条速查 E2E（目录树 → 条号定位 → 关键词 → 零污染）──");
+        runLawE2E(window, outDirPath);
 
         qInfo().noquote() << QStringLiteral("── P0 同名覆盖确认 E2E（覆盖 / 跳过 / 取消 + 内容一致）──");
         runOverwriteE2E();

@@ -51,6 +51,7 @@
 #include "rag/generator.h"
 #include "rag/eval_metrics.h"
 #include "history/history_store.h"
+#include "law/law_store.h"
 #include "config/app_config.h"
 #include "config/app_settings.h"
 #include "../test/fake_transport.h"
@@ -2440,6 +2441,161 @@ void test_t5_corpus_role_distribution() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// T9：法条速查（LawStore 条号库 + 独立第二语料库检索 + 主索引零污染）
+// ═══════════════════════════════════════════════════════════════
+
+void test_t9_law_store_open_counts() {
+    TEST("T9：法条库打开（3 部 / 284 条，来源信息齐全）");
+    law::LawStore store;   // 默认路径：exe 所在目录 law_corpus.db
+    CHECK(store.open());
+    CHECK(store.isOpen());
+    CHECK_EQ(store.lawCount(), 3);
+    CHECK_EQ(store.articleCount(), 284);
+
+    const auto laws = store.laws();
+    CHECK_EQ(static_cast<int>(laws.size()), 3);
+    int found = 0;
+    for (const auto& info : laws) {
+        CHECK(!info.name.empty());
+        CHECK(!info.amendment.empty());
+        // T9 第一红线：每部法律必须带可溯源的来源说明
+        CHECK(!info.sourceDesc.empty());
+        CHECK(info.sourceUrl.find("http") == 0);
+        if (info.name.find("劳动法") != std::string::npos ||
+            info.name.find("劳动合同法") != std::string::npos ||
+            info.name.find("民法典") != std::string::npos) {
+            ++found;
+        }
+    }
+    CHECK_EQ(found, 3);
+    PASS();
+}
+
+void test_t9_law_store_exact_lookup() {
+    TEST("T9：条号精确定位（法律名+条号 / 仅条号 / 未命中）");
+    law::LawStore store;
+    CHECK(store.open());
+
+    // 法律名 + 条号：民法典 第一千零七十九条（离婚诉讼）
+    law::LawArticle article;
+    CHECK(store.findByArticle(
+        "中华人民共和国民法典（第五编 婚姻家庭）", "第一千零七十九条", article));
+    CHECK(article.text.find("离婚") != std::string::npos);
+    CHECK(article.text.find("调解") != std::string::npos);
+    CHECK(!article.sourceDesc.empty());
+
+    // 法律名 + 条号：劳动合同法 第十九条（试用期）
+    CHECK(store.findByArticle("中华人民共和国劳动合同法", "第十九条", article));
+    CHECK(article.text.find("试用期") != std::string::npos);
+
+    // 未命中如实返回 false
+    CHECK(!store.findByArticle("中华人民共和国劳动合同法", "第九十九条", article));
+
+    // 仅条号跨法律：第一百零七条 仅劳动法收录（劳动合同法止于 98 条）
+    const auto cross = store.findByArticleNo("第一百零七条");
+    CHECK_EQ(static_cast<int>(cross.size()), 1);
+    CHECK(cross.front().lawName == "中华人民共和国劳动法");
+    PASS();
+}
+
+void test_t9_law_store_article_order() {
+    TEST("T9：条号按中文数值排序（第一条 < 第十条 < 第二条，字典序陷阱）");
+    law::LawStore store;
+    CHECK(store.open());
+
+    const auto marriage = store.articlesOf(
+        "中华人民共和国民法典（第五编 婚姻家庭）");
+    CHECK_EQ(static_cast<int>(marriage.size()), 79);
+    CHECK(!marriage.empty());
+    CHECK(marriage.front().articleNo == "第一千零四十条");
+    CHECK(marriage.back().articleNo == "第一千一百一十八条");
+
+    const auto labor = store.articlesOf("中华人民共和国劳动法");
+    CHECK_EQ(static_cast<int>(labor.size()), 107);
+    CHECK(labor.front().articleNo == "第一条");
+    // 第十条 必须排在 第九条 之后（字典序会把"十"排到"九"前面）
+    bool nineBeforeTen = false;
+    for (const auto& a : labor) {
+        if (a.articleNo == "第九条") nineBeforeTen = true;
+        if (a.articleNo == "第十条") { CHECK(nineBeforeTen); break; }
+    }
+    PASS();
+}
+
+void test_t9_law_keyword_search() {
+    TEST("T9：独立法条检索实例关键词命中（试用期 → 劳动合同法 第十九条）");
+    law::LawStore store;
+    CHECK(store.open());
+
+    // 与 MainWindow::buildPages 同构：独立 Retriever 实例，docId = 法律名#条号
+    rag::Retriever lawRetriever;
+    for (const auto& article : store.allArticles()) {
+        lawRetriever.addText(article.text, article.lawName + "#" + article.articleNo);
+    }
+    CHECK_EQ(lawRetriever.documentCount(), 284);
+
+    const auto hits = lawRetriever.search("试用期 不得超过", 10);
+    CHECK(!hits.empty());
+    for (const auto& r : hits) {
+        // 全部命中都必须是法条 docId（法律名#条号 形态）
+        CHECK(r.docId.find('#') != std::string::npos);
+    }
+    // 语义命中：Top-5 内应有劳动合同法 第十九条（试用期上限条款）
+    bool hitArticle19 = false;
+    int scanned = 0;
+    for (const auto& r : hits) {
+        if (++scanned > 5) break;
+        if (r.docId == "中华人民共和国劳动合同法#第十九条") hitArticle19 = true;
+    }
+    CHECK(hitArticle19);
+    // docId 能映射回法条库（页面渲染链路）
+    const QString id = QString::fromStdString(hits.front().docId);
+    const qsizetype sep = id.indexOf(QLatin1Char('#'));
+    CHECK(sep > 0);
+    law::LawArticle article;
+    CHECK(store.findByArticle(id.left(sep).toStdString(),
+                              id.mid(sep + 1).toStdString(), article));
+    CHECK(!article.text.empty());
+    PASS();
+}
+
+void test_t9_main_index_zero_pollution() {
+    TEST("T9：主索引零污染（法条库与主引擎物理隔离，计数与检索互不影响）");
+    // 主引擎：模拟文书语料
+    rag::Retriever main;
+    main.addText("民间借贷纠纷：原告主张被告归还借款本金及利息。", "case_001");
+    main.addText("劳动合同争议：用人单位未签订书面劳动合同。", "case_002");
+    const int docsBefore = main.documentCount();
+    const int chunksBefore = main.chunkCount();
+    const auto idsBefore = main.allDocIds();
+    const auto mainHitsBefore = main.search("劳动合同", 10);
+
+    // 法条侧：全量加载 + 检索（与 T9 页面同构）
+    law::LawStore store;
+    CHECK(store.open());
+    rag::Retriever lawRetriever;
+    for (const auto& article : store.allArticles()) {
+        lawRetriever.addText(article.text, article.lawName + "#" + article.articleNo);
+    }
+    const auto lawHits = lawRetriever.search("试用期", 10);
+    CHECK(!lawHits.empty());
+
+    // 主引擎纹丝不动
+    CHECK_EQ(main.documentCount(), docsBefore);
+    CHECK_EQ(main.chunkCount(), chunksBefore);
+    CHECK(main.allDocIds() == idsBefore);
+    // 法条 docId 绝不出现在主检索结果里
+    for (const auto& r : main.search("试用期 不得超过", 20)) {
+        CHECK(r.docId.find('#') == std::string::npos);
+    }
+    // 主引擎原有行为不变：同样查询结果与法条加载前一致
+    const auto mainHitsAfter = main.search("劳动合同", 10);
+    CHECK_EQ(static_cast<int>(mainHitsAfter.size()),
+             static_cast<int>(mainHitsBefore.size()));
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
 // P2：传输注入后的网络链路单测（FakeTransport，离线驱动真实代码路径）
 // ═══════════════════════════════════════════════════════════════
 
@@ -3047,6 +3203,12 @@ void run_all_tests() {
     test_t5_persistence_roles_roundtrip();
     test_t5_v2_index_roles_reannotated();
     test_t5_corpus_role_distribution();
+
+    test_t9_law_store_open_counts();
+    test_t9_law_store_exact_lookup();
+    test_t9_law_store_article_order();
+    test_t9_law_keyword_search();
+    test_t9_main_index_zero_pollution();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;
