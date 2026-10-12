@@ -20,6 +20,10 @@ constexpr const char* HISTORY_DB = "rag_history.db";
 /// 检索参数配置（T3）：JSON 可手工编辑；因可含 API Key，绝不入库
 constexpr const char* SETTINGS_FILE = "rag_settings.json";
 
+/// 法条库 SQLite（T9）：由 tools/build_law_db.py 从 data/law_corpus/*.json
+/// 构建后随程序分发；运行期只读，不入 .gitignore
+constexpr const char* LAW_DB = "law_corpus.db";
+
 /// 请求超时（秒）：embedding 1x，LLM 2x（流式）
 constexpr int HTTP_TIMEOUT = 30;
 

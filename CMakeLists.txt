@@ -120,6 +120,7 @@ set(HEADERS
     include/config/app_settings.h
     include/history/history_record.h
     include/history/history_store.h
+    include/law/law_store.h
 )
 
 # ── UI 骨架冒烟测试（离屏渲染，导出各页截图）──
@@ -344,6 +345,21 @@ if(WIN32 AND NOT Qt6_FOUND)
         endif()
     endforeach()
     message(STATUS "Qt runtime DLLs deploy from: ${QT_BIN_DIR}")
+endif()
+
+# ── 法条库随程序分发（T9）：law_corpus.db 复制到各 exe 同级，与 dict 同策略 ──
+set(LAW_DB_SRC "${CMAKE_SOURCE_DIR}/data/law_corpus.db")
+if(EXISTS "${LAW_DB_SRC}")
+    foreach(_target ${PROJECT_NAME} run_tests ui_smoke)
+        add_custom_command(TARGET ${_target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${LAW_DB_SRC}"
+                    "$<TARGET_FILE_DIR:${_target}>/law_corpus.db")
+    endforeach()
+    message(STATUS "Law corpus db: ${LAW_DB_SRC}")
+else()
+    message(WARNING "未找到 law_corpus.db（${LAW_DB_SRC}），法条速查页将不可用。"
+                    "请先运行: python tools/build_law_db.py")
 endif()
 
 # ── 词典随程序分发（P0-1）──
