@@ -80,6 +80,7 @@ private:
     std::string dbPath_;
     QString connectionName_;
     bool opened_ = false;
+    std::string lastError_;
 };
 
 }  // namespace law

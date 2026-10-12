@@ -44,20 +44,27 @@ LawArticle articleFromQuery(QSqlQuery& query) {
 /// 转不动（异常输入）的排最后。仅用于展示顺序，正文不受影响。
 long long articleNoKey(const std::string& no) {
     static const std::string kDigits = "零一二三四五六七八九";
+    // 剥掉「第」前缀（E7 AC AC）与「条」后缀（E6 9D A1）
+    std::string body = no;
+    const std::string kQian = "\xe7\xac\xac";   // 第
+    const std::string kTiao = "\xe6\x9d\xa1";   // 条
+    if (body.compare(0, kQian.size(), kQian) == 0) {
+        body.erase(0, kQian.size());
+    }
+    if (body.size() >= kTiao.size() &&
+        body.compare(body.size() - kTiao.size(), kTiao.size(), kTiao) == 0) {
+        body.erase(body.size() - kTiao.size());
+    }
     long long total = 0, num = 0;
-    bool ok = false;
-    for (size_t i = 0; i < no.size();) {
-        const unsigned char c = static_cast<unsigned char>(no[i]);
-        if (c < 0x80) {  // 非 UTF-8 多字节，异常输入
+    bool ok = !body.empty();
+    for (size_t i = 0; ok && i < body.size(); i += 3) {
+        if (i + 3 > body.size()) {  // 残缺的 UTF-8 序列
             return -1;
         }
-        // UTF-8 中文字符占 3 字节
-        const std::string ch = no.substr(i, 3);
-        i += 3;
+        const std::string ch = body.substr(i, 3);
         const size_t d = kDigits.find(ch);
         if (d != std::string::npos) {
-            num = static_cast<long long>(d) - 1;  // 零=0 … 九=9
-            ok = true;
+            num = static_cast<long long>(d) / 3;  // 字节偏移 → 数字（UTF-8 汉字 3 字节）
             continue;
         }
         long long unit = 0;
@@ -65,11 +72,10 @@ long long articleNoKey(const std::string& no) {
         else if (ch == "\xe7\x99\xbe") unit = 100;  // 百
         else if (ch == "\xe5\x8d\x83") unit = 1000; // 千
         if (unit == 0) {
-            return -1;  // 非数字字符（如「条」之前出现别的字）
+            return -1;  // 非数字字符
         }
         total += (num > 0 ? num : 1) * unit;
         num = 0;
-        ok = true;
     }
     return ok ? total + num : -1;
 }
