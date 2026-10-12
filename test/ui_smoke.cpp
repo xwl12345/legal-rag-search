@@ -108,7 +108,7 @@ void waitUntil(const std::function<bool()>& done, int maxMs = 60000) {
 }
 
 const char* const kPageNames[] = {
-    "01-search", "02-library", "03-history", "04-eval", "05-settings"
+    "01-search", "02-library", "03-history", "04-eval", "05-law", "06-settings"
 };
 
 /// 采集语料目录下的全部可导入文件（按文件名排序，保证可复现）

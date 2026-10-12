@@ -20,9 +20,11 @@
 #include "ui/library_page.h"
 #include "ui/history_page.h"
 #include "ui/quality_page.h"
+#include "ui/law_page.h"
 #include "ui/settings_page.h"
 #include "config/app_config.h"
 #include "history/history_store.h"
+#include "law/law_store.h"
 #include "rag/retriever.h"
 
 #include <QThread>
@@ -101,6 +103,24 @@ void MainWindow::buildPages() {
         qWarning("问答历史库打开失败：%s", historyStore_->lastError().c_str());
     }
 
+    // ── 法条速查（T9）：法条库只读打开 + 独立第二语料库检索实例 ──
+    // 打不开（库文件缺失/损坏）时法条页如实显示不可用，不影响其它页面。
+    lawStore_ = std::make_unique<law::LawStore>();
+    if (lawStore_->open()) {
+        lawRetriever_ = std::make_unique<rag::Retriever>();
+        // docId = 法律名 + "#" + 条号；法条页按此映射回 LawStore 取全文
+        for (const auto& article : lawStore_->allArticles()) {
+            lawRetriever_->addText(
+                article.text,
+                article.lawName + "#" + article.articleNo);
+        }
+        qInfo("法条库已加载：%d 部 / %d 条（关键词检索实例就绪）",
+              lawStore_->lawCount(), lawStore_->articleCount());
+    } else {
+        qWarning("法条库打开失败：%s（法条速查页将显示不可用）",
+                 lawStore_->lastError().c_str());
+    }
+
     // ── 第 1 页：检索问答 ──
     searchPage_ = new SearchPage(retriever_, pageStack_);
     pageStack_->addWidget(searchPage_);
@@ -171,7 +191,14 @@ void MainWindow::buildPages() {
     connect(engineWorker_, &EngineWorker::evalFinished,
             qualityPage_, &QualityPage::onEvalFinished);
 
-    // ── 第 5 页：设置（T3）──
+    // ── 第 5 页：法条速查（T9）──
+    // 插件式接入：注入法条库指针 + 独立法条检索实例指针，两者都只读。
+    // 法条检索实例与主引擎物理隔离，本页不经过 EngineWorker（语料小，
+    // 同步调用毫秒级）；删掉本页 = 去掉这几行 + 删页面文件。
+    lawPage_ = new LawPage(lawStore_.get(), lawRetriever_.get(), pageStack_);
+    pageStack_->addWidget(lawPage_);
+
+    // ── 第 6 页：设置（T3）──
     // 插件式接入：本页只读写配置层，不碰 Retriever——保存后发 settingsChanged，
     // 由本窗口中转给引擎（热更新）与检索页（检索宽度/温度），两页互不引用。
     settingsPage_ = new SettingsPage(appSettings_, pageStack_);   // P3：注入启动配置

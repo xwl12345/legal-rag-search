@@ -433,3 +433,59 @@ QTableWidget#qualityMetricsTable QHeaderView::section {
     font-weight: 700;
     color: #64748B;
 }
+
+/* ── 法条速查页（T9）───────────────────────────────────────────────────*/
+QLabel#lawStats {
+    color: #6B7280;
+    font-size: 12px;
+}
+QLabel#lawLeftTitle {
+    color: #64748B;
+    font-size: 12px;
+    font-weight: 700;
+}
+QTreeWidget#lawTree {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 8px;
+    outline: 0;
+    font-size: 13px;
+    color: #1F2937;
+}
+QTreeWidget#lawTree::item {
+    padding: 6px 8px;
+}
+QTreeWidget#lawTree::item:hover {
+    background: #FDF6EC;
+}
+QTreeWidget#lawTree::item:selected {
+    background: #FDF6EC;
+    color: #B7791F;
+}
+QListWidget#lawResultList {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 8px;
+    outline: 0;
+    font-size: 12px;
+    color: #1F2937;
+}
+QListWidget#lawResultList::item {
+    padding: 8px 10px;
+    border-bottom: 1px solid #F0F3F7;
+}
+QListWidget#lawResultList::item:hover {
+    background: #FDF6EC;
+}
+QListWidget#lawResultList::item:selected {
+    background: #FDF6EC;
+    color: #B7791F;
+}
+QTextBrowser#lawDetail {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 8px;
+    font-size: 13px;
+    color: #1F2937;
+    padding: 14px 16px;
+}

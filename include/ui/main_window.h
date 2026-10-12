@@ -18,6 +18,7 @@ class SearchPage;
 class LibraryPage;
 class HistoryPage;
 class QualityPage;
+class LawPage;
 class SettingsPage;
 
 namespace rag {
@@ -27,6 +28,10 @@ class Retriever;
 namespace history {
 struct HistoryRecord;
 class HistoryStore;
+}
+
+namespace law {
+class LawStore;
 }
 
 /// 主窗口骨架：左侧导航 + 中央多页容器 + 底部状态栏。
@@ -50,6 +55,9 @@ public:
     /// 问答历史存储层（供 ui_smoke 构造历史记录做端到端断言；
     /// 生产代码里本窗口之外的调用者不存在，页面一律靠构造参数注入）
     history::HistoryStore* historyStore() const { return historyStore_.get(); }
+
+    /// 法条库（供 ui_smoke 做法条 E2E 断言；同 historyStore() 的注入约定）
+    law::LawStore* lawStore() const { return lawStore_.get(); }
 
     /// 引擎工作线程宿主（供 ui_smoke 等待引擎空闲；生产代码不经此直调重操作）
     EngineWorker* engineWorker() const { return engineWorker_; }
@@ -116,11 +124,19 @@ private:
     // ── 问答历史存储实例（T2：同样集中在本窗口创建，历史页只借用）──
     std::unique_ptr<history::HistoryStore> historyStore_;
 
+    // ── 法条速查（T9）：法条库 + 独立法条检索实例，均集中在本窗口创建。
+    //    独立 Retriever 与主引擎（retriever_）物理隔离：法条语料不进主
+    //    索引，T4/T6 指标基线零漂移由构造保证；语料小（数百条）启动时
+    //    addText 毫秒级，无需持久化也无需引擎线程。
+    std::unique_ptr<law::LawStore> lawStore_;
+    std::unique_ptr<rag::Retriever> lawRetriever_;
+
     // ── 业务页（占位页在 buildPages 里就地构造后交给 stack 托管）──
     SearchPage* searchPage_ = nullptr;
     LibraryPage* libraryPage_ = nullptr;
     HistoryPage* historyPage_ = nullptr;
     QualityPage* qualityPage_ = nullptr;
+    LawPage* lawPage_ = nullptr;
     SettingsPage* settingsPage_ = nullptr;
 
     // ── 检索参数配置（T3：启动时从 rag_settings.json 加载，设置页保存后更新）──

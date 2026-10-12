@@ -58,6 +58,7 @@ set(SRC_ENGINE
 # 存储层（T2：问答历史 SQLite；不含 Qt Widgets，测试目标复用）
 set(SRC_STORE
     src/history/history_store.cpp
+    src/law/law_store.cpp
 )
 
 # 配置层（T3：检索参数配置中心 + P3 数据文件路径解析；只依赖 QtCore，测试目标复用）
@@ -76,6 +77,7 @@ set(SRC_UI
     src/ui/library_page.cpp
     src/ui/history_page.cpp
     src/ui/quality_page.cpp
+    src/ui/law_page.cpp
     src/ui/settings_page.cpp
     src/ui/main_window.cpp
 )
@@ -115,6 +117,7 @@ set(HEADERS
     include/ui/library_page.h
     include/ui/history_page.h
     include/ui/quality_page.h
+    include/ui/law_page.h
     include/ui/settings_page.h
     include/config/app_config.h
     include/config/app_settings.h
