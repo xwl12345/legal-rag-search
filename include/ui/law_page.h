@@ -34,6 +34,7 @@ public:
     /// @param lawRetriever 法条关键词检索实例（独立第二语料库，MainWindow 构建）
     explicit LawPage(law::LawStore* store, rag::Retriever* lawRetriever,
                      QWidget* parent = nullptr);
+    ~LawPage() override;
 
 private slots:
     /// 搜索框回车 / 点「检索」：条号精确定位与关键词检索自动分流

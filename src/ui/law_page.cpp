@@ -132,6 +132,13 @@ LawPage::LawPage(law::LawStore* store, rag::Retriever* lawRetriever,
     setupUi();
 }
 
+LawPage::~LawPage() {
+    // 结果模式下 resultList_ 的 item 上挂有堆对象 LawArticle，
+    // QListWidget 销毁 item 不会释放它们——页面析构时统一兜底
+    //（条目来源见 clearResultPayloads 注释）
+    clearResultPayloads(resultList_);
+}
+
 void LawPage::setupUi() {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(24, 20, 24, 20);
@@ -313,6 +320,7 @@ void LawPage::onSearch() {
                                     .arg(articleNo)
                                     .arg(hits.size()));
             tree_->hide();
+            clearResultPayloads(resultList_);  // 上次结果模式可能挂有 LawArticle
             resultList_->clear();
             resultList_->show();
             resultMode_ = true;
@@ -365,6 +373,7 @@ void LawPage::onSearch() {
                             .arg(raw)
                             .arg(hits.size()));
     tree_->hide();
+    clearResultPayloads(resultList_);  // 重建前释放上一批挂载的条文对象
     resultList_->clear();
     resultList_->show();
     resultMode_ = true;

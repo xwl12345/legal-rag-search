@@ -161,25 +161,38 @@ void SearchPage::setupUi() {
     typeLabel->setObjectName(QStringLiteral("fieldLabel"));
     caseTypeFilter_ = new QComboBox(this);
     caseTypeFilter_->setObjectName(QStringLiteral("caseTypeFilter"));
-    caseTypeFilter_->addItems({QStringLiteral("全部"), QStringLiteral("民事"),
-                               QStringLiteral("刑事"), QStringLiteral("行政"),
-                               QStringLiteral("知识产权"), QStringLiteral("商事")});
+    // 语义值走 itemData：「全部」存空串（不筛选），其余项存案件类型本身。
+    // 与 tendencyFilter 同一范式——界面文案可随意改，筛选逻辑零改动。
+    caseTypeFilter_->addItem(QStringLiteral("全部"), QString());
+    caseTypeFilter_->addItem(QStringLiteral("民事"), QStringLiteral("民事"));
+    caseTypeFilter_->addItem(QStringLiteral("刑事"), QStringLiteral("刑事"));
+    caseTypeFilter_->addItem(QStringLiteral("行政"), QStringLiteral("行政"));
+    caseTypeFilter_->addItem(QStringLiteral("知识产权"), QStringLiteral("知识产权"));
+    caseTypeFilter_->addItem(QStringLiteral("商事"), QStringLiteral("商事"));
     caseTypeFilter_->setMinimumHeight(32);
 
     auto* courtLabel = new QLabel(QStringLiteral("法院级别"), this);
     courtLabel->setObjectName(QStringLiteral("fieldLabel"));
     courtLevelFilter_ = new QComboBox(this);
     courtLevelFilter_->setObjectName(QStringLiteral("courtLevelFilter"));
-    courtLevelFilter_->addItems({QStringLiteral("全部"), QStringLiteral("最高人民法院"),
-                                 QStringLiteral("高级人民法院"), QStringLiteral("中级人民法院"),
-                                 QStringLiteral("基层人民法院")});
+    // itemData 直接存 CourtLevel 枚举值（「全部」为 -1），
+    // 判定与文案彻底解耦（原先靠中文文案映射枚举，改文案即坏筛选）
+    courtLevelFilter_->addItem(QStringLiteral("全部"), -1);
+    courtLevelFilter_->addItem(QStringLiteral("最高人民法院"),
+                               static_cast<int>(document::CourtLevel::Supreme));
+    courtLevelFilter_->addItem(QStringLiteral("高级人民法院"),
+                               static_cast<int>(document::CourtLevel::High));
+    courtLevelFilter_->addItem(QStringLiteral("中级人民法院"),
+                               static_cast<int>(document::CourtLevel::Intermediate));
+    courtLevelFilter_->addItem(QStringLiteral("基层人民法院"),
+                               static_cast<int>(document::CourtLevel::Basic));
     courtLevelFilter_->setMinimumHeight(32);
 
     auto* yearLabel = new QLabel(QStringLiteral("年份"), this);
     yearLabel->setObjectName(QStringLiteral("fieldLabel"));
     yearFilter_ = new QComboBox(this);
     yearFilter_->setObjectName(QStringLiteral("yearFilter"));
-    yearFilter_->addItem(QStringLiteral("全部"));
+    yearFilter_->addItem(QStringLiteral("全部"), QString());
     yearFilter_->setMinimumHeight(32);
 
     // 第四维：裁判结果倾向（第 8 类元数据）。
@@ -324,9 +337,9 @@ void SearchPage::setupUi() {
 }
 
 void SearchPage::emitEngineStats() {
-    // 注意：Retriever::docCount() 走的是 InvertedIndex::totalDocs()，
-    // 而 totalDocs_ 是按 (docId, chunkIndex) 逐块累加的 —— 它实际是「文本块数」。
-    // 状态栏要显示真实文档数，须用 documentCount()（等价于 allDocIds().size()）。
+    // 文档数与块数是两个量：documentCount() = 真实文档数（等价 allDocIds().size()），
+    // chunkCount() = 文本块数（按 (docId, chunkIndex) 逐块累加）。
+    // 2026-10-13 代码审查后删除了语义歧义的 docCount()，此处两个显式接口各司其职。
     emit engineStatsChanged(retriever_->documentCount(), retriever_->chunkCount());
 }
 
@@ -868,9 +881,11 @@ void SearchPage::displayResults(const std::vector<rag::SearchResult>& results) {
 std::vector<rag::SearchResult> SearchPage::getFilteredResults() {
     if (cachedResults_.empty()) return {};
 
-    const QString caseType = caseTypeFilter_->currentText();
-    const QString courtLevel = courtLevelFilter_->currentText();
-    const QString year = yearFilter_->currentText();
+    // 四维筛选一律走 itemData 语义值（与 tendencyFilter 同一范式）：
+    // 案件类型/年份存字符串（空 = 全部），法院级别存枚举（-1 = 全部）。
+    const QString caseType = caseTypeFilter_->currentData().toString();
+    const int courtLevelValue = courtLevelFilter_->currentData().toInt();
+    const QString year = yearFilter_->currentData().toString();
 
     // 第四维用 itemData 里的枚举值判断，"全部"为 -1
     const int tendencyValue = tendencyFilter_->currentData().toInt();
@@ -882,8 +897,8 @@ std::vector<rag::SearchResult> SearchPage::getFilteredResults() {
     const bool courtOnly = courtOnlyFilter_->isChecked();
 
     // 无筛选条件，直接返回全部
-    if (caseType == QStringLiteral("全部") && courtLevel == QStringLiteral("全部")
-        && year == QStringLiteral("全部") && !tendencyFiltering && !courtOnly) {
+    if (caseType.isEmpty() && courtLevelValue < 0 && year.isEmpty()
+        && !tendencyFiltering && !courtOnly) {
         return cachedResults_;
     }
 
@@ -898,26 +913,23 @@ std::vector<rag::SearchResult> SearchPage::getFilteredResults() {
             continue;
         }
 
-        // 案件类型筛选
-        if (caseType != QStringLiteral("全部")) {
+        // 案件类型筛选（itemData 空串 = 全部）
+        if (!caseType.isEmpty()) {
             if (!meta || meta->caseType != caseType.toStdString()) {
                 continue;
             }
         }
 
         // 法院级别筛选（P2：层级判定下沉 document::courtLevelOf，含单测）
-        if (courtLevel != QStringLiteral("全部")) {
+        if (courtLevelValue >= 0) {
             const auto level = document::courtLevelOf(meta ? *meta : document::DocMetadata{});
-            const bool match =
-                (courtLevel == QStringLiteral("最高人民法院") && level == document::CourtLevel::Supreme) ||
-                (courtLevel == QStringLiteral("高级人民法院") && level == document::CourtLevel::High) ||
-                (courtLevel == QStringLiteral("中级人民法院") && level == document::CourtLevel::Intermediate) ||
-                (courtLevel == QStringLiteral("基层人民法院") && level == document::CourtLevel::Basic);
-            if (!match) continue;
+            if (level != static_cast<document::CourtLevel>(courtLevelValue)) {
+                continue;
+            }
         }
 
-        // 年份筛选
-        if (year != QStringLiteral("全部")) {
+        // 年份筛选（itemData 空串 = 全部）
+        if (!year.isEmpty()) {
             if (!meta || meta->date.empty()) {
                 continue;
             }
@@ -975,15 +987,15 @@ void SearchPage::populateYearFilter(const std::vector<rag::SearchResult>& result
     }
 
     // 保留"全部"选项，更新年份列表
-    const QString currentYear = yearFilter_->currentText();
+    const QString currentYear = yearFilter_->currentData().toString();
     yearFilter_->blockSignals(true);
     yearFilter_->clear();
-    yearFilter_->addItem(QStringLiteral("全部"));
+    yearFilter_->addItem(QStringLiteral("全部"), QString());
     for (const auto& y : years) {
-        yearFilter_->addItem(y);
+        yearFilter_->addItem(y, y);
     }
-    // 恢复之前的选择
-    const int idx = yearFilter_->findText(currentYear);
+    // 恢复之前的选择（按 itemData 匹配，与文案解耦）
+    const int idx = yearFilter_->findData(currentYear);
     if (idx >= 0) yearFilter_->setCurrentIndex(idx);
     yearFilter_->blockSignals(false);
 }

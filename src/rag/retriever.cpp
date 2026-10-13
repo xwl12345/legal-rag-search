@@ -148,11 +148,6 @@ double Retriever::vectorWeight() const {
     return vectorWeight_;
 }
 
-int Retriever::docCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return index_.totalDocs();
-}
-
 int Retriever::chunkCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return static_cast<int>(chunkStore_.size());

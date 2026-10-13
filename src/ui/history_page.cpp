@@ -364,8 +364,6 @@ bool HistoryPage::exportRecordById(long long id, const QString& path, bool confi
         return false;
     }
 
-    const auto pathStr = QObject::tr("导出失败");
-
     history::HistoryRecord record;
     if (!store_->get(id, record)) {
         if (confirm) {

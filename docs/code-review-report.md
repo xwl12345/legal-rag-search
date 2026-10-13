@@ -129,3 +129,20 @@
 ## 六、总结
 
 项目功能全部跑通（构建/100 项回归/E2E 七组/UTF-8 回归/检索评测），端到端通畅；架构与解耦质量高于一般本科毕业设计水准。共发现问题 7 项：P0 无、P1 两项（同一根因：LawPage 结果列表 payload 释放遗漏，修复共 2 行）、P2 三项、P3 两项。**建议按第五节顺序处理 P1 后即可收尾。**
+
+---
+
+## 七、修复记录（2026-10-13，commit `960f852` 之后）
+
+| 问题 | 处理 | 改动 |
+|---|---|---|
+| P1-1 / P1-2 LawPage payload 泄漏 | ✅ 已修复 | `law_page.cpp`：onSearch 两个分支（精确匹配 323 行 / 关键词 376 行）`resultList_->clear()` 前均补 `clearResultPayloads(resultList_)`；新增 `~LawPage()` 析构兜底（139 行） |
+| P2-2 筛选字面量匹配 | ✅ 已修复 | `search_page.cpp`：案件类型/法院级别/年份三下拉改 `addItem(文案, QVariant 语义值)`，`getFilteredResults` 读取端全部改 `currentData()`（法院级别直接存 `CourtLevel` 枚举，删除四分支文案映射）；`populateYearFilter` 选择保持改 `findData`。E2E 筛选断言（归零/还原）实测通过 |
+| P2-3 docCount 语义歧义 | ✅ 已修复（采取"直接删除"方案） | `retriever.h/cpp` 删除 `docCount()`；`test_main.cpp` 6 处调用点迁移：389/717 行按标签分别改 `documentCount()`/`chunkCount()`，891/1190/1258 行改 `chunkCount()`，1111 行历史语义钉注改判为删除说明 |
+| P3-1 死代码 | ✅ 已修复 | `history_page.cpp` 删除未使用的 `pathStr` |
+| P2-1 PDF 1.5+ 对象流 | ⏸ 未处理（功能边界，非缺陷） | 保留为后续版本候选；README/论文口径中已注明局限 |
+| P3-2 extractDate 正则开销 | ⏸ 未处理（非阻塞） | 毫秒级开销，暂不投入 |
+
+**修复后验证**：增量构建 5 target 全过；`run_tests.exe` 100/100；`ui_smoke.exe` E2E 全部通过（含筛选归零/还原断言、法条页 15 项断言）；`test_utf8_location_regression.exe` 通过。
+
+> 过程备注：本次修复曾因同一文件多条编辑并行提交发生写回竞态（部分修改被冲掉），已改为原子脚本补齐并全量复核；后续编辑同一文件必须逐条顺序提交。

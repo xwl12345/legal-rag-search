@@ -386,7 +386,7 @@ void test_diagnostic_user_query() {
                        "RAG的主要优点包括：减少幻觉、知识更新、可溯源、领域适配。",
                        "rag_intro.txt");
 
-    std::cout << "\n    已导入文档数: " << retriever.docCount();
+    std::cout << "\n    已导入文档数: " << retriever.documentCount();
 
     auto results = retriever.search("RAG的优劣在哪里", 5);
     std::cout << "\n    搜索结果数: " << results.size();
@@ -714,7 +714,7 @@ void test_e2e_import_all_demo_docs() {
         imported++;
     }
 
-    std::cout << "    (导入: " << imported << " 篇, 文本块: " << retriever.docCount() << ") ";
+    std::cout << "    (导入: " << imported << " 篇, 文本块: " << retriever.chunkCount() << ") ";
     CHECK(imported == 21);
     PASS();
 }
@@ -888,7 +888,7 @@ void test_e2e_failed_ocr_import_then_search() {
     CHECK(after.size() >= 1);
 
     // 元数据不应被破坏
-    CHECK(retriever.docCount() >= 21);
+    CHECK(retriever.chunkCount() >= 21);
     PASS();
 }
 
@@ -1108,8 +1108,8 @@ void test_retriever_document_view() {
     // 文档数与块数是两个量：21 篇 / 118 块
     CHECK_EQ(retriever.documentCount(), 21);
     CHECK_EQ(retriever.chunkCount(), 118);
-    // docCount() 返回块数——这是有意的历史语义，此处显式钉住防回归
-    CHECK_EQ(retriever.docCount(), retriever.chunkCount());
+    // 注：原 docCount() 实为块数语义（命名歧义），2026-10-13 代码审查后
+    // 删除该接口，文档数/块数一律用上面两个显式接口，杜绝误用
 
     const auto infos = retriever.documentInfos();
     CHECK_EQ(static_cast<int>(infos.size()), 21);
@@ -1184,10 +1184,9 @@ void test_retriever_remove_document() {
     const int removed = retriever.removeDocument(victim);
     CHECK_EQ(removed, victimChunks);
 
-    // 三处计数同步收敛
+    // 两处计数同步收敛
     CHECK_EQ(retriever.documentCount(), 20);
     CHECK_EQ(retriever.chunkCount(), 118 - victimChunks);
-    CHECK_EQ(retriever.docCount(), 118 - victimChunks);
 
     // 只读视图里也没有了
     rag::DocumentInfo after;
@@ -1255,7 +1254,6 @@ void test_persistence_roundtrip() {
     // 规模与首次会话完全一致
     CHECK_EQ(reader.documentCount(), 21);
     CHECK_EQ(reader.chunkCount(), 118);
-    CHECK_EQ(reader.docCount(), 118);
 
     // 检索能力（纯 BM25 降级路径）一致
     auto afterHits = reader.search("民间借贷 交付凭证", 5);
