@@ -3,10 +3,16 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QProgressBar>
 #include <QProgressDialog>
@@ -27,6 +33,7 @@
 
 #include "ui/app_theme.h"
 #include "config/app_config.h"
+#include "favorite/favorite_store.h"
 
 namespace {
 
@@ -43,9 +50,12 @@ constexpr int kRecordSnippetChars = 160;
 
 }  // namespace
 
-SearchPage::SearchPage(rag::Retriever* retriever, QWidget* parent)
+SearchPage::SearchPage(rag::Retriever* retriever,
+                       favorite::FavoriteStore* favoriteStore,
+                       QWidget* parent)
     : QWidget(parent)
     , retriever_(retriever)
+    , favoriteStore_(favoriteStore)
 {
     // P2：引擎实例必须由 MainWindow 注入（组合根唯一），自建分支已删除
     Q_ASSERT(retriever_ && "SearchPage 必须注入 Retriever");
@@ -334,6 +344,10 @@ void SearchPage::setupUi() {
             aiAnswerArea_->setPlainText(text);
         }
     });
+
+    // T11：结果列表右键 → 收藏到案例集
+    connect(resultList_, &QListWidget::customContextMenuRequested,
+            this, &SearchPage::onResultContextMenu);
 }
 
 void SearchPage::emitEngineStats() {
@@ -833,6 +847,184 @@ void SearchPage::invalidateIndexCache() {
     }
 }
 
+// ── T11：案例收藏入口 ──
+
+bool SearchPage::favoriteStoreReady() const {
+    return favoriteStore_ && favoriteStore_->isOpen();
+}
+
+QString SearchPage::caseNameById(long long caseId) const {
+    if (!favoriteStoreReady() || caseId <= 0) {
+        return QString();
+    }
+    for (const auto& c : favoriteStore_->cases()) {
+        if (c.id == caseId) {
+            return QString::fromStdString(c.name);
+        }
+    }
+    return QString();
+}
+
+void SearchPage::onResultContextMenu(const QPoint& pos) {
+    if (!resultList_) {
+        return;
+    }
+    QListWidgetItem* item = resultList_->itemAt(pos);
+    if (!item) {
+        return;   // 空白处不弹菜单
+    }
+    // 右键即选中，与桌面软件习惯一致（菜单动作随后操作当前项）
+    resultList_->setCurrentItem(item);
+
+    QMenu menu(this);
+    QAction* favAction = menu.addAction(QStringLiteral("⭐ 收藏到案例集…"));
+    favAction->setEnabled(favoriteStoreReady());
+    if (menu.exec(resultList_->viewport()->mapToGlobal(pos)) == favAction) {
+        onFavoriteCurrentResult();
+    }
+}
+
+void SearchPage::onFavoriteCurrentResult() {
+    long long caseId = 0;
+    if (!pickFavoriteCase(caseId)) {
+        return;   // 用户取消
+    }
+    addFavoriteForItem(resultList_->currentItem(), caseId);
+}
+
+long long SearchPage::addFavoriteForItem(QListWidgetItem* item, long long caseId) {
+    if (!item || caseId <= 0) {
+        return 0;
+    }
+    if (!favoriteStoreReady()) {
+        if (statusLabel_) {
+            statusLabel_->setText(QStringLiteral("案例收藏库不可用，暂时无法收藏"));
+        }
+        return 0;
+    }
+
+    // 快照语义：定位信息 + 当时的标题行 + 整块内容，全部来自 item data，
+    // 与检索缓存解耦——收藏完成后列表再变，不影响已存快照。
+    favorite::FavoriteItem entry;
+    entry.caseId = caseId;
+    entry.docId = item->data(Qt::UserRole + 1).toString().toStdString();
+    entry.chunkIndex = item->data(Qt::UserRole + 2).toInt();
+    entry.score = item->data(Qt::UserRole + 3).toDouble();
+    entry.title = item->text().toStdString();
+    entry.snippet = item->data(Qt::UserRole).toString().toStdString();
+
+    const long long id = favoriteStore_->addFavorite(entry);
+    if (id <= 0) {
+        if (statusLabel_) {
+            statusLabel_->setText(QStringLiteral("收藏失败：%1")
+                                      .arg(QString::fromStdString(favoriteStore_->lastError())));
+        }
+        return 0;
+    }
+
+    // 只发信号，不碰收藏页——刷新由 MainWindow 中转（页面间零互相引用）
+    emit favoriteChanged();
+    if (statusLabel_) {
+        statusLabel_->setText(QStringLiteral("✓ 已收藏到「%1」").arg(caseNameById(caseId)));
+    }
+    return id;
+}
+
+long long SearchPage::favoriteResultRow(int row, long long caseId) {
+    if (!resultList_ || row < 0 || row >= resultList_->count()) {
+        return 0;
+    }
+    return addFavoriteForItem(resultList_->item(row), caseId);
+}
+
+bool SearchPage::pickFavoriteCase(long long& caseIdOut) {
+    if (!favoriteStoreReady()) {
+        QMessageBox::warning(this, QStringLiteral("收藏库不可用"),
+                             QStringLiteral("案例收藏库当前不可用，暂时无法收藏。"));
+        return false;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("收藏到案例集"));
+    dlg.resize(420, 380);
+    auto* layout = new QVBoxLayout(&dlg);
+
+    auto* label = new QLabel(QStringLiteral("选择案件分组："), &dlg);
+    layout->addWidget(label);
+
+    auto* list = new QListWidget(&dlg);
+    list->setObjectName(QStringLiteral("favoritePickList"));
+    const auto cases = favoriteStore_->cases();
+    for (const auto& c : cases) {
+        auto* it = new QListWidgetItem(
+            QStringLiteral("%1（%2）").arg(QString::fromStdString(c.name)).arg(c.favoriteCount),
+            list);
+        it->setData(Qt::UserRole, QVariant::fromValue<long long>(c.id));
+        list->addItem(it);
+    }
+    if (cases.empty()) {
+        auto* empty = new QListWidgetItem(
+            QStringLiteral("（还没有分组——点下方「＋ 新建分组」创建）"), list);
+        empty->setFlags(Qt::NoItemFlags);
+        list->addItem(empty);
+    }
+    layout->addWidget(list, 1);
+
+    auto* newBtn = new QPushButton(QStringLiteral("＋ 新建分组…"), &dlg);
+    layout->addWidget(newBtn);
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(buttons);
+
+    // 新建：手打名字即可（重名幂等，createCase 返回已存在分组并选中之）
+    QObject::connect(newBtn, &QPushButton::clicked, [&list, &dlg, this]() {
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+                                  &dlg, QStringLiteral("新建分组"),
+                                  QStringLiteral("案件分组名称（如：民间借贷·交付凭证类案）："),
+                                  QLineEdit::Normal, QString(), &ok)
+                                  .trimmed();
+        if (!ok || name.isEmpty()) {
+            return;
+        }
+        const long long id = favoriteStore_->createCase(name.toStdString());
+        if (id <= 0) {
+            QMessageBox::warning(&dlg, QStringLiteral("新建失败"),
+                                 QStringLiteral("无法创建分组「%1」。").arg(name));
+            return;
+        }
+        for (int i = 0; i < list->count(); ++i) {
+            if (list->item(i)->data(Qt::UserRole).toLongLong() == id) {
+                list->setCurrentRow(i);   // 已存在 → 直接选中
+                return;
+            }
+        }
+        auto* it = new QListWidgetItem(QStringLiteral("%1（0）").arg(name), list);
+        it->setData(Qt::UserRole, QVariant::fromValue<long long>(id));
+        list->insertItem(qMax(0, list->count() - 1), it);   // 插在占位空项之前
+        list->setCurrentItem(it);
+    });
+
+    QObject::connect(buttons, &QDialogButtonBox::accepted, [&list, &dlg]() {
+        if (list->currentItem()
+            && list->currentItem()->data(Qt::UserRole).toLongLong() > 0) {
+            dlg.accept();
+        } else {
+            QMessageBox::information(&dlg, QStringLiteral("请选择分组"),
+                                     QStringLiteral("请先选择一个案件分组，或点「＋ 新建分组」创建。"));
+        }
+    });
+    QObject::connect(buttons, &QDialogButtonBox::rejected,
+                     &dlg, &QDialog::reject);
+
+    if (dlg.exec() != QDialog::Accepted) {
+        return false;
+    }
+    caseIdOut = list->currentItem()->data(Qt::UserRole).toLongLong();
+    return caseIdOut > 0;
+}
+
 // ── 显示检索结果 ──
 void SearchPage::displayResults(const std::vector<rag::SearchResult>& results) {
     resultList_->clear();
@@ -867,6 +1059,11 @@ void SearchPage::displayResults(const std::vector<rag::SearchResult>& results) {
 
         auto* item = new QListWidgetItem(QString::fromStdString(oss.str()));
         item->setData(Qt::UserRole, QString::fromStdString(r.content));
+        // T11：收藏链路需要的定位信息随 item 走（筛选重渲染后依然对得上）——
+        // UserRole+1 docId / +2 块号 / +3 收藏时的相关度
+        item->setData(Qt::UserRole + 1, QString::fromStdString(r.docId));
+        item->setData(Qt::UserRole + 2, r.chunkIndex);
+        item->setData(Qt::UserRole + 3, r.finalScore);
 
         // 截取内容预览
         QString preview = QString::fromStdString(r.content).left(200);

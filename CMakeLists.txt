@@ -14,12 +14,24 @@ set(RESOURCES
 # ── Qt6 (fallback to Qt5) ──
 # 必须在任何 add_executable / target_link_libraries 之前跑完：
 # 否则下面的 target_link_libraries 引用 Qt5::Sql 这类 IMPORTED 目标时包还没找到。
-find_package(Qt6 COMPONENTS Widgets Core Network Sql QUIET)
-if(NOT Qt6_FOUND)
+#
+# 工具链门槛（2026-10-14 实测教训）：Qt6 官方支持的 Windows MinGW 为 11.2+，
+# GCC 8.1 无法链接 Qt6；且本机 QtDesignStudio 安装目录下带一个残缺 Qt6
+# （缺 Qt6EntryPointd.lib），无条件探测会让 configure 直接报错中断。
+# 因此 GCC < 11 时跳过 Qt6 探测，直接用 Qt5 —— 这不是绕过问题，是本来就用不了。
+if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11))
+    find_package(Qt6 COMPONENTS Widgets Core Network Sql QUIET)
+    if(NOT Qt6_FOUND)
+        find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Core Network Sql)
+        message(STATUS "Using Qt5")
+    else()
+        message(STATUS "Using Qt6")
+    endif()
+else()
+    message(STATUS "Skip Qt6 probe: MinGW GCC ${CMAKE_CXX_COMPILER_VERSION} "
+                   "(Qt6 needs MinGW 11.2+); using Qt5")
     find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Core Network Sql)
     message(STATUS "Using Qt5")
-else()
-    message(STATUS "Using Qt6")
 endif()
 
 # ── Third-party header-only libraries ──
@@ -80,6 +92,7 @@ set(SRC_UI
     src/ui/history_page.cpp
     src/ui/quality_page.cpp
     src/ui/law_page.cpp
+    src/ui/favorites_page.cpp
     src/ui/settings_page.cpp
     src/ui/main_window.cpp
 )
@@ -120,6 +133,7 @@ set(HEADERS
     include/ui/history_page.h
     include/ui/quality_page.h
     include/ui/law_page.h
+    include/ui/favorites_page.h
     include/ui/settings_page.h
     include/config/app_config.h
     include/config/app_settings.h
@@ -351,6 +365,26 @@ if(WIN32 AND NOT Qt6_FOUND)
         endif()
     endforeach()
     message(STATUS "Qt runtime DLLs deploy from: ${QT_BIN_DIR}")
+endif()
+
+# ── Qt 平台插件部署（T11 期修复）──
+# Qt 把「平台插件」（qwindows / qoffscreen / qminimal）放在 <Qt前缀>/plugins/platforms/。
+# 上面只部署了 Qt 运行 DLL，漏掉这个目录：exe 目录里的 Qt5Core.dll 会让 Qt 以
+# exe 目录为前缀找 platforms/，找不到就「Could not find the Qt platform plugin」，
+# 主程序双击起不来、ui_smoke 离屏渲染直接退出（2026-10-14 重建 build 目录后实测暴露）。
+# 与 sqldrivers 同策略：构建时复制到各 exe 同级，build 目录自包含。
+if(EXISTS "${QT_INSTALL_PREFIX}/plugins/platforms")
+    file(GLOB QT_PLATFORM_PLUGINS
+         "${QT_INSTALL_PREFIX}/plugins/platforms/*.dll")
+    foreach(_target ${PROJECT_NAME} run_tests ui_smoke)
+        add_custom_command(TARGET ${_target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:${_target}>/platforms"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${QT_PLATFORM_PLUGINS}
+                    "$<TARGET_FILE_DIR:${_target}>/platforms/")
+    endforeach()
+    message(STATUS "Qt platform plugins: ${QT_INSTALL_PREFIX}/plugins/platforms")
 endif()
 
 # ── 法条库随程序分发（T9）：law_corpus.db 复制到各 exe 同级，与 dict 同策略 ──

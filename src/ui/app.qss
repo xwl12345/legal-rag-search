@@ -489,3 +489,80 @@ QTextBrowser#lawDetail {
     color: #1F2937;
     padding: 14px 16px;
 }
+
+/* ── 案例收藏页（T11）───────────────────────────────────────────────────*/
+QListWidget#favoriteCaseList {
+    background: #FFFFFF;
+    border: none;
+    outline: 0;
+    font-size: 13px;
+    color: #1F2937;
+}
+QListWidget#favoriteCaseList::item {
+    padding: 10px 14px;
+    border-bottom: 1px solid #F0F3F7;
+}
+QListWidget#favoriteCaseList::item:hover {
+    background: #FDF6EC;
+}
+QListWidget#favoriteCaseList::item:selected {
+    background: #FDF6EC;
+    color: #B7791F;
+}
+QTableWidget#favoriteTable {
+    background: #FFFFFF;
+    alternate-background-color: #FAFBFD;
+    border: none;
+    outline: 0;
+    font-size: 12px;
+    color: #1F2937;
+    gridline-color: #F0F3F7;
+}
+QTableWidget#favoriteTable::item {
+    padding: 6px 8px;
+    border-bottom: 1px solid #F0F3F7;
+}
+QTableWidget#favoriteTable::item:hover {
+    background: #FDF6EC;
+}
+QTableWidget#favoriteTable::item:selected {
+    background: #FDF6EC;
+    color: #14213D;
+}
+QTableWidget#favoriteTable QHeaderView::section {
+    background: #FAFBFD;
+    border: none;
+    border-bottom: 1px solid #E2E7EE;
+    padding: 8px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748B;
+}
+QTextBrowser#favoriteDetail {
+    background: #FFFFFF;
+    border: none;
+    font-size: 12px;
+    padding: 12px 14px;
+    color: #1F2937;
+}
+
+/* 收藏弹窗内的分组列表（T11，与法条结果列表同款）*/
+QListWidget#favoritePickList {
+    background: #FFFFFF;
+    border: 1px solid #E2E7EE;
+    border-radius: 8px;
+    outline: 0;
+    font-size: 13px;
+    color: #1F2937;
+}
+QListWidget#favoritePickList::item {
+    padding: 8px 10px;
+    border-bottom: 1px solid #F0F3F7;
+}
+QListWidget#favoritePickList::item:hover {
+    background: #FDF6EC;
+}
+QListWidget#favoritePickList::item:selected {
+    background: #FDF6EC;
+    color: #B7791F;
+}

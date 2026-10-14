@@ -20,11 +20,13 @@
 #include "ui/library_page.h"
 #include "ui/history_page.h"
 #include "ui/quality_page.h"
+#include "ui/favorites_page.h"
 #include "ui/law_page.h"
 #include "ui/settings_page.h"
 #include "config/app_config.h"
 #include "history/history_store.h"
 #include "law/law_store.h"
+#include "favorite/favorite_store.h"
 #include "rag/retriever.h"
 
 #include <QThread>
@@ -121,8 +123,16 @@ void MainWindow::buildPages() {
                  lawStore_->lastError().c_str());
     }
 
+    // ── 案例收藏库（T11）：集中创建并打开，收藏页与检索页只借用指针 ──
+    // 打不开（文件损坏/被占用）时收藏页如实显示不可用，其它功能不受影响。
+    favoriteStore_ = std::make_unique<favorite::FavoriteStore>();
+    if (!favoriteStore_->open()) {
+        qWarning("案例收藏库打开失败：%s（案例收藏页将显示不可用）",
+                 favoriteStore_->lastError().c_str());
+    }
+
     // ── 第 1 页：检索问答 ──
-    searchPage_ = new SearchPage(retriever_, pageStack_);
+    searchPage_ = new SearchPage(retriever_, favoriteStore_.get(), pageStack_);
     pageStack_->addWidget(searchPage_);
     connect(searchPage_, &SearchPage::engineStatsChanged,
             this, &MainWindow::onEngineStatsChanged);
@@ -131,6 +141,9 @@ void MainWindow::buildPages() {
     // 一个问答回合结束 → 本窗口负责落库（两页互不认识）
     connect(searchPage_, &SearchPage::answerFinished,
             this, &MainWindow::onAnswerRecorded);
+    // T11：检索页写入收藏 → 本窗口中转刷新收藏页（两页互不引用）
+    connect(searchPage_, &SearchPage::favoriteChanged,
+            this, &MainWindow::onFavoriteChanged);
     // T3：启动时把配置里的 TopK / temperature 下发给检索页
     searchPage_->applySettings(appSettings_);
 
@@ -162,7 +175,8 @@ void MainWindow::buildPages() {
 
     // ── 第 2 页：文档库（T1）──
     // 插件式接入：只注入引擎裸指针，删掉本页只需去掉这两行 + 删页面文件。
-    libraryPage_ = new LibraryPage(retriever_, pageStack_);
+    // T11：另注入收藏库指针——删除文档后联动标记收藏失效（本页内完成并提示）。
+    libraryPage_ = new LibraryPage(retriever_, favoriteStore_.get(), pageStack_);
     pageStack_->addWidget(libraryPage_);
     connect(libraryPage_, &LibraryPage::libraryChanged,
             this, &MainWindow::onLibraryChanged);
@@ -191,14 +205,21 @@ void MainWindow::buildPages() {
     connect(engineWorker_, &EngineWorker::evalFinished,
             qualityPage_, &QualityPage::onEvalFinished);
 
-    // ── 第 5 页：法条速查（T9）──
+    // ── 第 5 页：案例收藏（T11）──
+    // 插件式接入：只注入收藏库指针，本页不知道收藏从哪来（检索页写入），
+    // 也不知道文档被谁删掉（文档库页标记失效）——刷新统一由本窗口中转。
+    // 删掉本页 = 去掉这两行 + 删页面文件，检索与文档库功能零影响。
+    favoritesPage_ = new FavoritesPage(favoriteStore_.get(), pageStack_);
+    pageStack_->addWidget(favoritesPage_);
+
+    // ── 第 6 页：法条速查（T9）──
     // 插件式接入：注入法条库指针 + 独立法条检索实例指针，两者都只读。
     // 法条检索实例与主引擎物理隔离，本页不经过 EngineWorker（语料小，
     // 同步调用毫秒级）；删掉本页 = 去掉这几行 + 删页面文件。
     lawPage_ = new LawPage(lawStore_.get(), lawRetriever_.get(), pageStack_);
     pageStack_->addWidget(lawPage_);
 
-    // ── 第 6 页：设置（T3）──
+    // ── 第 7 页：设置（T3）──
     // 插件式接入：本页只读写配置层，不碰 Retriever——保存后发 settingsChanged，
     // 由本窗口中转给引擎（热更新）与检索页（检索宽度/温度），两页互不引用。
     settingsPage_ = new SettingsPage(appSettings_, pageStack_);   // P3：注入启动配置
@@ -325,7 +346,21 @@ void MainWindow::onLibraryChanged() {
     if (searchPage_) {
         searchPage_->invalidateIndexCache();
     }
+    // T11：文档增删会影响收藏项的有效性展示（删除已在文档库页标记失效），
+    // 这里统一刷新一次收藏页，让状态列与计数保持最新。
+    if (favoritesPage_) {
+        favoritesPage_->refresh();
+    }
     refreshEngineStats();
+}
+
+// ── T11：检索页写入收藏 → 刷新收藏页 ──
+// 检索页只发信号、收藏页只读存储层，"谁触发刷新"由本窗口负责 ——
+// 与 answerFinished → onAnswerRecorded 同款模式，两页因此不需要互相 include。
+void MainWindow::onFavoriteChanged() {
+    if (favoritesPage_) {
+        favoritesPage_->refresh();
+    }
 }
 
 // ── 问答回合结束 → 落库（T2）──

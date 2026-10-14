@@ -19,6 +19,7 @@ class LibraryPage;
 class HistoryPage;
 class QualityPage;
 class LawPage;
+class FavoritesPage;
 class SettingsPage;
 
 namespace rag {
@@ -32,6 +33,10 @@ class HistoryStore;
 
 namespace law {
 class LawStore;
+}
+
+namespace favorite {
+class FavoriteStore;
 }
 
 /// 主窗口骨架：左侧导航 + 中央多页容器 + 底部状态栏。
@@ -59,6 +64,9 @@ public:
     /// 法条库（供 ui_smoke 做法条 E2E 断言；同 historyStore() 的注入约定）
     law::LawStore* lawStore() const { return lawStore_.get(); }
 
+    /// 案例收藏库（供 ui_smoke 做收藏 E2E 断言；同 historyStore() 的注入约定）
+    favorite::FavoriteStore* favoriteStore() const { return favoriteStore_.get(); }
+
     /// 引擎工作线程宿主（供 ui_smoke 等待引擎空闲；生产代码不经此直调重操作）
     EngineWorker* engineWorker() const { return engineWorker_; }
 
@@ -75,6 +83,8 @@ private slots:
     void onApiKeyStateChanged(bool ready);
     /// 文档库发生增删/清空后，同步状态栏与检索页的缓存
     void onLibraryChanged();
+    /// T11：检索问答页写入一条收藏 → 刷新案例收藏页（两页经本窗口中转）
+    void onFavoriteChanged();
     /// 检索问答页一个回合结束：落盘到问答历史库（T2）
     void onAnswerRecorded(const history::HistoryRecord& record);
     /// 设置页保存并生效（T3）：写盘已由页面完成，这里转发给引擎与各页
@@ -131,11 +141,15 @@ private:
     std::unique_ptr<law::LawStore> lawStore_;
     std::unique_ptr<rag::Retriever> lawRetriever_;
 
+    // ── 案例收藏（T11）：收藏库同样集中在本窗口创建，收藏页与检索页只借用指针 ──
+    std::unique_ptr<favorite::FavoriteStore> favoriteStore_;
+
     // ── 业务页（占位页在 buildPages 里就地构造后交给 stack 托管）──
     SearchPage* searchPage_ = nullptr;
     LibraryPage* libraryPage_ = nullptr;
     HistoryPage* historyPage_ = nullptr;
     QualityPage* qualityPage_ = nullptr;
+    FavoritesPage* favoritesPage_ = nullptr;
     LawPage* lawPage_ = nullptr;
     SettingsPage* settingsPage_ = nullptr;
 

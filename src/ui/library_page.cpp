@@ -14,6 +14,8 @@
 #include <QTextEdit>
 #include <QVBoxLayout>
 
+#include "favorite/favorite_store.h"
+
 #include <sstream>
 
 namespace {
@@ -43,9 +45,12 @@ constexpr int kMaxDetailChars = 20000;
 
 }  // namespace
 
-LibraryPage::LibraryPage(rag::Retriever* retriever, QWidget* parent)
+LibraryPage::LibraryPage(rag::Retriever* retriever,
+                         favorite::FavoriteStore* favoriteStore,
+                         QWidget* parent)
     : QWidget(parent)
     , retriever_(retriever)
+    , favoriteStore_(favoriteStore)
 {
     setupUi();
     refresh();
@@ -376,6 +381,11 @@ void LibraryPage::clearDetails() {
 }
 
 // ── 删除 ──
+// T11：删除文档 → 收藏项联动标记失效。
+// 策略（决策点）：**标记失效而非删除收藏项**——收藏项带收藏当时的片段快照，
+// 文档没了快照还在：律师攒的类案集不会因为一篇源文书被删就缺一块，失效项
+// 照常可读、状态列明示「原文已删除」。比直接删项更贴近真实工作流，也避免
+// "删了文档收藏跟着消失"这种不可预期的数据损失。
 bool LibraryPage::removeDocumentById(const QString& docId, bool confirm) {
     if (!retriever_ || docId.isEmpty()) return false;
     if (busySelf_ || busyExternal_) return false;
@@ -402,10 +412,38 @@ bool LibraryPage::removeDocumentById(const QString& docId, bool confirm) {
         return false;
     }
 
+    // 收藏联动：标记失效。用户主动删除（confirm=true）时弹窗说明；
+    // 脚本化路径（E2E，confirm=false）只更新 hint 标签，不弹模态框。
+    const int invalidated = markFavoritesInvalid({docId});
+    if (invalidated > 0) {
+        if (hint_) {
+            hint_->setText(QStringLiteral("已将 %1 条收藏标记为「原文已删除」（快照仍可阅读）")
+                               .arg(invalidated));
+        }
+        if (confirm) {
+            QMessageBox::information(
+                this, QStringLiteral("收藏联动"),
+                QStringLiteral("《%1》已删除。\n已将 %2 条收藏标记为「原文已删除」，"
+                               "片段快照仍可在案例收藏页查看。").arg(docId).arg(invalidated));
+        }
+    }
+
     refresh();
     emit libraryChanged();
     endEngineTask();
     return true;
+}
+
+int LibraryPage::markFavoritesInvalid(const QStringList& docIds) {
+    if (!favoriteStore_ || !favoriteStore_->isOpen() || docIds.isEmpty()) {
+        return -1;
+    }
+    std::vector<std::string> ids;
+    ids.reserve(static_cast<size_t>(docIds.size()));
+    for (const QString& id : docIds) {
+        ids.push_back(id.toStdString());
+    }
+    return favoriteStore_->markInvalidByDocIds(ids);
 }
 
 void LibraryPage::onRemoveSelected() {
@@ -449,8 +487,20 @@ void LibraryPage::onRemoveSelected() {
         }
     }
 
+    // T11：收藏联动——批量删除可能命中多篇已收藏文书，一并标记失效
+    const int invalidated = markFavoritesInvalid(ids);
     refresh();
-    if (hint_) {
+    if (invalidated > 0) {
+        if (hint_) {
+            hint_->setText(QStringLiteral("✓ 已删除 %1 篇文书（释放 %2 个文本块）；"
+                                         "已将 %3 条收藏标记为「原文已删除」")
+                               .arg(removedDocs).arg(removedChunks).arg(invalidated));
+        }
+        QMessageBox::information(
+            this, QStringLiteral("收藏联动"),
+            QStringLiteral("已删除 %1 篇文书。\n已将 %2 条收藏标记为「原文已删除」，"
+                           "片段快照仍可在案例收藏页查看。").arg(removedDocs).arg(invalidated));
+    } else if (hint_) {
         hint_->setText(QStringLiteral("✓ 已删除 %1 篇文书（释放 %2 个文本块）")
                            .arg(removedDocs).arg(removedChunks));
     }
@@ -486,9 +536,28 @@ void LibraryPage::onClearAll() {
         return;
     }
 
+    // 先收齐全部 docId：clearAll 之后引擎里就查不到了
+    QStringList allIds;
+    for (const auto& docId : retriever_->allDocIds()) {
+        allIds.append(QString::fromStdString(docId));
+    }
+
     retriever_->clearAll(/*alsoDeletePersistedFile=*/true);
+
+    // T11：收藏联动——全部文档清空，其收藏项全部标记失效（快照保留）
+    const int invalidated = markFavoritesInvalid(allIds);
     refresh();
-    if (hint_) {
+    if (invalidated > 0) {
+        if (hint_) {
+            hint_->setText(QStringLiteral("✓ 已清空文档库与落盘索引；"
+                                         "已将 %1 条收藏标记为「原文已删除」")
+                               .arg(invalidated));
+        }
+        QMessageBox::information(
+            this, QStringLiteral("收藏联动"),
+            QStringLiteral("已清空文档库。\n已将 %1 条收藏标记为「原文已删除」，"
+                           "片段快照仍可在案例收藏页查看。").arg(invalidated));
+    } else if (hint_) {
         hint_->setText(QStringLiteral("✓ 已清空文档库与落盘索引"));
     }
     emit libraryChanged();

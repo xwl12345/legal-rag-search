@@ -12,6 +12,10 @@ class QTableWidget;
 class QTextEdit;
 class QLineEdit;
 
+namespace favorite {
+class FavoriteStore;
+}
+
 /// 文档库页（T1 / M1）。
 ///
 /// 解耦约定（开发工作计划·全局约束第 8 条）：
@@ -20,14 +24,21 @@ class QLineEdit;
 ///   引擎实例由 MainWindow 在集中注册处创建并经构造参数注入，本页不 new。
 ///   删除本页 = main_window.cpp 删注册几行 + 删本文件，核心检索功能零影响。
 ///
+/// T11 起另持 FavoriteStore 指针（非拥有）：删除文档成功后把其收藏项标记
+/// 「原文已删除」（快照保留可读，见 FavoriteStore::markInvalidByDocIds），
+/// 不让收藏项无声悬挂成"正常"。
+///
 /// 职责：文档列表（名称/类型/块数/案件类型/结果倾向/导入时间）、查看元数据与
 /// 全文预览、单个删除、批量删除、清空重建。
 class LibraryPage : public QWidget {
     Q_OBJECT
 
 public:
-    /// @param retriever 引擎实例（非拥有；生命周期由 MainWindow 保证）
-    explicit LibraryPage(rag::Retriever* retriever, QWidget* parent = nullptr);
+    /// @param retriever      引擎实例（非拥有；生命周期由 MainWindow 保证）
+    /// @param favoriteStore  案例收藏库（T11，非拥有；可为空——空则无删除联动）
+    explicit LibraryPage(rag::Retriever* retriever,
+                         favorite::FavoriteStore* favoriteStore = nullptr,
+                         QWidget* parent = nullptr);
     ~LibraryPage() override;
 
     /// 当前表格中的行数（供自动化测试断言）
@@ -93,7 +104,12 @@ private:
     /// 清空右侧详情区
     void clearDetails();
 
+    /// T11：把指定文档的收藏项标记为「原文已删除」。
+    /// @return 状态翻转的收藏条数；收藏库不可用返回 -1
+    int markFavoritesInvalid(const QStringList& docIds);
+
     rag::Retriever* retriever_ = nullptr;   // 非拥有
+    favorite::FavoriteStore* favoriteStore_ = nullptr;   // T11：非拥有
 
     // ── P0-2 忙碌状态 ──
     bool busySelf_ = false;

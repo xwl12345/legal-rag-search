@@ -19,6 +19,10 @@
 
 class QProgressDialog;
 
+namespace favorite {
+class FavoriteStore;
+}
+
 /// 检索问答页：保留重构前 MainWindow 的全部检索逻辑
 /// （导入 → 混合检索 → 元数据筛选 → SSE 流式回答），
 /// MainWindow 回收为纯骨架后由本页承载。
@@ -27,17 +31,33 @@ class QProgressDialog;
 ///   本页是"插件"，只对 Retriever 做单向调用；Retriever 不感知本页存在。
 ///   引擎实例由 MainWindow 集中创建并注入，本页**不拥有**它——
 ///   这样文档库页与检索页看到的是同一份索引，且删除任意页面都不影响核心。
+///   T11 起本页另持一个 FavoriteStore 指针（非拥有）：右键结果列表
+///   「收藏到案例集」把命中块快照写入收藏库；写完只发 favoriteChanged
+///   信号，由 MainWindow 中转刷新收藏页——两页互不引用。
 class SearchPage : public QWidget {
     Q_OBJECT
 
 public:
-    /// @param retriever 引擎实例（非拥有；P2 起必须注入，自建分支已删除——
-    ///                  组合根唯一，独立测试场景由测试方自持实例注入）
-    explicit SearchPage(rag::Retriever* retriever, QWidget* parent = nullptr);
+    /// @param retriever     引擎实例（非拥有；P2 起必须注入，自建分支已删除——
+    ///                      组合根唯一，独立测试场景由测试方自持实例注入）
+    /// @param favoriteStore 案例收藏库（T11，非拥有；可为空——空则收藏入口不可用）
+    explicit SearchPage(rag::Retriever* retriever,
+                        favorite::FavoriteStore* favoriteStore = nullptr,
+                        QWidget* parent = nullptr);
     ~SearchPage() override;
 
     /// 当前缓存（最近一次检索）的结果条数，供自动化测试断言
     int lastResultCount() const { return static_cast<int>(cachedResults_.size()); }
+
+    /// ── T11 案例收藏 ──
+    /// 把结果列表第 row 行（当前显示序）收藏进指定案件分组。
+    /// 与右键菜单「收藏到案例集」走同一条存储链路（含 item data 快照），
+    /// 供自动化测试绕过弹窗直接调用。
+    /// @return 收藏项 id（>0，含重复收藏返回已存在项）；失败返回 0
+    long long favoriteResultRow(int row, long long caseId);
+
+    /// 收藏库是否可用（入口菜单置灰判断用）
+    bool favoriteStoreReady() const;
 
     /// 本页是否有引擎任务进行中（检索+生成 / 批量导入），供 closeEvent 与 E2E 断言
     bool isBusy() const { return busySelf_; }
@@ -101,6 +121,10 @@ signals:
     /// 关闭窗口时据此拦截「任务进行中就退出」
     void engineBusyChanged(bool busy);
 
+    /// T11：写入了一条收藏。本页不刷新收藏页（页面间零互相引用），
+    /// 由 MainWindow 中转调用 FavoritesPage::refresh()。
+    void favoriteChanged();
+
     // ── P1 异步引擎请求（MainWindow 接线到 EngineWorker 的队列化槽）──
     /// 请求检索（普通检索与聚合宽检索共用，EngineWorker::search）
     void searchRequested(const QString& query, int topK);
@@ -124,6 +148,9 @@ private slots:
     void onClearIndex();
     void onSetApiKey();
     void onFilterChanged();
+    /// T11：结果列表右键菜单 → 「收藏到案例集」
+    void onResultContextMenu(const QPoint& pos);
+    void onFavoriteCurrentResult();
 
 private:
     void setupUi();
@@ -174,6 +201,17 @@ private:
     /// 应用筛选条件，过滤并重新显示结果
     std::vector<rag::SearchResult> applyFiltersAndDisplay();
     std::vector<rag::SearchResult> getFilteredResults();
+
+    // ── T11 案例收藏 ──
+
+    /// 二级弹窗：选已有分组或新建。@return 是否选到了分组（取消为 false）
+    bool pickFavoriteCase(long long& caseIdOut);
+    /// 把一条结果行写入收藏库；成功发 favoriteChanged 并更新状态标签
+    long long addFavoriteForItem(QListWidgetItem* item, long long caseId);
+    /// 按分组 id 查名称（收藏成功提示用；不存在返回空串）
+    QString caseNameById(long long caseId) const;
+
+    favorite::FavoriteStore* favoriteStore_ = nullptr;   // T11：非拥有
 
     /// 从全部已导入文档收集可用年份
     void populateYearFilter(const std::vector<rag::SearchResult>& results);
