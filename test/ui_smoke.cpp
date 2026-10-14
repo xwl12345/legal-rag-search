@@ -47,6 +47,7 @@
 #include "ui/library_page.h"
 #include "ui/history_page.h"
 #include "ui/quality_page.h"
+#include "ui/favorites_page.h"
 #include "../test/fake_transport.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -56,6 +57,7 @@
 #include "config/app_settings.h"
 #include "history/history_store.h"
 #include "law/law_store.h"
+#include "favorite/favorite_store.h"
 #include "rag/retriever.h"
 
 #include <QLabel>
@@ -114,7 +116,7 @@ void waitUntil(const std::function<bool()>& done, int maxMs = 60000) {
 }
 
 const char* const kPageNames[] = {
-    "01-search", "02-library", "03-history", "04-eval", "05-law", "06-settings"
+    "01-search", "02-library", "03-history", "04-eval", "05-favorites", "06-law", "07-settings"
 };
 
 /// 采集语料目录下的全部可导入文件（按文件名排序，保证可复现）
@@ -993,7 +995,7 @@ int runSettingsE2E(const QString& corpusDir) {
 
         // 改 k1 1.5 → 4.0 并保存（走完整链路：写盘 → 信号 → 引擎热更新）
         k1Spin->setValue(4.0);
-        clickNavItem(navList, 4);
+        clickNavItem(navList, 6);   // T11 后设置页在导航第 6 行（第 7 页）
         QApplication::processEvents();
         saveBtn->click();
         QApplication::processEvents();
@@ -1019,7 +1021,7 @@ int runSettingsE2E(const QString& corpusDir) {
               QStringLiteral("%1 → %2").arg(scoreBefore).arg(scoreAfter));
 
         // 截图留证（T3 新证据）
-        clickNavItem(navList, 4);
+        clickNavItem(navList, 6);
         QApplication::processEvents();
         window.grab().save(QStringLiteral("docs/screenshots/13-settings-modified.png"));
     }
@@ -1047,7 +1049,7 @@ int runSettingsE2E(const QString& corpusDir) {
               QStringLiteral("实际 %1").arg(k1Spin->value()));
 
         // 恢复默认值 → 保存 → 文件回到 1.5（防误触设计：先回填再保存）
-        clickNavItem(navList, 4);
+        clickNavItem(navList, 6);
         QApplication::processEvents();
         defaultsBtn->click();
         QApplication::processEvents();
@@ -1212,10 +1214,10 @@ int runLawE2E(MainWindow& window, const QString& outDir) {
         return g_failures;
     }
 
-    // ── 导航到第 5 页（05-law）──
-    clickNavItem(navList, 4);
-    check(stack->currentIndex() == 4,
-          QStringLiteral("T9：导航 05-law → 第 4 页"),
+    // ── 导航到第 5 页（06-law，T11 后法条页在导航第 5 行）──
+    clickNavItem(navList, 5);
+    check(stack->currentIndex() == 5,
+          QStringLiteral("T9：导航 06-law → 第 5 页"),
           QStringLiteral("stack=%1").arg(stack->currentIndex()));
 
     auto* queryInput = window.findChild<QLineEdit*>(QStringLiteral("lawQueryInput"));
@@ -1320,6 +1322,180 @@ int runLawE2E(MainWindow& window, const QString& outDir) {
     return g_failures;
 }
 
+// ── T11 案例收藏 E2E：导航 → 收藏 → 分组 → 删除文档失效标记 → 重启仍在 ──
+//
+// 说明：本组验证走的是 MainWindow 默认路径（config::FAVORITE_DB，即 exe 所在
+// 目录下的 favorites.db），跑完清掉全部分组（removeCase 级联删收藏），不与
+// 用户手工攒的类案集混淆。删除文档联动只走脚本路径（confirm=false），
+// 不弹模态框，离屏环境可无人值守跑完。
+int runFavoritesE2E(const QString& corpusDir, const QString& outDir) {
+    long long caseId = 0;
+    std::string favoritedDocId;
+
+    // ── 会话 1：导入 → 检索 → 收藏 → 删除文档 → 失效标记 ──
+    {
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        SearchPage* searchPage = window.findChild<SearchPage*>();
+        LibraryPage* libPage = window.findChild<LibraryPage*>();
+        FavoritesPage* favPage = window.findChild<FavoritesPage*>();
+        favorite::FavoriteStore* store = window.favoriteStore();
+        QListWidget* navList = window.findChild<QListWidget*>(QStringLiteral("navList"));
+        QStackedWidget* stack = window.findChild<QStackedWidget*>();
+        QListWidget* resultList = window.findChild<QListWidget*>(QStringLiteral("resultList"));
+        QLineEdit* searchInput = window.findChild<QLineEdit*>(QStringLiteral("searchInput"));
+        QPushButton* searchBtn = window.findChild<QPushButton*>("searchBtn");
+
+        if (!searchPage || !libPage || !favPage || !store || !navList || !stack
+            || !resultList || !searchInput || !searchBtn) {
+            check(false, QStringLiteral("T11：收藏 E2E 控件齐全"),
+                  QStringLiteral("存在控件未找到"));
+            return g_failures;
+        }
+
+        // 从空收藏起步：走 SQL 层清理（本进程连接开着，删库文件在 Windows 上必失败）
+        for (const auto& c : store->cases()) {
+            store->removeCase(c.id);
+        }
+        check(store->caseCount() == 0, QStringLiteral("T11：起始收藏为空"));
+
+        // 导入语料 + 真实检索（命中结果作为收藏来源）
+        searchPage->importPaths(collectCorpus(corpusDir));
+        waitUntil([&] { return !searchPage->isBusy(); });
+        QApplication::processEvents();
+        searchInput->setText(QStringLiteral("民间借贷 交付凭证"));
+        searchBtn->click();
+        pump(2000);
+        check(searchPage->lastResultCount() > 0,
+              QStringLiteral("T11：检索有命中（作为收藏来源）"),
+              QStringLiteral("%1 条").arg(searchPage->lastResultCount()));
+
+        // 主引擎计数基线：收藏操作不得触碰索引
+        rag::Retriever* mainRetriever = window.engineWorker()->retriever();
+        const int docsBefore = mainRetriever->documentCount();
+        const int chunksBefore = mainRetriever->chunkCount();
+
+        // 新建分组 + 收藏第 0 行（与右键菜单同一存储链路，含 item data 快照）
+        caseId = store->createCase("E2E·民间借贷类案");
+        check(caseId > 0, QStringLiteral("T11：新建案件分组"));
+        const long long favId = searchPage->favoriteResultRow(0, caseId);
+        check(favId > 0, QStringLiteral("T11：收藏检索结果第 0 行"));
+
+        // favoriteChanged 经 MainWindow 中转 → 收藏页自动刷新
+        check(favPage->caseCount() == 1,
+              QStringLiteral("T11：收藏页分组数 = 1（信号中转刷新）"),
+              QStringLiteral("%1 个").arg(favPage->caseCount()));
+        check(favPage->currentFavoriteCount() == 1,
+              QStringLiteral("T11：当前分组收藏数 = 1"),
+              QStringLiteral("%1 条").arg(favPage->currentFavoriteCount()));
+        check(favPage->currentCaseName() == QStringLiteral("E2E·民间借贷类案"),
+              QStringLiteral("T11：当前分组名正确"));
+
+        // 收藏后主引擎纹丝不动（收藏与索引物理隔离）
+        check(mainRetriever->documentCount() == docsBefore
+                  && mainRetriever->chunkCount() == chunksBefore,
+              QStringLiteral("T11：主引擎文档/块计数零漂移"));
+
+        // 状态列应为「正常」
+        check(favPage->cellText(0, 2) == QStringLiteral("正常"),
+              QStringLiteral("T11：收藏初始状态为「正常」"),
+              favPage->cellText(0, 2));
+
+        // 详情区显示片段快照（收藏当时的块内容）
+        QTextBrowser* detail =
+            window.findChild<QTextBrowser*>(QStringLiteral("favoriteDetail"));
+        check(detail != nullptr
+                  && detail->toPlainText().contains(QStringLiteral("本院认为")),
+              QStringLiteral("T11：详情区显示片段快照"));
+
+        // 记住被收藏文书的 docId，随后删除它
+        const auto items = store->favoritesOf(caseId);
+        if (!items.empty()) {
+            favoritedDocId = items.front().docId;
+        }
+        check(!favoritedDocId.empty(), QStringLiteral("T11：收藏项定位到 docId"));
+
+        // 导航到收藏页截图留证
+        clickNavItem(navList, 4);
+        check(stack->currentIndex() == 4,
+              QStringLiteral("T11：导航 05-favorites → 第 4 页"),
+              QStringLiteral("stack=%1").arg(stack->currentIndex()));
+        check(window.grab().save(outDir + QStringLiteral("/17-favorites-page.png")),
+              QStringLiteral("T11：截图 17-favorites-page"));
+
+        // 回文档库删除该文书 → 收藏应标记失效（不删项、快照保留）
+        clickNavItem(navList, 1);
+        QApplication::processEvents();
+        const bool removed = libPage->removeDocumentById(
+            QString::fromStdString(favoritedDocId), /*confirm=*/false);
+        check(removed, QStringLiteral("T11：删除已收藏文书成功"));
+
+        // 回收藏页：条目仍在，状态翻转「原文已删除」
+        clickNavItem(navList, 4);
+        QApplication::processEvents();
+        check(favPage->currentFavoriteCount() == 1,
+              QStringLiteral("T11：删除后收藏项仍在（标记失效而非删除）"),
+              QStringLiteral("%1 条").arg(favPage->currentFavoriteCount()));
+        check(favPage->cellText(0, 2) == QStringLiteral("原文已删除"),
+              QStringLiteral("T11：状态列显示「原文已删除」"),
+              favPage->cellText(0, 2));
+        check(detail->toPlainText().contains(QStringLiteral("原文已删除"))
+                  && detail->toPlainText().contains(QStringLiteral("快照")),
+              QStringLiteral("T11：详情标注原文已删除且快照可读"));
+
+        // 关闭窗口（closeEvent 照常落盘索引，与其它分组一致）
+        window.close();
+        QApplication::processEvents();
+    }
+
+    // ── 会话 2：全新窗口 = 重启后，收藏与失效标记必须还在 ──
+    {
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        FavoritesPage* favPage = window.findChild<FavoritesPage*>();
+        favorite::FavoriteStore* store = window.favoriteStore();
+        if (!favPage || !store) {
+            check(false, QStringLiteral("T11：会话 2 页面就绪"));
+            return g_failures;
+        }
+
+        check(store->caseCount() == 1,
+              QStringLiteral("T11：重启后分组仍在（持久化）"),
+              QStringLiteral("%1 个").arg(store->caseCount()));
+        const auto items = store->favoritesOf(caseId);
+        check(items.size() == 1 && !items.front().valid
+                  && !items.front().snippet.empty(),
+              QStringLiteral("T11：重启后失效标记与快照仍在"));
+        favPage->refresh();
+        check(favPage->currentFavoriteCount() == 1,
+              QStringLiteral("T11：重启后收藏页显示 1 条"),
+              QStringLiteral("%1 条").arg(favPage->currentFavoriteCount()));
+
+        window.close();
+        QApplication::processEvents();
+    }
+
+    // 收尾：清掉测试分组（级联删收藏）+ 本组写出的索引，不留测试数据
+    {
+        favorite::FavoriteStore cleanup(
+            QString::fromStdString(config::dataFilePath(config::FAVORITE_DB))
+                .toStdString());
+        if (cleanup.open()) {
+            for (const auto& c : cleanup.cases()) {
+                cleanup.removeCase(c.id);
+            }
+        }
+    }
+    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
+    return g_failures;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -1420,6 +1596,9 @@ int main(int argc, char* argv[]) {
 
         qInfo().noquote() << QStringLiteral("── 法条速查 E2E（目录树 → 条号定位 → 关键词 → 零污染）──");
         runLawE2E(window, outDirPath);
+
+        qInfo().noquote() << QStringLiteral("── 案例收藏 E2E（收藏 → 分组 → 删除失效标记 → 重启仍在）──");
+        runFavoritesE2E(parser.value(e2eOption), outDirPath);
 
         qInfo().noquote() << QStringLiteral("── P0 同名覆盖确认 E2E（覆盖 / 跳过 / 取消 + 内容一致）──");
         runOverwriteE2E();
