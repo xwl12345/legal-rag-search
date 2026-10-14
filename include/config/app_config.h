@@ -17,6 +17,11 @@ constexpr const char* INDEX_FILE = "rag_index.dat";
 /// 问答历史 SQLite 库（T2）：运行期产物，不入库
 constexpr const char* HISTORY_DB = "rag_history.db";
 
+/// 案例收藏 SQLite 库（T11）：运行期产物，不入库。
+/// 独立文件不并入 rag_history.db：收藏是用户长期资产（类案集），
+/// 与问答历史（会话流水）生命周期不同，清理历史不应误伤收藏。
+constexpr const char* FAVORITE_DB = "favorites.db";
+
 /// 检索参数配置（T3）：JSON 可手工编辑；因可含 API Key，绝不入库
 constexpr const char* SETTINGS_FILE = "rag_settings.json";
 

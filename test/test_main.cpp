@@ -52,6 +52,7 @@
 #include "rag/eval_metrics.h"
 #include "history/history_store.h"
 #include "law/law_store.h"
+#include "favorite/favorite_store.h"
 #include "config/app_config.h"
 #include "config/app_settings.h"
 #include "../test/fake_transport.h"
@@ -3050,6 +3051,257 @@ void test_p3_data_file_exe_dir_migration() {
     PASS();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 测试 T11: 案例收藏集持久层（SQLite）
+// ═══════════════════════════════════════════════════════════════
+namespace {
+
+const std::string kTestFavoriteDb = "build/test_favorites.db";
+
+/// 测试前清掉上一轮残留（Windows 上打开着的 sqlite 文件删不掉，故按"先删后用"处理；
+/// 与 T2 组同一教训—— store 实例必须活在更小的作用域里，删文件放在其析构之后）
+void removeTestFavoriteDb() {
+    QFile::remove(QString::fromStdString(kTestFavoriteDb));
+}
+
+/// 造一条字段齐全的收藏（中文标题/快照/备注 + 小数分数 + 块号）
+favorite::FavoriteItem makeSampleFavorite(long long caseId,
+                                         const std::string& docId,
+                                         int chunkIndex,
+                                         const std::string& note = "") {
+    favorite::FavoriteItem item;
+    item.caseId = caseId;
+    item.docId = docId;
+    item.chunkIndex = chunkIndex;
+    item.title = docId + "  相关度: 12.34";
+    item.snippet = "本院认为，借款人应当按照约定的期限返还借款……";
+    item.note = note;
+    item.score = 12.34;
+    item.createdAt = "2026-10-14 10:00:00";
+    return item;
+}
+
+}  // namespace
+
+void test_t11_favorite_crud_roundtrip() {
+    TEST("T11：收藏 CRUD 往返（分组 + 收藏全字段，中文无损）");
+    removeTestFavoriteDb();
+    {
+        favorite::FavoriteStore store(kTestFavoriteDb);
+        CHECK(store.open());
+        CHECK(store.isOpen());
+        CHECK_EQ(store.caseCount(), 0);
+
+        const long long caseA = store.createCase("类案集·民间借贷", "重点看交付凭证");
+        const long long caseB = store.createCase("类案集·劳动争议");
+        CHECK(caseA > 0 && caseB > 0 && caseA != caseB);
+
+        const long long favId = store.addFavorite(
+            makeSampleFavorite(caseA, "case_civil_001.txt", 2, "二审可引用"));
+        CHECK(favId > 0);
+        CHECK_EQ(store.favoriteCountOf(caseA), 1);
+        CHECK_EQ(store.favoriteCountOf(caseB), 0);
+
+        const auto items = store.favoritesOf(caseA);
+        CHECK_EQ(static_cast<int>(items.size()), 1);
+        const auto& back = items.front();
+        CHECK(back.docId == "case_civil_001.txt");
+        CHECK_EQ(back.chunkIndex, 2);
+        CHECK(back.title == "case_civil_001.txt  相关度: 12.34");
+        CHECK(back.snippet == "本院认为，借款人应当按照约定的期限返还借款……");
+        CHECK(back.note == "二审可引用");
+        CHECK_CLOSE(back.score, 12.34, 1e-9);
+        CHECK(back.valid);
+        CHECK(back.createdAt == "2026-10-14 10:00:00");
+
+        // 备注改写往返
+        CHECK(store.setFavoriteNote(favId, "改后的备注"));
+        CHECK(store.favoritesOf(caseA).front().note == "改后的备注");
+        CHECK(store.setCaseNote(caseA, "改后的分组备注"));
+        bool foundA = false;
+        for (const auto& c : store.cases()) {
+            if (c.id == caseA) {
+                foundA = true;
+                CHECK(c.name == "类案集·民间借贷");
+                CHECK(c.note == "改后的分组备注");
+                CHECK_EQ(c.favoriteCount, 1);
+            }
+        }
+        CHECK(foundA);
+
+        // 删除单条 / 重复删除幂等
+        CHECK(store.removeFavorite(favId));
+        CHECK(!store.removeFavorite(favId));
+        CHECK_EQ(store.favoriteCountOf(caseA), 0);
+    }
+    removeTestFavoriteDb();
+    PASS();
+}
+
+void test_t11_favorite_restart_persistence() {
+    TEST("T11：收藏跨重启持久化（新实例读回，快照与备注无损）");
+    removeTestFavoriteDb();
+    long long caseId = 0;
+    long long favId = 0;
+    {
+        favorite::FavoriteStore session1(kTestFavoriteDb);
+        CHECK(session1.open());
+        caseId = session1.createCase("类案集·民间借贷");
+        favId = session1.addFavorite(
+            makeSampleFavorite(caseId, "case_civil_001.txt", 2, "重启后还要在"));
+        CHECK(caseId > 0 && favId > 0);
+    }
+    {
+        // 全新实例 = 重启后的第二次会话
+        favorite::FavoriteStore session2(kTestFavoriteDb);
+        CHECK(session2.open());
+        CHECK_EQ(session2.caseCount(), 1);
+        const auto items = session2.favoritesOf(caseId);
+        CHECK_EQ(static_cast<int>(items.size()), 1);
+        CHECK(items.front().id == favId);
+        CHECK(items.front().snippet == "本院认为，借款人应当按照约定的期限返还借款……");
+        CHECK(items.front().note == "重启后还要在");
+        CHECK(items.front().valid);
+    }
+    removeTestFavoriteDb();
+    PASS();
+}
+
+void test_t11_favorite_duplicate_refresh_and_revive() {
+    TEST("T11：重复收藏 = 刷新快照并复活（备注保留；失效翻转只计一次）");
+    removeTestFavoriteDb();
+    {
+        favorite::FavoriteStore store(kTestFavoriteDb);
+        CHECK(store.open());
+        const long long caseId = store.createCase("类案集·民间借贷");
+        const long long first = store.addFavorite(
+            makeSampleFavorite(caseId, "case_civil_001.txt", 2, "用户备注"));
+        CHECK(first > 0);
+
+        // 文档删除 → 标记失效：翻转 1 行；快照仍可读
+        CHECK_EQ(store.markInvalidByDocIds({"case_civil_001.txt"}), 1);
+        auto items = store.favoritesOf(caseId);
+        CHECK_EQ(static_cast<int>(items.size()), 1);
+        CHECK(!items.front().valid);
+        CHECK(items.front().snippet == "本院认为，借款人应当按照约定的期限返还借款……");
+        // 重复标记不重复计数（已失效的不再翻转）
+        CHECK_EQ(store.markInvalidByDocIds({"case_civil_001.txt"}), 0);
+        // 未知文档 / 空列表 → 0
+        CHECK_EQ(store.markInvalidByDocIds({"no_such_doc.txt"}), 0);
+        CHECK_EQ(store.markInvalidByDocIds({}), 0);
+
+        // 重新收藏同一块 → 同 id、快照刷新、valid 复活、用户备注保留
+        favorite::FavoriteItem again = makeSampleFavorite(caseId, "case_civil_001.txt", 2);
+        again.title = "case_civil_001.txt  相关度: 9.87";
+        again.snippet = "更新后的块内容快照……";
+        again.score = 9.87;
+        const long long second = store.addFavorite(again);
+        CHECK(second == first);
+        items = store.favoritesOf(caseId);
+        CHECK(items.front().valid);
+        CHECK(items.front().snippet == "更新后的块内容快照……");
+        CHECK_CLOSE(items.front().score, 9.87, 1e-9);
+        CHECK(items.front().note == "用户备注");   // 备注不被快照刷新覆盖
+        // 复活后再次标记失效，计数恢复为 1
+        CHECK_EQ(store.markInvalidByDocIds({"case_civil_001.txt"}), 1);
+    }
+    removeTestFavoriteDb();
+    PASS();
+}
+
+void test_t11_favorite_mark_invalid_multi_docs() {
+    TEST("T11：多文档删除联动标记失效（按 docId 精确命中，不误伤）");
+    removeTestFavoriteDb();
+    {
+        favorite::FavoriteStore store(kTestFavoriteDb);
+        CHECK(store.open());
+        const long long caseId = store.createCase("类案集·劳动争议");
+        store.addFavorite(makeSampleFavorite(caseId, "case_labor_001.txt", 0));
+        store.addFavorite(makeSampleFavorite(caseId, "case_labor_002.txt", 1));
+        store.addFavorite(makeSampleFavorite(caseId, "case_labor_001.txt", 3));
+
+        // 只删其中一篇：两跳翻转（同文档两块），另一篇纹丝不动
+        CHECK_EQ(store.markInvalidByDocIds({"case_labor_001.txt"}), 2);
+        for (const auto& item : store.favoritesOf(caseId)) {
+            if (item.docId == "case_labor_001.txt") {
+                CHECK(!item.valid);
+            } else {
+                CHECK(item.valid);
+            }
+        }
+        // 批量删剩余：只剩 1 行翻转
+        CHECK_EQ(store.markInvalidByDocIds({"case_labor_001.txt", "case_labor_002.txt"}), 1);
+    }
+    removeTestFavoriteDb();
+    PASS();
+}
+
+void test_t11_favorite_empty_and_boundaries() {
+    TEST("T11：空库与边界（空列表/级联删除/幂等/非法参数不崩）");
+    removeTestFavoriteDb();
+    {
+        favorite::FavoriteStore store(kTestFavoriteDb);
+        CHECK(store.open());
+
+        // 空库：一切查询走空路，不崩不误报
+        CHECK_EQ(store.caseCount(), 0);
+        CHECK(store.cases().empty());
+        CHECK(store.allFavorites().empty());
+        CHECK(store.favoritesOf(999).empty());
+        CHECK_EQ(store.favoriteCountOf(999), 0);
+
+        // 不存在的对象：删除/改写一律如实返回失败（幂等）
+        CHECK_EQ(store.removeCase(999), -1);
+        CHECK(!store.removeFavorite(999));
+        CHECK(!store.setCaseNote(999, "x"));
+        CHECK(!store.setFavoriteNote(999, "x"));
+
+        // 非法参数：空名称 / 非法 caseId / 负块号
+        CHECK_EQ(store.createCase(""), 0);
+        favorite::FavoriteItem bad = makeSampleFavorite(0, "doc.txt", 0);
+        CHECK_EQ(store.addFavorite(bad), 0);
+        bad = makeSampleFavorite(1, "", 0);
+        CHECK_EQ(store.addFavorite(bad), 0);
+        bad = makeSampleFavorite(1, "doc.txt", -1);
+        CHECK_EQ(store.addFavorite(bad), 0);
+
+        // 重名幂等：同一名字返回同一 id
+        const long long id1 = store.createCase("同名分组");
+        const long long id2 = store.createCase("同名分组");
+        CHECK(id1 > 0 && id1 == id2);
+
+        // 删分组级联：其下收藏一并消失，别的分组不受影响
+        const long long keep = store.createCase("保留分组");
+        store.addFavorite(makeSampleFavorite(id1, "case_civil_001.txt", 0));
+        store.addFavorite(makeSampleFavorite(id1, "case_civil_001.txt", 1));
+        store.addFavorite(makeSampleFavorite(keep, "case_civil_007.txt", 0));
+        CHECK_EQ(store.removeCase(id1), 2);
+        CHECK_EQ(store.caseCount(), 1);
+        CHECK_EQ(store.favoriteCountOf(keep), 1);
+        CHECK(store.allFavorites().size() == 1);
+        // 重复删同一分组：-1（已不存在）
+        CHECK_EQ(store.removeCase(id1), -1);
+    }
+    removeTestFavoriteDb();
+    PASS();
+}
+
+void test_t11_favorite_open_failure_reports() {
+    TEST("T11：打开失败如实上报（lastError 非空，接口不崩）");
+    // 用一个已存在的目录当库路径 —— SQLite 打不开，必须报错而不是静默当空库
+    favorite::FavoriteStore badStore("test");
+    CHECK(!badStore.open());
+    CHECK(!badStore.isOpen());
+    CHECK(!badStore.lastError().empty());
+    // 未打开时全部接口走空路（不崩、不误报有数据）
+    CHECK_EQ(badStore.caseCount(), 0);
+    CHECK(badStore.cases().empty());
+    CHECK_EQ(badStore.createCase("x"), 0);
+    CHECK_EQ(badStore.addFavorite(makeSampleFavorite(1, "doc.txt", 0)), 0);
+    CHECK_EQ(badStore.markInvalidByDocIds({"doc.txt"}), 0);
+    PASS();
+}
+
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -3207,6 +3459,14 @@ void run_all_tests() {
     test_t9_law_store_article_order();
     test_t9_law_keyword_search();
     test_t9_main_index_zero_pollution();
+
+    std::cout << "\n── T11: 案例收藏集持久层 ──" << std::endl;
+    test_t11_favorite_crud_roundtrip();
+    test_t11_favorite_restart_persistence();
+    test_t11_favorite_duplicate_refresh_and_revive();
+    test_t11_favorite_mark_invalid_multi_docs();
+    test_t11_favorite_empty_and_boundaries();
+    test_t11_favorite_open_failure_reports();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

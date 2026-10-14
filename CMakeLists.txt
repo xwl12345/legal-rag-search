@@ -55,10 +55,12 @@ set(SRC_ENGINE
     src/net/qt_transport.cpp
 )
 
-# 存储层（T2：问答历史 SQLite；不含 Qt Widgets，测试目标复用）
+# 存储层（T2：问答历史 SQLite；T9：法条库只读；T11：案例收藏 SQLite；
+# 不含 Qt Widgets，测试目标复用）
 set(SRC_STORE
     src/history/history_store.cpp
     src/law/law_store.cpp
+    src/favorite/favorite_store.cpp
 )
 
 # 配置层（T3：检索参数配置中心 + P3 数据文件路径解析；只依赖 QtCore，测试目标复用）
@@ -124,6 +126,7 @@ set(HEADERS
     include/history/history_record.h
     include/history/history_store.h
     include/law/law_store.h
+    include/favorite/favorite_store.h
 )
 
 # ── UI 骨架冒烟测试（离屏渲染，导出各页截图）──
