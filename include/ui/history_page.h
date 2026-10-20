@@ -48,9 +48,14 @@ public slots:
     /// @return 是否写成功；失败时弹窗提示（confirm=false 时不弹）
     bool exportRecordById(long long id, const QString& path, bool confirm = false);
 
+    /// 按主键导出为检索报告（T12，ODT/PDF 由扩展名决定；供自动化测试绕过文件对话框）
+    /// @return 是否写成功；失败时弹窗提示（confirm=false 时不弹）
+    bool exportReportById(long long id, const QString& path, bool confirm = false);
+
 private slots:
     void onKeywordChanged();
     void onExportSelected();
+    void onExportReportSelected();
     void onRemoveSelected();
     void onClearAll();
     void onSelectionChanged();
@@ -77,6 +82,7 @@ private:
     QLabel* summary_ = nullptr;
     QLabel* hint_ = nullptr;
     QPushButton* exportBtn_ = nullptr;
+    QPushButton* reportBtn_ = nullptr;   // T12：导出检索报告（ODT/PDF，仅单选可用）
     QPushButton* removeBtn_ = nullptr;
     QPushButton* clearBtn_ = nullptr;
     QPushButton* refreshBtn_ = nullptr;

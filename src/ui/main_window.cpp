@@ -29,6 +29,8 @@
 #include "favorite/favorite_store.h"
 #include "rag/retriever.h"
 
+#include <cstdlib>  // std::getenv（E2E 索引隔离通道）
+
 #include <QThread>
 
 MainWindow::MainWindow(QWidget* parent)
@@ -205,11 +207,11 @@ void MainWindow::buildPages() {
     connect(engineWorker_, &EngineWorker::evalFinished,
             qualityPage_, &QualityPage::onEvalFinished);
 
-    // ── 第 5 页：案例收藏（T11）──
-    // 插件式接入：只注入收藏库指针，本页不知道收藏从哪来（检索页写入），
+    // ── 第 5 页：案例收藏（T11；T10 起另注入主引擎指针供「打开全文」只读取全文）──
+    // 插件式接入：只注入收藏库 + 引擎指针，本页不知道收藏从哪来（检索页写入），
     // 也不知道文档被谁删掉（文档库页标记失效）——刷新统一由本窗口中转。
-    // 删掉本页 = 去掉这两行 + 删页面文件，检索与文档库功能零影响。
-    favoritesPage_ = new FavoritesPage(favoriteStore_.get(), pageStack_);
+    // 删掉本页 = 去掉这几行 + 删页面文件，检索与文档库功能零影响。
+    favoritesPage_ = new FavoritesPage(favoriteStore_.get(), retriever_, pageStack_);
     pageStack_->addWidget(favoritesPage_);
 
     // ── 第 6 页：法条速查（T9）──
@@ -248,6 +250,18 @@ void MainWindow::buildPages() {
 void MainWindow::restoreIndexOnStartup() {
     if (!retriever_) {
         return;
+    }
+
+    // E2E 隔离通道（T10.1 期修复，案例 C-9）：ui_smoke 设置此环境变量后，
+    // 全部窗口（共享 + 各分组自建）的索引恢复/落盘都走隔离文件——
+    // ① 套件不再吃到启动时的残留或用户真实索引（导入组曾因此 21+1=22 假失败）；
+    // ② 套件 closeEvent 不再把测试语料写回用户真实 rag_index.dat
+    //（此前每次跑 E2E 都会覆盖用户索引，2026-10-20 实测暴露）。
+    // 普通用户不会设置该变量，默认路径行为完全不变。
+    if (const char* isolated = std::getenv("RAG_SMOKE_INDEX_FILE")) {
+        if (isolated[0] != '\0') {
+            retriever_->setIndexFilePath(isolated);
+        }
     }
 
     // 只有在落盘文件存在时才有必要尝试恢复；否则直接按空库起步，

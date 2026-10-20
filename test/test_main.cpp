@@ -51,8 +51,10 @@
 #include "rag/generator.h"
 #include "rag/eval_metrics.h"
 #include "history/history_store.h"
+#include "history/report_export.h"
 #include "law/law_store.h"
 #include "favorite/favorite_store.h"
+#include "ui/doc_viewer_logic.h"
 #include "config/app_config.h"
 #include "config/app_settings.h"
 #include "../test/fake_transport.h"
@@ -1651,6 +1653,115 @@ void test_history_markdown_export() {
 
     QFile::remove(QString::fromStdString(mdPath));
     removeTestHistoryDb();
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 测试 16b: T12 —— 检索报告导出
+// ═══════════════════════════════════════════════════════════════
+
+void test_t12_report_html_assembly() {
+    TEST("T12：报告 HTML 组装——字段齐全 / 中文 / 特殊字符转义");
+    history::HistoryRecord record = makeSampleRecord(
+        "民间借贷纠纷<利息>如何认定？& 出借人主张\"口头约定\"能否成立？",
+        "应结合转账记录与交付凭证综合认定，不能仅凭单一证据定案。");
+    record.id = 7;
+
+    const std::string html = history::toReportHtml(record);
+    CHECK(!html.empty());
+    // 结构：标题 / 元信息 / 四个章节齐全
+    CHECK(html.find("检索问答报告") != std::string::npos);
+    CHECK(html.find("记录编号：#7") != std::string::npos);
+    CHECK(html.find("提问时间：2026-09-21 10:30:00") != std::string::npos);
+    CHECK(html.find("命中块数：2") != std::string::npos);
+    CHECK(html.find("回答状态：完整") != std::string::npos);
+    CHECK(html.find("一、检索问题") != std::string::npos);
+    CHECK(html.find("二、命中文书") != std::string::npos);
+    CHECK(html.find("三、命中段落节选") != std::string::npos);
+    CHECK(html.find("四、AI 回答") != std::string::npos);
+    // 表格与节选内容
+    CHECK(html.find("case_civil_001.txt") != std::string::npos);
+    CHECK(html.find("case_civil_007.txt") != std::string::npos);
+    CHECK(html.find("本院认为，借款人应当按照约定的期限返还借款") != std::string::npos);
+    CHECK(html.find("节选") != std::string::npos);   // 快照截断如实标注
+    // 特殊字符：query 里的 < > & " 必须转义，原始标签不许出现
+    CHECK(html.find("&lt;利息&gt;") != std::string::npos);
+    CHECK(html.find("&amp;") != std::string::npos);
+    CHECK(html.find("口头约定") != std::string::npos);
+    CHECK(html.find("<利息>") == std::string::npos);
+    // 中断回合：状态如实标注且不伪装成完整回答
+    history::HistoryRecord bad = makeSampleRecord(
+        "电信诈骗数额较大怎么判刑？", "根据《刑法》第二百六十六条，诈骗公私财物…",
+        /*interrupted=*/true);
+    const std::string badHtml = history::toReportHtml(bad);
+    CHECK(badHtml.find("回答状态：⚠ 未完成") != std::string::npos);
+    CHECK(badHtml.find("网络异常") != std::string::npos);
+    CHECK(badHtml.find("四、AI 回答（未完成）") != std::string::npos);
+    // 空来源：不崩溃且如实说明
+    history::HistoryRecord noSrc = makeSampleRecord("无引用测试？", "答。");
+    noSrc.sources.clear();
+    const std::string emptyHtml = history::toReportHtml(noSrc);
+    CHECK(emptyHtml.find("本次回答没有引用任何文本块") != std::string::npos);
+    PASS();
+}
+
+void test_t12_report_odt_export() {
+    TEST("T12：报告导出 ODT——ZIP 容器正确 / 失败路径如实上报");
+    const auto record = makeSampleRecord(
+        "劳动争议中仲裁时效如何起算？", "自当事人知道或者应当知道其权利被侵害之日起计算。");
+
+    const QString odtPath = QStringLiteral("build/test_report_export.odt");
+    QFile::remove(odtPath);
+
+    const std::string html = history::toReportHtml(record);
+    QString error;
+    CHECK(history::writeOdtFile(odtPath, html, &error));
+    CHECK(error.isEmpty());
+
+    QFile file(odtPath);
+    CHECK(file.open(QIODevice::ReadOnly));
+    const QByteArray raw = file.readAll();
+    file.close();
+    CHECK(raw.size() > 100);                       // 空壳 ZIP 也不止 100 字节
+    CHECK(raw.startsWith(QByteArray("PK")));       // ODF = ZIP 容器，magic 校验
+
+    // 失败路径：不存在的目录 → 如实失败并给原因（不崩溃）
+    QString badCase;
+    CHECK(!history::writeOdtFile(
+        QStringLiteral("build/no_such_dir_xyz_t12/report.odt"), html, &badCase));
+    CHECK(!badCase.isEmpty());
+
+    QFile::remove(odtPath);
+    PASS();
+}
+
+void test_t12_report_pdf_export() {
+    TEST("T12：报告导出 PDF——文件头正确 / 失败路径如实上报");
+    const auto record = makeSampleRecord(
+        "劳动合同解除的经济补偿如何计算？", "按劳动者在本单位工作的年限，每满一年支付一个月工资。");
+
+    const QString pdfPath = QStringLiteral("build/test_report_export.pdf");
+    QFile::remove(pdfPath);
+
+    const std::string html = history::toReportHtml(record);
+    QString error;
+    CHECK(history::writePdfFile(pdfPath, html, &error));
+    CHECK(error.isEmpty());
+
+    QFile file(pdfPath);
+    CHECK(file.open(QIODevice::ReadOnly));
+    const QByteArray raw = file.readAll();
+    file.close();
+    CHECK(raw.size() > 100);
+    CHECK(raw.startsWith(QByteArray("%PDF-")));    // PDF magic 校验
+
+    // 失败路径：QTextDocument::print 静默失败，靠产物兜底校验发现
+    QString badCase;
+    CHECK(!history::writePdfFile(
+        QStringLiteral("build/no_such_dir_xyz_t12/report.pdf"), html, &badCase));
+    CHECK(!badCase.isEmpty());
+
+    QFile::remove(pdfPath);
     PASS();
 }
 
@@ -3302,6 +3413,59 @@ void test_t11_favorite_open_failure_reports() {
     PASS();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// T10: 全文阅读·命中块定位纯逻辑（doc_viewer::locateHits）
+// ═══════════════════════════════════════════════════════════════
+void test_t10_locate_single_hit() {
+    TEST("T10：命中块定位——单块一次命中，字符偏移与长度正确");
+    const QString full =
+        QStringLiteral("本院认为，被告行为构成违约。依照法律判决如下。");
+    const QString chunk = full.mid(5, 9);  // 「被告行为构成违约。」
+    auto marks = doc_viewer::locateHits(full, {{3, chunk}});
+    CHECK_EQ(static_cast<int>(marks.size()), 1);
+    CHECK_EQ(marks[0].chunkIndex, 3);
+    CHECK_EQ(marks[0].charPos, 5);
+    CHECK_EQ(marks[0].charLen, 9);
+    PASS();
+}
+
+void test_t10_locate_overlap_monotonic() {
+    TEST("T10：相邻重叠块单调定位（下一块起点落在上一块内部不丢失）");
+    // 构造重叠场景：全文 "0123456789"，块1 = [0,7)，块2 = [5,10)，
+    // 块2 的真实起点 5 落在块1 内部——若跳过块1 全长再找，块2 必丢失。
+    const QString full = QStringLiteral("0123456789");
+    auto marks = doc_viewer::locateHits(
+        full, {{0, full.mid(0, 7)}, {1, full.mid(5, 5)}});
+    CHECK_EQ(static_cast<int>(marks.size()), 2);
+    CHECK_EQ(marks[0].chunkIndex, 0);
+    CHECK_EQ(marks[0].charPos, 0);
+    CHECK_EQ(marks[1].chunkIndex, 1);
+    CHECK_EQ(marks[1].charPos, 5);
+    PASS();
+}
+
+void test_t10_locate_missing_skipped() {
+    TEST("T10：定位失败的块跳过不中断（后续块照常定位）");
+    const QString full = QStringLiteral("第一段内容。第二段内容。");
+    auto marks = doc_viewer::locateHits(
+        full, {{0, QStringLiteral("不存在的文本")},
+               {1, QStringLiteral("第二段内容。")}});
+    CHECK_EQ(static_cast<int>(marks.size()), 1);
+    CHECK_EQ(marks[0].chunkIndex, 1);
+    CHECK_EQ(marks[0].charPos, full.indexOf(QStringLiteral("第二段内容。")));
+    PASS();
+}
+
+void test_t10_locate_empty_and_boundary() {
+    TEST("T10：空全文/空命中列表/空块文本不崩溃且返回空");
+    CHECK(doc_viewer::locateHits(QString(), {}).empty());
+    CHECK(doc_viewer::locateHits(QStringLiteral("有内容"), {}).empty());
+    CHECK(doc_viewer::locateHits(QStringLiteral("有内容"),
+                                 {{0, QString()}})
+              .empty());
+    PASS();
+}
+
 void run_all_tests() {
     std::cout << "\n";
     std::cout << "╔══════════════════════════════════════════╗" << std::endl;
@@ -3408,6 +3572,11 @@ void run_all_tests() {
     test_history_interrupted_flag();
     test_history_markdown_export();
 
+    std::cout << "\n── T12: 检索报告导出 ──" << std::endl;
+    test_t12_report_html_assembly();
+    test_t12_report_odt_export();
+    test_t12_report_pdf_export();
+
     std::cout << "\n── T3: 检索参数配置中心 ──" << std::endl;
     test_settings_roundtrip();
     test_settings_missing_fields_fallback();
@@ -3467,6 +3636,12 @@ void run_all_tests() {
     test_t11_favorite_mark_invalid_multi_docs();
     test_t11_favorite_empty_and_boundaries();
     test_t11_favorite_open_failure_reports();
+
+    std::cout << "\n── T10: 全文阅读·命中块定位 ──" << std::endl;
+    test_t10_locate_single_hit();
+    test_t10_locate_overlap_monotonic();
+    test_t10_locate_missing_skipped();
+    test_t10_locate_empty_and_boundary();
 
     std::cout << "\n";
     std::cout << "═══════════════════════════════════════════" << std::endl;

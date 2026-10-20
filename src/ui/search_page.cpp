@@ -32,6 +32,8 @@
 #include <unordered_set>
 
 #include "ui/app_theme.h"
+#include "ui/doc_viewer_dialog.h"
+#include "ui/snippet_dialog.h"
 #include "config/app_config.h"
 #include "favorite/favorite_store.h"
 
@@ -275,7 +277,19 @@ void SearchPage::setupUi() {
 
     auto* resultHeader = new QLabel(QStringLiteral("检索结果（按相关度排序）"), leftCard);
     resultHeader->setObjectName(QStringLiteral("cardTitle"));
-    leftLayout->addWidget(resultHeader);
+
+    // T10.1：收藏入口可见化——原来只有右键菜单一个入口（用户实测反馈找不到），
+    // 标题行加常驻按钮，与右键菜单双入口并存、同一链路（onFavoriteCurrentResult）
+    auto* headerRow = new QHBoxLayout();
+    headerRow->addWidget(resultHeader);
+    headerRow->addStretch();
+    favoriteCurrentBtn_ = new QPushButton(QStringLiteral("⭐ 收藏当前"), leftCard);
+    favoriteCurrentBtn_->setObjectName(QStringLiteral("favoriteCurrentBtn"));
+    favoriteCurrentBtn_->setEnabled(favoriteStoreReady());
+    favoriteCurrentBtn_->setToolTip(
+        QStringLiteral("收藏当前选中的检索结果到案例集（也可右键结果条目）"));
+    headerRow->addWidget(favoriteCurrentBtn_);
+    leftLayout->addLayout(headerRow);
 
     resultList_ = new QListWidget(leftCard);
     resultList_->setObjectName(QStringLiteral("resultList"));
@@ -337,17 +351,23 @@ void SearchPage::setupUi() {
     connect(courtOnlyFilter_, &QCheckBox::toggled,
             this, &SearchPage::onFilterChanged);
 
-    // 点击结果列表中的项 → 查看全文片段
+    // T10.1：单击结果 → 片段弹窗（原行为把片段灌进 aiAnswerArea_ 覆盖 AI 回答，
+    // 用户实测反馈不可对照——改为非模态弹窗，回答区永不被覆盖，可同屏对照）
     connect(resultList_, &QListWidget::itemClicked, [this](QListWidgetItem* item) {
-        const QString text = item->data(Qt::UserRole).toString();
-        if (!text.isEmpty()) {
-            aiAnswerArea_->setPlainText(text);
-        }
+        openSnippetForItem(item);
     });
+
+    // T10：双击结果项 → 全文阅读弹窗（单击看片段、双击看整篇，并存不冲突）
+    connect(resultList_, &QListWidget::itemDoubleClicked,
+            this, &SearchPage::onResultDoubleClicked);
 
     // T11：结果列表右键 → 收藏到案例集
     connect(resultList_, &QListWidget::customContextMenuRequested,
             this, &SearchPage::onResultContextMenu);
+
+    // T10.1：收藏入口可见化按钮（connect 在 favoriteCurrentBtn_ 构造之后）
+    connect(favoriteCurrentBtn_, &QPushButton::clicked,
+            this, &SearchPage::onFavoriteCurrentResult);
 }
 
 void SearchPage::emitEngineStats() {
@@ -877,14 +897,134 @@ void SearchPage::onResultContextMenu(const QPoint& pos) {
     resultList_->setCurrentItem(item);
 
     QMenu menu(this);
+    QAction* viewAction = menu.addAction(QStringLiteral("📄 查看全文"));
     QAction* favAction = menu.addAction(QStringLiteral("⭐ 收藏到案例集…"));
     favAction->setEnabled(favoriteStoreReady());
-    if (menu.exec(resultList_->viewport()->mapToGlobal(pos)) == favAction) {
+    QAction* chosen = menu.exec(resultList_->viewport()->mapToGlobal(pos));
+    if (chosen == viewAction) {
+        openFullTextForItem(item);
+    } else if (chosen == favAction) {
         onFavoriteCurrentResult();
     }
 }
 
+// ── T10：全文阅读 ──
+
+void SearchPage::onResultDoubleClicked(QListWidgetItem* item) {
+    openFullTextForItem(item);
+}
+
+bool SearchPage::openFullTextForRow(int row) {
+    if (!resultList_ || row < 0 || row >= resultList_->count()) {
+        return false;
+    }
+    return openFullTextForItem(resultList_->item(row));
+}
+
+bool SearchPage::openFullTextForItem(QListWidgetItem* item) {
+    if (!item || !retriever_ || !resultList_) {
+        return false;
+    }
+    const QString docId = item->data(Qt::UserRole + 1).toString();
+    if (docId.isEmpty()) {
+        return false;
+    }
+    // 同一文书的全部可见命中块一起传入：弹窗右侧可逐处跳转。
+    // 块号升序由 DocViewerDialog 内部去重排序，这里只管收集。
+    std::vector<int> hitChunks;
+    for (int i = 0; i < resultList_->count(); ++i) {
+        QListWidgetItem* it = resultList_->item(i);
+        if (it && it->data(Qt::UserRole + 1).toString() == docId) {
+            hitChunks.push_back(it->data(Qt::UserRole + 2).toInt());
+        }
+    }
+    return openFullTextForDoc(docId, std::move(hitChunks));
+}
+
+bool SearchPage::openFullTextForDoc(const QString& docId,
+                                    std::vector<int> hitChunks) {
+    if (!retriever_) {
+        return false;
+    }
+
+    // 非模态：读全文的同时允许回到本页改关键词；关闭即销毁（WA_DeleteOnClose）
+    auto* viewer = new DocViewerDialog(retriever_, docId, std::move(hitChunks), this);
+    viewer->setAttribute(Qt::WA_DeleteOnClose);
+    viewer->show();
+    viewer->raise();
+    viewer->activateWindow();
+    if (statusLabel_) {
+        statusLabel_->setText(
+            QStringLiteral("📖 已打开全文：%1（命中 %2 处）")
+                .arg(docId)
+                .arg(viewer->locatedCount()));
+    }
+    return true;
+}
+
+// ── T10.1：片段查看（单击入口，AI 回答区不再被覆盖）──
+
+bool SearchPage::openSnippetForRow(int row) {
+    if (!resultList_ || row < 0 || row >= resultList_->count()) {
+        return false;
+    }
+    return openSnippetForItem(resultList_->item(row));
+}
+
+bool SearchPage::openSnippetForItem(QListWidgetItem* item) {
+    if (!item || !resultList_) {
+        return false;
+    }
+    const QString docId = item->data(Qt::UserRole + 1).toString();
+    if (docId.isEmpty()) {
+        return false;
+    }
+    const int chunkIndex = item->data(Qt::UserRole + 2).toInt();
+    const double score = item->data(Qt::UserRole + 3).toDouble();
+    const QString title = item->text();
+    const QString snippet = item->data(Qt::UserRole).toString();
+
+    auto* dlg = new SnippetDialog(docId, chunkIndex, snippet, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+
+    // 动作接线一律按值捕获（docId/块号/快照字段）：片段弹窗存活期间列表可能
+    // 因重新检索而重建，item 指针随时会悬空，不能再碰。
+    connect(dlg, &SnippetDialog::favoriteRequested, this,
+            [this, docId, chunkIndex, score, title, snippet] {
+        long long caseId = 0;
+        if (!pickFavoriteCase(caseId)) {
+            return;   // 用户取消
+        }
+        // 与右键菜单完全一致的快照条目，只是来源是值捕获而非 item data
+        favorite::FavoriteItem entry;
+        entry.caseId = caseId;
+        entry.docId = docId.toStdString();
+        entry.chunkIndex = chunkIndex;
+        entry.score = score;
+        entry.title = title.toStdString();
+        entry.snippet = snippet.toStdString();
+        addFavoriteEntry(entry);
+    });
+    connect(dlg, &SnippetDialog::fullTextRequested, this,
+            [this, docId, chunkIndex] {
+        openFullTextForDoc(docId, {chunkIndex});
+    });
+
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
+    return true;
+}
+
 void SearchPage::onFavoriteCurrentResult() {
+    // T10.1：按钮入口可能无选中（右键路径在菜单打开前已保证有 currentItem）
+    if (!resultList_ || !resultList_->currentItem()) {
+        if (statusLabel_) {
+            statusLabel_->setText(
+                QStringLiteral("请先选中一条检索结果再收藏"));
+        }
+        return;
+    }
     long long caseId = 0;
     if (!pickFavoriteCase(caseId)) {
         return;   // 用户取消
@@ -894,12 +1034,6 @@ void SearchPage::onFavoriteCurrentResult() {
 
 long long SearchPage::addFavoriteForItem(QListWidgetItem* item, long long caseId) {
     if (!item || caseId <= 0) {
-        return 0;
-    }
-    if (!favoriteStoreReady()) {
-        if (statusLabel_) {
-            statusLabel_->setText(QStringLiteral("案例收藏库不可用，暂时无法收藏"));
-        }
         return 0;
     }
 
@@ -912,6 +1046,17 @@ long long SearchPage::addFavoriteForItem(QListWidgetItem* item, long long caseId
     entry.score = item->data(Qt::UserRole + 3).toDouble();
     entry.title = item->text().toStdString();
     entry.snippet = item->data(Qt::UserRole).toString().toStdString();
+    return addFavoriteEntry(entry);
+}
+
+/// T10.1：条目写入的公共尾段（item 路径与片段弹窗的值捕获路径共用）。
+long long SearchPage::addFavoriteEntry(const favorite::FavoriteItem& entry) {
+    if (!favoriteStoreReady()) {
+        if (statusLabel_) {
+            statusLabel_->setText(QStringLiteral("案例收藏库不可用，暂时无法收藏"));
+        }
+        return 0;
+    }
 
     const long long id = favoriteStore_->addFavorite(entry);
     if (id <= 0) {
@@ -925,7 +1070,7 @@ long long SearchPage::addFavoriteForItem(QListWidgetItem* item, long long caseId
     // 只发信号，不碰收藏页——刷新由 MainWindow 中转（页面间零互相引用）
     emit favoriteChanged();
     if (statusLabel_) {
-        statusLabel_->setText(QStringLiteral("✓ 已收藏到「%1」").arg(caseNameById(caseId)));
+        statusLabel_->setText(QStringLiteral("✓ 已收藏到「%1」").arg(caseNameById(entry.caseId)));
     }
     return id;
 }

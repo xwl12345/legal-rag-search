@@ -14,6 +14,10 @@ class FavoriteStore;
 struct FavoriteItem;
 }
 
+namespace rag {
+class Retriever;
+}
+
 /// 案例收藏页（T11 / M9）：律师攒类案集的工作台。
 ///
 /// 解耦约定（开发工作计划·全局约束第 8 条）：
@@ -24,14 +28,18 @@ struct FavoriteItem;
 ///   favoriteChanged 信号中转刷新本页），两页互不认识。
 ///
 /// 布局：左侧案件分组列表（新建 / 备注 / 删除），右侧收藏条目表格
-///（备注 / 移除 / 打开全文——T10 全文阅读页未完成，入口置灰预留）。
+///（备注 / 移除 / 打开全文——T10 已启用，选中条目后可开整篇原文）。
 /// 失效收藏（文档已删除）保留快照可读，状态列标「原文已删除」。
 class FavoritesPage : public QWidget {
     Q_OBJECT
 
 public:
-    /// @param store 收藏存储层（非拥有；生命周期由 MainWindow 保证）
-    explicit FavoritesPage(favorite::FavoriteStore* store, QWidget* parent = nullptr);
+    /// @param store     收藏存储层（非拥有；生命周期由 MainWindow 保证）
+    /// @param retriever 主检索引擎（T10，非拥有；只读 getFullText/getChunk
+    ///                  供「打开全文」，可为空——空则该按钮不可用）
+    explicit FavoritesPage(favorite::FavoriteStore* store,
+                           rag::Retriever* retriever = nullptr,
+                           QWidget* parent = nullptr);
     ~FavoritesPage() override;
 
     /// 左侧分组数（供自动化测试断言）
@@ -81,6 +89,7 @@ private:
     long long caseIdByName(const QString& name) const;
 
     favorite::FavoriteStore* store_ = nullptr;   // 非拥有
+    rag::Retriever* retriever_ = nullptr;        // 非拥有（T10 打开全文数据源）
 
     QLabel* summary_ = nullptr;
     QLabel* hint_ = nullptr;

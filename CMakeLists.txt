@@ -20,9 +20,9 @@ set(RESOURCES
 # （缺 Qt6EntryPointd.lib），无条件探测会让 configure 直接报错中断。
 # 因此 GCC < 11 时跳过 Qt6 探测，直接用 Qt5 —— 这不是绕过问题，是本来就用不了。
 if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11))
-    find_package(Qt6 COMPONENTS Widgets Core Network Sql QUIET)
+    find_package(Qt6 COMPONENTS Widgets Core Network Sql PrintSupport QUIET)
     if(NOT Qt6_FOUND)
-        find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Core Network Sql)
+        find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Core Network Sql PrintSupport)
         message(STATUS "Using Qt5")
     else()
         message(STATUS "Using Qt6")
@@ -30,7 +30,7 @@ if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERS
 else()
     message(STATUS "Skip Qt6 probe: MinGW GCC ${CMAKE_CXX_COMPILER_VERSION} "
                    "(Qt6 needs MinGW 11.2+); using Qt5")
-    find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Core Network Sql)
+    find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Core Network Sql PrintSupport)
     message(STATUS "Using Qt5")
 endif()
 
@@ -71,6 +71,7 @@ set(SRC_ENGINE
 # 不含 Qt Widgets，测试目标复用）
 set(SRC_STORE
     src/history/history_store.cpp
+    src/history/report_export.cpp
     src/law/law_store.cpp
     src/favorite/favorite_store.cpp
 )
@@ -93,6 +94,8 @@ set(SRC_UI
     src/ui/quality_page.cpp
     src/ui/law_page.cpp
     src/ui/favorites_page.cpp
+    src/ui/doc_viewer_dialog.cpp
+    src/ui/snippet_dialog.cpp
     src/ui/settings_page.cpp
     src/ui/main_window.cpp
 )
@@ -134,11 +137,14 @@ set(HEADERS
     include/ui/quality_page.h
     include/ui/law_page.h
     include/ui/favorites_page.h
+    include/ui/doc_viewer_dialog.h
+    include/ui/snippet_dialog.h
     include/ui/settings_page.h
     include/config/app_config.h
     include/config/app_settings.h
     include/history/history_record.h
     include/history/history_store.h
+    include/history/report_export.h
     include/law/law_store.h
     include/favorite/favorite_store.h
 )
@@ -166,9 +172,9 @@ target_compile_definitions(ui_smoke PRIVATE
 )
 
 if(Qt6_FOUND)
-    target_link_libraries(ui_smoke PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql)
+    target_link_libraries(ui_smoke PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql Qt6::PrintSupport)
 else()
-    target_link_libraries(ui_smoke PRIVATE Qt5::Widgets Qt5::Core Qt5::Network Qt5::Sql)
+    target_link_libraries(ui_smoke PRIVATE Qt5::Widgets Qt5::Core Qt5::Network Qt5::Sql Qt5::PrintSupport)
 endif()
 
 if(WIN32)
@@ -201,9 +207,9 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 
 # ── Qt 链接（find_package 已在文件顶部统一跑完）──
 if(Qt6_FOUND)
-    target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql Qt6::PrintSupport)
 else()
-    target_link_libraries(${PROJECT_NAME} PRIVATE Qt5::Widgets Qt5::Core Qt5::Network Qt5::Sql)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Qt5::Widgets Qt5::Core Qt5::Network Qt5::Sql Qt5::PrintSupport)
 endif()
 
 # ── SQLite (bundled with Qt, but add explicit link) ──
@@ -278,9 +284,9 @@ target_compile_definitions(run_tests PRIVATE
 )
 
 if(Qt6_FOUND)
-    target_link_libraries(run_tests PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql)
+    target_link_libraries(run_tests PRIVATE Qt6::Widgets Qt6::Core Qt6::Network Qt6::Sql Qt6::PrintSupport)
 else()
-    target_link_libraries(run_tests PRIVATE Qt5::Widgets Qt5::Core Qt5::Network Qt5::Sql)
+    target_link_libraries(run_tests PRIVATE Qt5::Widgets Qt5::Core Qt5::Network Qt5::Sql Qt5::PrintSupport)
 endif()
 
 if(WIN32)

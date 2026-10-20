@@ -21,6 +21,7 @@ class QProgressDialog;
 
 namespace favorite {
 class FavoriteStore;
+struct FavoriteItem;  // T10.1：addFavoriteEntry 声明需要（完整定义在 favorite_store.h）
 }
 
 /// 检索问答页：保留重构前 MainWindow 的全部检索逻辑
@@ -151,12 +152,34 @@ private slots:
     /// T11：结果列表右键菜单 → 「收藏到案例集」
     void onResultContextMenu(const QPoint& pos);
     void onFavoriteCurrentResult();
+    /// T10：双击结果项 → 打开全文阅读弹窗
+    void onResultDoubleClicked(QListWidgetItem* item);
+
+public:
+    /// T10：按行号打开全文阅读弹窗（E2E 与双击/右键菜单共用同一链路）。
+    /// 行号越界或该行无 docId 返回 false，不崩溃。
+    bool openFullTextForRow(int row);
+
+    /// T10.1：按行号打开片段查看弹窗（E2E 与单击共用同一链路）。
+    /// 单击不再覆盖 AI 回答区；行号越界返回 false，不崩溃。
+    bool openSnippetForRow(int row);
 
 private:
     void setupUi();
     void displayResults(const std::vector<rag::SearchResult>& results);
     void appendAiAnswer(const QString& text);
     void loadApiKey();
+
+    /// T10：对指定结果项打开 DocViewerDialog（非模态，WA_DeleteOnClose）。
+    /// 同一文书的全部可见命中块一起传入（多命中可在弹窗内逐处跳转）。
+    bool openFullTextForItem(QListWidgetItem* item);
+
+    /// T10：按 docId 直接打开全文弹窗（片段弹窗「查看全文」的值捕获路径，
+    /// 不依赖 item 指针存活——列表重建后 item 可能已悬空）。
+    bool openFullTextForDoc(const QString& docId, std::vector<int> hitChunks);
+
+    /// T10.1：对指定结果项打开片段弹窗（非模态，WA_DeleteOnClose）。
+    bool openSnippetForItem(QListWidgetItem* item);
 
     /// 检索完成后的生成阶段入口：构建上下文与元数据摘要并入队生成请求。
     /// sources 作为本回合历史落库的命中来源缓存。
@@ -208,6 +231,10 @@ private:
     bool pickFavoriteCase(long long& caseIdOut);
     /// 把一条结果行写入收藏库；成功发 favoriteChanged 并更新状态标签
     long long addFavoriteForItem(QListWidgetItem* item, long long caseId);
+
+    /// T10.1：写入一条完整快照条目（addFavoriteForItem 的值路径复用体；
+    /// 片段弹窗的收藏动作按值捕获构造 entry，不依赖 item 指针存活）。
+    long long addFavoriteEntry(const favorite::FavoriteItem& entry);
     /// 按分组 id 查名称（收藏成功提示用；不存在返回空串）
     QString caseNameById(long long caseId) const;
 
@@ -260,6 +287,7 @@ private:
     // API Key 输入
     QLineEdit* apiKeyInput_ = nullptr;
     QPushButton* setApiKeyBtn_ = nullptr;
+    QPushButton* favoriteCurrentBtn_ = nullptr;  // T10.1：收藏入口可见化（与右键菜单双入口）
     QLabel* apiKeyStatus_ = nullptr;
 
     QListWidget* resultList_ = nullptr;

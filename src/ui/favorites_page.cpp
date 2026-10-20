@@ -2,6 +2,7 @@
 
 #include "favorite/favorite_store.h"
 #include "ui/app_theme.h"
+#include "ui/doc_viewer_dialog.h"
 
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -35,9 +36,11 @@ QString scoreText(double score) {
 
 }  // namespace
 
-FavoritesPage::FavoritesPage(favorite::FavoriteStore* store, QWidget* parent)
+FavoritesPage::FavoritesPage(favorite::FavoriteStore* store,
+                             rag::Retriever* retriever, QWidget* parent)
     : QWidget(parent)
     , store_(store)
+    , retriever_(retriever)
 {
     setupUi();
     refresh();
@@ -163,9 +166,9 @@ void FavoritesPage::setupUi() {
 
     openFullTextBtn_ = new QPushButton(QStringLiteral("📖 打开全文"), rightCard);
     openFullTextBtn_->setObjectName(QStringLiteral("favoriteOpenFullTextBtn"));
-    // T10 全文阅读页未完成：入口置灰预留，不阻塞本任务
+    // T10 已落地：默认置灰，选中收藏条目后启用（见 onFavoriteSelectionChanged）
     openFullTextBtn_->setEnabled(false);
-    openFullTextBtn_->setToolTip(QStringLiteral("全文阅读页（T10）开发中，完成后开放"));
+    openFullTextBtn_->setToolTip(QStringLiteral("打开该文书的整篇原文；原文已删除时仅可查看快照"));
 
     favToolbar->addWidget(favoriteNoteBtn_);
     favToolbar->addWidget(removeFavoriteBtn_);
@@ -349,6 +352,9 @@ void FavoritesPage::showFavoriteDetail(const favorite::FavoriteItem& item) {
 void FavoritesPage::clearDetail() {
     detail_->clear();
     detail_->setPlaceholderText(QStringLiteral("选中左侧分组与右侧收藏项后，这里显示片段快照"));
+    if (openFullTextBtn_) {
+        openFullTextBtn_->setEnabled(false);  // 无选中即无全文可开
+    }
 }
 
 // ── 选中辅助 ──
@@ -494,6 +500,11 @@ void FavoritesPage::onFavoriteSelectionChanged() {
         clearDetail();
         return;
     }
+    // T10：有选中且引擎在位 → 「打开全文」可用（失效条目也启用，
+    // 点击时明确提示仅可看快照，不静默降级）
+    if (openFullTextBtn_) {
+        openFullTextBtn_->setEnabled(retriever_ != nullptr);
+    }
     for (const auto& item : store_->favoritesOf(currentCaseId())) {
         if (item.id == id) {
             showFavoriteDetail(item);
@@ -554,8 +565,37 @@ bool FavoritesPage::removeFavoriteById(long long id, bool confirm) {
 }
 
 void FavoritesPage::onOpenFullText() {
-    // T10 预留入口：按钮置灰不可达；T10 落地后在此跳转全文阅读页
-    // （届时经 MainWindow 信号中转，本页仍不直接持有其它页面）
+    // T10：打开选中收藏的整篇原文。失效项（原文已删除）明确提示仅可看快照
+    //（不静默降级——快照在详情区本就可见），不崩溃。
+    if (!store_ || !retriever_) {
+        return;
+    }
+    const long long id = selectedFavoriteId();
+    if (id <= 0) {
+        return;
+    }
+    for (const auto& item : store_->favoritesOf(currentCaseId())) {
+        if (item.id != id) {
+            continue;
+        }
+        if (!item.valid) {
+            QMessageBox::information(
+                this, QStringLiteral("原文已删除"),
+                QStringLiteral("该收藏对应的文书已从文档库删除，整篇原文不可用。\n"
+                               "下方的片段快照仍可查看。"));
+            return;
+        }
+        // 命中块即收藏时的块号（单处定位）；弹窗非模态 + 关闭即销毁，
+        // 与检索页打开全文同一实现（DocViewerDialog），两页互不引用不变。
+        auto* viewer = new DocViewerDialog(
+            retriever_, QString::fromStdString(item.docId),
+            {item.chunkIndex}, this);
+        viewer->setAttribute(Qt::WA_DeleteOnClose);
+        viewer->show();
+        viewer->raise();
+        viewer->activateWindow();
+        return;
+    }
 }
 
 void FavoritesPage::onCaseSelectionChanged() {

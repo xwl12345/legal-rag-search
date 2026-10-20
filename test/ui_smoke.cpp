@@ -25,10 +25,12 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMouseEvent>
 #include <QProgressBar>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSpinBox>
@@ -48,6 +50,8 @@
 #include "ui/history_page.h"
 #include "ui/quality_page.h"
 #include "ui/favorites_page.h"
+#include "ui/doc_viewer_dialog.h"
+#include "ui/snippet_dialog.h"
 #include "../test/fake_transport.h"
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -66,6 +70,11 @@
 namespace {
 
 int g_failures = 0;
+
+/// T10.1 期（案例 C-9）：E2E 索引隔离文件——main() 通过环境变量
+/// RAG_SMOKE_INDEX_FILE 把全部窗口的索引恢复/落盘引到这里，
+/// 套件不读不写用户真实 rag_index.dat（旧流程每次跑 E2E 都会覆盖它）。
+static const QString kSuiteIndexPath = QStringLiteral("build/e2e_smoke_index.dat");
 
 // P2：注入 MainWindow 的假传输——历史 E2E 用它驱动真实 SSE 生成链路
 static std::shared_ptr<FakeTransport> g_fakeTransport;
@@ -395,7 +404,9 @@ int runLibraryE2E(MainWindow& window, const QString& corpusDir, const QString& o
 /// rag_index.dat），这里不做路径注入——真实验证的就是上线那条代码路径。
 /// 跑完把文件删掉，避免污染工作目录。
 int runPersistenceE2E(const QString& corpusDir, const QString& outDir) {
-    const QString indexPath = QString::fromStdString(config::dataFilePath(config::INDEX_FILE));   // P3：exe 目录
+    // T10.1 期（案例 C-9）：改用套件隔离文件（环境变量已把窗口引到这里），
+    // 持久化语义不变——会话 1 落盘到隔离文件，会话 2 从同一文件恢复。
+    const QString indexPath = kSuiteIndexPath;
 
     // 先清掉可能存在的旧索引，保证"会话 1 从空库起"这个前提成立
     QFile::remove(indexPath);
@@ -700,6 +711,65 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
             }
         }
 
+        // ── T12：检索报告导出（ODT/PDF）──
+        QPushButton* reportBtn = window.findChild<QPushButton*>("historyReportBtn");
+        check(reportBtn != nullptr, QStringLiteral("T12：「导出报告」按钮存在"));
+        check(reportBtn->isVisible(), QStringLiteral("T12：报告按钮在工具栏可见"));
+        check(reportBtn->isEnabled(), QStringLiteral("T12：单选记录时报告按钮可用"));
+
+        const QString reportOdt = outDir + QStringLiteral("/12-report-export.odt");
+        const QString reportPdf = outDir + QStringLiteral("/12-report-export.pdf");
+        QFile::remove(reportOdt);
+        QFile::remove(reportPdf);
+
+        check(historyPage->exportReportById(targetId, reportOdt, /*confirm=*/false),
+              QStringLiteral("T12：导出 ODT 报告成功"), reportOdt);
+        check(historyPage->exportReportById(targetId, reportPdf, /*confirm=*/false),
+              QStringLiteral("T12：导出 PDF 报告成功"), reportPdf);
+
+        {
+            QFile odt(reportOdt);
+            check(odt.exists() && odt.size() > 0, QStringLiteral("T12：ODT 文件已生成"),
+                  QStringLiteral("%1 字节").arg(odt.size()));
+            if (odt.open(QIODevice::ReadOnly)) {
+                check(odt.read(2) == QByteArray("PK"),
+                      QStringLiteral("T12：ODT 为合法 ZIP 容器（ODF 规范）"));
+                odt.close();
+            }
+            QFile pdf(reportPdf);
+            check(pdf.exists() && pdf.size() > 0, QStringLiteral("T12：PDF 文件已生成"),
+                  QStringLiteral("%1 字节").arg(pdf.size()));
+            if (pdf.open(QIODevice::ReadOnly)) {
+                check(pdf.read(5) == QByteArray("%PDF-"),
+                      QStringLiteral("T12：PDF 文件头正确"));
+                pdf.close();
+            }
+        }
+
+        // 非法扩展名 → 如实失败（不崩溃、不误写）
+        check(!historyPage->exportReportById(
+                  targetId, outDir + QStringLiteral("/12-report-export.xyz"),
+                  /*confirm=*/false),
+              QStringLiteral("T12：非法扩展名被拒绝且无文件写出"));
+
+        // 未选中任何行 → 按钮禁用（「仅单选」语义的 UI 兜底）
+        table->clearSelection();
+        QApplication::processEvents();
+        check(!reportBtn->isEnabled(), QStringLiteral("T12：未选中记录时报告按钮禁用"));
+
+        // 多选两行 → 同样禁用
+        table->selectRow(0);
+        table->selectionModel()->select(table->model()->index(1, 0),
+                                        QItemSelectionModel::Select
+                                            | QItemSelectionModel::Rows);
+        QApplication::processEvents();
+        check(!reportBtn->isEnabled(), QStringLiteral("T12：多选记录时报告按钮禁用"));
+
+        // 恢复单选并留证据截图（含「📄 导出报告」按钮的工具栏）
+        table->selectRow(0);
+        QApplication::processEvents();
+        window.grab().save(outDir + QStringLiteral("/20-report-export.png"));
+
         // ── 删除一条 ──
         check(historyPage->removeRecordById(targetId, /*confirm=*/false),
               QStringLiteral("删除单条记录成功"));
@@ -776,7 +846,8 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
 /// P0-7 同名异路径覆盖确认 E2E：同路径更新静默放行；异路径同名经确认钩子
 /// 完成 覆盖 / 跳过 / 取消 三种选择，引擎内容与之一致。
 int runOverwriteE2E() {
-    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
+    // T10.1 期（案例 C-9）：清理目标改为套件隔离文件（本组需要空库起步）
+    QFile::remove(kSuiteIndexPath);
 
     // ── 准备三个目录下的同名文件（内容互不相同，各带独有标记词）──
     struct FileSpec { QString dir; QString marker; };
@@ -893,7 +964,7 @@ int runOverwriteE2E() {
     QApplication::processEvents();
 
     // 收尾：清掉本组写出的索引与临时文件
-    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
+    QFile::remove(kSuiteIndexPath);
     for (const auto& spec : specs) {
         QDir(QDir::current().absoluteFilePath(spec.dir)).removeRecursively();
     }
@@ -1077,7 +1148,7 @@ int runSettingsE2E(const QString& corpusDir) {
 /// （向量列非空即过），批量评测不做数值断言——避免消耗大量代金券。
 int runQualityE2E(const QString& corpusDir) {
     // 起步清掉工作目录残留索引，保证从语料全量导入（此刻无窗口持有该文件，安全）
-    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
+    QFile::remove(kSuiteIndexPath);
 
     MainWindow window;
     window.resize(1180, 760);
@@ -1199,7 +1270,7 @@ int runQualityE2E(const QString& corpusDir) {
     window.grab().save(QStringLiteral("docs/screenshots/14-quality-page.png"));
 
     // 收尾：不留测试期间写出的索引
-    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
+    QFile::remove(kSuiteIndexPath);
     return g_failures;
 }
 
@@ -1492,11 +1563,246 @@ int runFavoritesE2E(const QString& corpusDir, const QString& outDir) {
             }
         }
     }
-    QFile::remove(QString::fromStdString(config::dataFilePath(config::INDEX_FILE)));
+    QFile::remove(kSuiteIndexPath);
     return g_failures;
 }
 
 }  // namespace
+
+// ── T10 全文阅读 E2E：检索 → 打开弹窗 → 定位高亮 → 只读零污染 → 越界安全 ──
+//
+// 说明：与双击/右键菜单共用 openFullTextForItem 同一链路（E2E 走行号入口，
+// 离屏环境不模拟真实双击手势——手感归人工手测）。弹窗非模态，断言完即关。
+int runDocViewerE2E(const QString& corpusDir, const QString& outDir) {
+    MainWindow window;
+    window.resize(1180, 720);
+    window.show();
+    QApplication::processEvents();
+
+    SearchPage* searchPage = window.findChild<SearchPage*>();
+    QListWidget* resultList = window.findChild<QListWidget*>(QStringLiteral("resultList"));
+    QLineEdit* searchInput = window.findChild<QLineEdit*>(QStringLiteral("searchInput"));
+    QPushButton* searchBtn = window.findChild<QPushButton*>(QStringLiteral("searchBtn"));
+    if (!searchPage || !resultList || !searchInput || !searchBtn) {
+        check(false, QStringLiteral("T10：全文阅读 E2E 控件齐全"),
+              QStringLiteral("控件缺失"));
+        return g_failures;
+    }
+
+    // 导入语料 + 真实检索（命中结果作为打开全文的来源）
+    searchPage->importPaths(collectCorpus(corpusDir));
+    waitUntil([&] { return !searchPage->isBusy(); });
+    QApplication::processEvents();
+    searchInput->setText(QStringLiteral("民间借贷 交付凭证"));
+    searchBtn->click();
+    pump(2000);
+    check(searchPage->lastResultCount() > 0,
+          QStringLiteral("T10：检索有命中（作为打开全文的来源）"),
+          QStringLiteral("%1 条").arg(searchPage->lastResultCount()));
+
+    // 主引擎计数基线：全文阅读只读，不得触碰索引
+    rag::Retriever* mainRetriever = window.engineWorker()->retriever();
+    const int docsBefore = mainRetriever->documentCount();
+    const int chunksBefore = mainRetriever->chunkCount();
+
+    const QString expectDocId =
+        resultList->item(0)->data(Qt::UserRole + 1).toString();
+    check(!expectDocId.isEmpty(),
+          QStringLiteral("T10：结果项携带 docId"));
+
+    check(searchPage->openFullTextForRow(0),
+          QStringLiteral("T10：打开全文（第 0 行，与双击/右键同链路）"));
+
+    DocViewerDialog* viewer = window.findChild<DocViewerDialog*>();
+    check(viewer != nullptr, QStringLiteral("T10：全文弹窗已创建"));
+    if (!viewer) {
+        return g_failures;
+    }
+
+    check(viewer->documentTitle() == expectDocId,
+          QStringLiteral("T10：弹窗标题 = 命中文书 docId"),
+          viewer->documentTitle());
+    check(viewer->locatedCount() >= 1,
+          QStringLiteral("T10：命中块定位 ≥ 1 处"),
+          QStringLiteral("%1 处").arg(viewer->locatedCount()));
+
+    QPlainTextEdit* textView =
+        viewer->findChild<QPlainTextEdit*>(QStringLiteral("docViewerText"));
+    QListWidget* hitList =
+        viewer->findChild<QListWidget*>(QStringLiteral("docViewerHitList"));
+    check(textView != nullptr
+              && textView->toPlainText().contains(QStringLiteral("本院认为")),
+          QStringLiteral("T10：正文为整篇文书原文（含「本院认为」）"));
+    check(hitList != nullptr && hitList->count() == viewer->locatedCount(),
+          QStringLiteral("T10：命中列表条目数 = 定位数"),
+          QStringLiteral("list=%1 located=%2")
+              .arg(hitList ? hitList->count() : -1)
+              .arg(viewer->locatedCount()));
+    check(hitList != nullptr && hitList->currentRow() == 0,
+          QStringLiteral("T10：默认定位第一处命中"),
+          QStringLiteral("row=%1").arg(hitList ? hitList->currentRow() : -2));
+
+    check(viewer->grab().save(outDir + QStringLiteral("/18-doc-viewer.png")),
+          QStringLiteral("T10：截图 18-doc-viewer"));
+
+    check(mainRetriever->documentCount() == docsBefore
+              && mainRetriever->chunkCount() == chunksBefore,
+          QStringLiteral("T10：只读零污染（文档/块计数不变）"));
+
+    viewer->close();
+    QApplication::processEvents();  // WA_DeleteOnClose → 弹窗销毁
+    viewer = nullptr;
+
+    check(!searchPage->openFullTextForRow(resultList->count() + 5),
+          QStringLiteral("T10：越界行号安全返回 false（不崩溃）"));
+
+    // ── S3：收藏页「打开全文」入口 ──
+    favorite::FavoriteStore* store = window.favoriteStore();
+    FavoritesPage* favPage = window.findChild<FavoritesPage*>();
+    QPushButton* openFullBtn =
+        window.findChild<QPushButton*>(QStringLiteral("favoriteOpenFullTextBtn"));
+    if (store && favPage && openFullBtn) {
+        // 起步清空（走 SQL 层，与 T11 组同策略），再攒一条收藏
+        for (const auto& c : store->cases()) {
+            store->removeCase(c.id);
+        }
+        const long long caseId = store->createCase("E2E·全文阅读类案");
+        check(caseId > 0, QStringLiteral("T10-S3：新建分组"));
+        check(searchPage->favoriteResultRow(0, caseId) > 0,
+              QStringLiteral("T10-S3：收藏检索第 0 行"));
+        QApplication::processEvents();  // favoriteChanged 信号中转刷新收藏页
+
+        // 收藏页默认选中首项（T11 修复的语义）→ 按钮应已启用
+        check(openFullBtn->isEnabled(),
+              QStringLiteral("T10-S3：选中收藏后「打开全文」按钮启用"));
+
+        openFullBtn->click();
+        QApplication::processEvents();
+        DocViewerDialog* favViewer = window.findChild<DocViewerDialog*>();
+        check(favViewer != nullptr,
+              QStringLiteral("T10-S3：收藏页打开全文弹窗"));
+        if (favViewer) {
+            check(favViewer->documentTitle() == expectDocId,
+                  QStringLiteral("T10-S3：弹窗标题 = 收藏的 docId"),
+                  favViewer->documentTitle());
+            check(favViewer->locatedCount() >= 1,
+                  QStringLiteral("T10-S3：收藏块号已定位"),
+                  QStringLiteral("%1 处").arg(favViewer->locatedCount()));
+            favViewer->close();
+            QApplication::processEvents();
+        }
+
+        // 收尾：清掉本组测试分组（级联删收藏），不留测试数据
+        store->removeCase(caseId);
+    } else {
+        check(false, QStringLiteral("T10-S3：收藏页控件齐全"),
+              QStringLiteral("控件缺失"));
+    }
+
+    // ── S4：大文书性能实测（约 17 万字符，量级 = 数十页文书 / 扫描件 OCR 全文）──
+    {
+        const QString bigPath = outDir + QStringLiteral("/t10_big_doc.txt");
+        QFile bigFile(bigPath);
+        QString body;
+        for (int i = 0; i < 600; ++i) {
+            body += QStringLiteral(
+                "第%1段：本院经审理查明，原告与被告之间的民间借贷关系依法成立，"
+                "被告应依约偿还借款本金及利息，逾期未还应承担违约责任。\n").arg(i);
+        }
+        check(bigFile.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                  && bigFile.write(body.toUtf8()) > 0,
+              QStringLiteral("T10-S4：构造大文书临时文件"));
+        bigFile.close();
+
+        searchPage->importPaths({bigPath});
+        waitUntil([&] { return !searchPage->isBusy(); });
+        QApplication::processEvents();
+
+        const QString bigDocId = QFileInfo(bigPath).fileName();
+        QElapsedTimer sw;
+        sw.start();
+        // 直接构造弹窗测打开性能（大文书不在检索结果里，不走行号入口）；
+        // 命中块传空 → 只加载全文不做高亮，量的是最坏路径里的主开销
+        DocViewerDialog bigViewer(mainRetriever, bigDocId, {}, &window);
+        const qint64 openMs = sw.elapsed();
+
+        QPlainTextEdit* bigText =
+            bigViewer.findChild<QPlainTextEdit*>(QStringLiteral("docViewerText"));
+        check(bigText != nullptr
+                  && bigText->toPlainText().size() == body.size(),
+              QStringLiteral("T10-S4：大文书全文加载完整（字符数与原文逐一相等）"),
+              QStringLiteral("viewer=%1 expected=%2")
+                  .arg(bigText ? bigText->toPlainText().size() : 0)
+                  .arg(body.size()));
+        check(openMs < 3000,
+              QStringLiteral("T10-S4：大文书打开耗时 < 3 s（任务书级门槛）"),
+              QStringLiteral("%1 ms").arg(openMs));
+        check(bigViewer.grab().save(outDir + QStringLiteral("/19-doc-viewer-big.png")),
+              QStringLiteral("T10-S4：截图 19-doc-viewer-big"));
+
+        QFile::remove(bigPath);  // 探针文件用完即删
+    }
+
+    // ── T10.1：单击片段弹窗（AI 回答区不被覆盖）+ 收藏入口可见化 ──
+    {
+        QTextEdit* aiAnswer =
+            window.findChild<QTextEdit*>(QStringLiteral("aiAnswer"));
+        // 先在回答区注入标记文本——原缺陷正是单击会用片段覆盖这里
+        const QString marker = QStringLiteral("AI 回答原文·对照保护标记");
+        if (aiAnswer) {
+            aiAnswer->setPlainText(marker);
+        }
+
+        check(searchPage->openSnippetForRow(0),
+              QStringLiteral("T10.1：单击打开片段弹窗（第 0 行）"));
+        SnippetDialog* snippet = window.findChild<SnippetDialog*>();
+        check(snippet != nullptr, QStringLiteral("T10.1：片段弹窗已创建"));
+        if (!snippet) {
+            return g_failures;
+        }
+
+        check(snippet->snippetText()
+                  == resultList->item(0)->data(Qt::UserRole).toString(),
+              QStringLiteral("T10.1：片段内容 = 结果条目的块原文"));
+        const QString aiAfter =
+            aiAnswer ? aiAnswer->toPlainText() : QString();
+        check(aiAfter == marker,
+              QStringLiteral("T10.1：AI 回答区逐字不变（未被片段覆盖）"),
+              aiAfter.left(20));
+
+        // 片段弹窗「查看全文」→ DocViewerDialog 拉起
+        QPushButton* fullBtn = snippet->findChild<QPushButton*>(
+            QStringLiteral("snippetFullTextBtn"));
+        check(fullBtn != nullptr,
+              QStringLiteral("T10.1：片段弹窗「查看全文」按钮存在"));
+        if (fullBtn) {
+            fullBtn->click();
+            QApplication::processEvents();
+            DocViewerDialog* fullViewer = window.findChild<DocViewerDialog*>();
+            check(fullViewer != nullptr,
+                  QStringLiteral("T10.1：片段弹窗「查看全文」拉起全文弹窗"));
+            if (fullViewer) {
+                check(fullViewer->documentTitle() == expectDocId,
+                      QStringLiteral("T10.1：全文弹窗标题与片段同源 docId"),
+                      fullViewer->documentTitle());
+                fullViewer->close();
+                QApplication::processEvents();
+            }
+        }
+        snippet->close();
+        QApplication::processEvents();
+
+        // 收藏入口可见化：结果列表标题行常驻按钮
+        QPushButton* favCurrentBtn = window.findChild<QPushButton*>(
+            QStringLiteral("favoriteCurrentBtn"));
+        check(favCurrentBtn != nullptr && favCurrentBtn->isEnabled(),
+              QStringLiteral("T10.1：「⭐ 收藏当前」按钮可见且可用"));
+    }
+
+    window.close();
+    QApplication::processEvents();
+    return g_failures;
+}
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
@@ -1540,6 +1846,15 @@ int main(int argc, char* argv[]) {
         qCritical() << "cannot create output dir:" << outDirPath;
         return 2;
     }
+
+    // T10.1 期修复（案例 C-9）：E2E 索引隔离——与上面的设置隔离同一策略。
+    // ① 启动时清掉隔离文件：套件不吃任何残留/用户索引（导入组曾因启动时
+    //    已有 1 篇文档而 21+1=22 假失败，2026-10-20 实测）；
+    // ② 环境变量把全部窗口（共享 + 各分组自建）的索引恢复/落盘引到
+    //    kSuiteIndexPath，套件 closeEvent 不再把测试语料写回用户真实
+    //    rag_index.dat（此前每次跑 E2E 都会覆盖用户索引，同日实测暴露）。
+    QFile::remove(kSuiteIndexPath);
+    qputenv("RAG_SMOKE_INDEX_FILE", kSuiteIndexPath.toLocal8Bit());
 
     MainWindow window;
     window.resize(1180, 720);
@@ -1600,16 +1915,20 @@ int main(int argc, char* argv[]) {
         qInfo().noquote() << QStringLiteral("── 案例收藏 E2E（收藏 → 分组 → 删除失效标记 → 重启仍在）──");
         runFavoritesE2E(parser.value(e2eOption), outDirPath);
 
+        qInfo().noquote() << QStringLiteral("── 全文阅读 E2E（检索 → 弹窗 → 定位高亮 → 只读零污染）──");
+        runDocViewerE2E(parser.value(e2eOption), outDirPath);
+
         qInfo().noquote() << QStringLiteral("── P0 同名覆盖确认 E2E（覆盖 / 跳过 / 取消 + 内容一致）──");
         runOverwriteE2E();
     }
 
-    // 套件级收尾：还原用户配置
+    // 套件级收尾：还原用户配置 + 清掉隔离索引文件
     if (hadUserSettings) {
         QFile::remove(userSettingsPath);
         QFile::copy(userSettingsBackup, userSettingsPath);
         QFile::remove(userSettingsBackup);
     }
+    QFile::remove(kSuiteIndexPath);
 
     qInfo().noquote() << (g_failures == 0
                               ? QStringLiteral("UI smoke: 全部通过")

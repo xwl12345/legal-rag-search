@@ -17,6 +17,7 @@
 #include <QVBoxLayout>
 
 #include "history/history_store.h"
+#include "history/report_export.h"
 
 namespace {
 
@@ -86,6 +87,12 @@ void HistoryPage::setupUi() {
     exportBtn_->setObjectName(QStringLiteral("historyExportBtn"));
     AppTheme::setButtonRole(exportBtn_, "primary");
 
+    reportBtn_ = new QPushButton(QStringLiteral("📄 导出报告"), this);
+    reportBtn_->setObjectName(QStringLiteral("historyReportBtn"));
+    AppTheme::setButtonRole(reportBtn_, "primary");
+    reportBtn_->setToolTip(
+        QStringLiteral("将选中的单条问答导出为检索报告（Word/ODT 或 PDF）"));
+
     removeBtn_ = new QPushButton(QStringLiteral("删除选中"), this);
     removeBtn_->setObjectName(QStringLiteral("historyRemoveBtn"));
     AppTheme::setButtonRole(removeBtn_, "danger");
@@ -101,6 +108,7 @@ void HistoryPage::setupUi() {
     toolbar->addWidget(keywordInput_);
     toolbar->addSpacing(4);
     toolbar->addWidget(exportBtn_);
+    toolbar->addWidget(reportBtn_);
     toolbar->addWidget(removeBtn_);
     toolbar->addWidget(clearBtn_);
     toolbar->addWidget(refreshBtn_);
@@ -183,6 +191,7 @@ void HistoryPage::setupUi() {
             this, &HistoryPage::onKeywordChanged);
     connect(refreshBtn_, &QPushButton::clicked, this, &HistoryPage::refresh);
     connect(exportBtn_, &QPushButton::clicked, this, &HistoryPage::onExportSelected);
+    connect(reportBtn_, &QPushButton::clicked, this, &HistoryPage::onExportReportSelected);
     connect(removeBtn_, &QPushButton::clicked, this, &HistoryPage::onRemoveSelected);
     connect(clearBtn_, &QPushButton::clicked, this, &HistoryPage::onClearAll);
     connect(table_, &QTableWidget::itemSelectionChanged,
@@ -288,6 +297,7 @@ void HistoryPage::onSelectionChanged() {
     const QStringList ids = selectedIds();
     if (removeBtn_) removeBtn_->setEnabled(!ids.isEmpty());
     if (exportBtn_) exportBtn_->setEnabled(!ids.isEmpty());
+    if (reportBtn_) reportBtn_->setEnabled(ids.size() == 1);   // T12：报告仅单选可用
     if (ids.size() == 1) {
         showDetails(ids.first().toLongLong());
     } else {
@@ -431,6 +441,81 @@ void HistoryPage::onExportSelected() {
 
     if (hint_) {
         hint_->setText(QStringLiteral("✓ 已导出 %1 条记录到 %2").arg(records.size()).arg(path));
+    }
+}
+
+// ── T12：检索报告导出（ODT / PDF）──
+bool HistoryPage::exportReportById(long long id, const QString& path, bool confirm) {
+    if (!store_ || id <= 0 || path.isEmpty()) {
+        return false;
+    }
+
+    history::HistoryRecord record;
+    if (!store_->get(id, record)) {
+        if (confirm) {
+            QMessageBox::warning(this, QStringLiteral("导出失败"),
+                                 QStringLiteral("找不到记录 #%1（可能已被删除）。").arg(id));
+        }
+        return false;
+    }
+
+    const std::string html = history::toReportHtml(record);
+    QString error;
+    bool ok = false;
+    if (path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+        ok = history::writePdfFile(path, html, &error);
+    } else if (path.endsWith(QStringLiteral(".odt"), Qt::CaseInsensitive)) {
+        ok = history::writeOdtFile(path, html, &error);
+    } else {
+        error = QStringLiteral("仅支持导出 .odt 或 .pdf 格式（按保存对话框的类型选择）");
+    }
+
+    if (!ok) {
+        if (confirm) {
+            QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+        }
+        return false;
+    }
+
+    if (confirm) {
+        QMessageBox::information(this, QStringLiteral("导出成功"),
+                                 QStringLiteral("检索报告已导出到：\n%1").arg(path));
+    }
+    return true;
+}
+
+void HistoryPage::onExportReportSelected() {
+    if (!store_) return;
+
+    const QStringList ids = selectedIds();
+    if (ids.size() != 1) {
+        QMessageBox::information(this, QStringLiteral("提示"),
+                                 QStringLiteral("请先选中恰好一条记录（检索报告仅支持单条导出）。"));
+        return;
+    }
+    const long long id = ids.first().toLongLong();
+
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    const QString suggested = QStringLiteral("检索报告_%1.odt").arg(stamp);
+    QString selectedFilter;
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出检索报告"), suggested,
+        QStringLiteral("Word 文档 (*.odt);;PDF 文档 (*.pdf)"),
+        &selectedFilter);
+    if (path.isEmpty()) return;
+
+    // 按用户在对话框里选的文件类型补扩展名（手敲文件名漏后缀时兜底）
+    QString target = path;
+    if (selectedFilter.contains(QStringLiteral("pdf"), Qt::CaseInsensitive)) {
+        if (!target.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+            target += QStringLiteral(".pdf");
+        }
+    } else if (!target.endsWith(QStringLiteral(".odt"), Qt::CaseInsensitive)) {
+        target += QStringLiteral(".odt");
+    }
+
+    if (exportReportById(id, target, /*confirm=*/true) && hint_) {
+        hint_->setText(QStringLiteral("✓ 检索报告已导出到 %1").arg(target));
     }
 }
 
