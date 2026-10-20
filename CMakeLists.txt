@@ -355,6 +355,7 @@ if(WIN32 AND NOT Qt6_FOUND)
         "${QT_BIN_DIR}/Qt5Widgets.dll"
         "${QT_BIN_DIR}/Qt5Network.dll"
         "${QT_BIN_DIR}/Qt5Sql.dll"
+        "${QT_BIN_DIR}/Qt5PrintSupport.dll"
         "${MINGW_BIN_DIR}/libgcc_s_seh-1.dll"
         "${MINGW_BIN_DIR}/libstdc++-6.dll"
         "${MINGW_BIN_DIR}/libwinpthread-1.dll")
