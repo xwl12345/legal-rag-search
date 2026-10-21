@@ -55,6 +55,8 @@
 #include "law/law_store.h"
 #include "favorite/favorite_store.h"
 #include "ui/doc_viewer_logic.h"
+#include "ui/markdown_render.h"
+#include <QTextBlock>
 #include "config/app_config.h"
 #include "config/app_settings.h"
 #include "../test/fake_transport.h"
@@ -1762,6 +1764,67 @@ void test_t12_report_pdf_export() {
     CHECK(!badCase.isEmpty());
 
     QFile::remove(pdfPath);
+    PASS();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 测试 16c: T13 —— AI 回答 Markdown 渲染
+// ═══════════════════════════════════════════════════════════════
+
+void test_t13_markdown_render_structured() {
+    TEST("T13：Markdown 渲染——标题/加粗/列表无符号残留，标题块可识别");
+    QTextEdit view;
+    markdown::renderMarkdown(view,
+        "## 民间借贷的认定\n\n**加粗文字** 与 *斜体文字*\n\n- 甲项\n- 乙项\n\n1. 第一\n2. 第二");
+
+    const QString plain = view.toPlainText();
+    // 渲染后 md 标记不残留
+    CHECK(!plain.contains(QStringLiteral("##")));
+    CHECK(!plain.contains(QStringLiteral("**")));
+    CHECK(!plain.contains(QStringLiteral("*斜体*")));
+    CHECK(!plain.contains(QStringLiteral("- 甲")));
+    // 内容文字全部保留
+    CHECK(plain.contains(QStringLiteral("民间借贷的认定")));
+    CHECK(plain.contains(QStringLiteral("加粗文字")));
+    CHECK(plain.contains(QStringLiteral("斜体文字")));
+    CHECK(plain.contains(QStringLiteral("甲项")));
+    CHECK(plain.contains(QStringLiteral("第一")));
+    // 标题确实是 heading 块（Typora 式分级排版的结构证据）
+    bool hasHeading2 = false;
+    for (QTextBlock b = view.document()->begin(); b.isValid(); b = b.next()) {
+        if (b.blockFormat().headingLevel() == 2) {
+            hasHeading2 = true;
+            break;
+        }
+    }
+    CHECK(hasHeading2);
+    PASS();
+}
+
+void test_t13_markdown_render_plain_passthrough() {
+    TEST("T13：纯文本透传无损（法律文书原文 + 中文全角标点）");
+    QTextEdit view;
+    const QString raw = QStringLiteral(
+        "本院认为，借款人应当按照约定的期限返还借款；"
+        "利息约定不明的，视为不支付利息（全角「引号」与——破折号无损）。");
+    markdown::renderMarkdown(view, raw);
+    CHECK(view.toPlainText() == raw);
+    PASS();
+}
+
+void test_t13_markdown_render_edge_cases() {
+    TEST("T13：空串/表格/代码块/超长内容安全不崩");
+    QTextEdit view;
+    markdown::renderMarkdown(view, QString());
+    CHECK(view.toPlainText().isEmpty());
+
+    QString table = QStringLiteral("| 列1 | 列2 |\n| --- | --- |\n");
+    for (int i = 0; i < 200; ++i) {
+        table += QStringLiteral("| 行%1 | 内容%1 |\n").arg(i);
+    }
+    table += QStringLiteral("\n```\n代码块\n```\n");
+    markdown::renderMarkdown(view, table);
+    CHECK(view.toPlainText().contains(QStringLiteral("行199")));
     PASS();
 }
 
@@ -3576,6 +3639,11 @@ void run_all_tests() {
     test_t12_report_html_assembly();
     test_t12_report_odt_export();
     test_t12_report_pdf_export();
+
+    std::cout << "\n── T13: AI 回答 Markdown 渲染 ──" << std::endl;
+    test_t13_markdown_render_structured();
+    test_t13_markdown_render_plain_passthrough();
+    test_t13_markdown_render_edge_cases();
 
     std::cout << "\n── T3: 检索参数配置中心 ──" << std::endl;
     test_settings_roundtrip();

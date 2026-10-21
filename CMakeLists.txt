@@ -98,6 +98,7 @@ set(SRC_UI
     src/ui/snippet_dialog.cpp
     src/ui/settings_page.cpp
     src/ui/main_window.cpp
+    src/ui/markdown_render.cpp
 )
 
 set(SOURCES
@@ -127,6 +128,7 @@ set(HEADERS
     include/net/transport.h
     include/net/qt_transport.h
     include/ui/main_window.h
+    include/ui/markdown_render.h
     include/ui/engine_worker.h
     include/ui/app_theme.h
     include/ui/navigation_bar.h
@@ -268,6 +270,7 @@ set(TEST_SOURCES
     ${SRC_ENGINE}      # P3：与主程序同源复用（无 main + 无 UI）
     ${SRC_STORE}
     ${SRC_CONFIG}
+    src/ui/markdown_render.cpp   # T13：无状态渲染工具（仅依赖 Widgets，无页面耦合）
 )
 
 add_executable(run_tests ${TEST_SOURCES})
