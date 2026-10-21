@@ -13,11 +13,16 @@
 #include <QPushButton>
 #include <QSplitter>
 #include <QTableWidget>
+#include <QTextBlockFormat>
+#include <QTextBrowser>
+#include <QTextCharFormat>
+#include <QTextCursor>
 #include <QTextEdit>
 #include <QVBoxLayout>
 
 #include "history/history_store.h"
 #include "history/report_export.h"
+#include "ui/markdown_render.h"
 
 namespace {
 
@@ -174,7 +179,7 @@ void HistoryPage::setupUi() {
     detailTitle_->setObjectName(QStringLiteral("cardTitle"));
     rightLayout->addWidget(detailTitle_);
 
-    detailArea_ = new QTextEdit(rightCard);
+    detailArea_ = new QTextBrowser(rightCard);
     detailArea_->setObjectName(QStringLiteral("historyDetail"));
     detailArea_->setReadOnly(true);
     detailArea_->setPlaceholderText(
@@ -321,46 +326,62 @@ void HistoryPage::showDetails(long long id) {
         return;
     }
 
-    QString text;
-    text += QStringLiteral("◆ 记录编号：%1\n").arg(record.id);
-    text += QStringLiteral("◆ 提问时间：%1\n").arg(QString::fromStdString(record.createdAt));
-    text += QStringLiteral("◆ 命中块数：%1\n").arg(record.hitCount());
-    text += QStringLiteral("◆ 回答状态：%1\n").arg(answerStateText(record));
+    QString headText;    // 元信息 + 检索问题（纯文本段落）
+    QString sourcesText; // 来源清单（纯文本段落）
+
+    headText += QStringLiteral("◆ 记录编号：%1\n").arg(record.id);
+    headText += QStringLiteral("◆ 提问时间：%1\n").arg(QString::fromStdString(record.createdAt));
+    headText += QStringLiteral("◆ 命中块数：%1\n").arg(record.hitCount());
+    headText += QStringLiteral("◆ 回答状态：%1\n").arg(answerStateText(record));
     if (record.interrupted && !record.note.empty()) {
-        text += QStringLiteral("　　（%1）\n").arg(QString::fromStdString(record.note));
+        headText += QStringLiteral("　　（%1）\n").arg(QString::fromStdString(record.note));
     }
     // T6：本次回答的立场（旧记录为空则不显示，避免噪音）
     if (!record.perspective.empty()) {
-        text += QStringLiteral("◆ 回答视角：%1\n").arg(QString::fromStdString(record.perspective));
+        headText += QStringLiteral("◆ 回答视角：%1\n").arg(QString::fromStdString(record.perspective));
     }
 
-    text += QStringLiteral("\n── 检索问题 ──\n%1\n").arg(QString::fromStdString(record.query));
+    headText += QStringLiteral("\n── 检索问题 ──\n%1\n").arg(QString::fromStdString(record.query));
 
-    text += record.interrupted
-                ? QStringLiteral("\n── AI 回答（未完成）──\n%1\n")
-                : QStringLiteral("\n── AI 回答 ──\n%1\n");
-    text = text.arg(QString::fromStdString(record.answer));
+    headText += record.interrupted
+                ? QStringLiteral("\n── AI 回答（未完成）──\n")
+                : QStringLiteral("\n── AI 回答 ──\n");
 
-    text += QStringLiteral("\n── 命中来源（%1 个文本块）──\n").arg(record.hitCount());
+    sourcesText += QStringLiteral("\n\n── 命中来源（%1 个文本块）──\n").arg(record.hitCount());
     if (record.sources.empty()) {
-        text += QStringLiteral("（本次回答没有引用文本块）\n");
+        sourcesText += QStringLiteral("（本次回答没有引用文本块）\n");
     } else {
         for (size_t i = 0; i < record.sources.size(); ++i) {
             const auto& item = record.sources[i];
-            text += QStringLiteral("【%1】%2 · 第 %3 块 · 相关度 %4\n")
+            sourcesText += QStringLiteral("【%1】%2 · 第 %3 块 · 相关度 %4\n")
                         .arg(static_cast<int>(i + 1))
                         .arg(QString::fromStdString(item.docId))
                         .arg(item.chunkIndex)
                         .arg(item.finalScore, 0, 'f', 3);
-            text += QStringLiteral("　　%1\n")
+            sourcesText += QStringLiteral("　　%1\n")
                         .arg(previewOf(QString::fromStdString(item.snippet), kMaxSnippetChars));
         }
     }
 
+    // T13：回答段渲染 Markdown（Typora 式排版）；元信息/问题/来源保持纯文本
+    // —— 用 QTextCursor 分段插入，文书快照里的偶发 *、_ 不会被误解析成强调语法
+    markdown::renderMarkdown(*detailArea_, QString::fromStdString(record.answer));
+    QTextCursor cur(detailArea_->document());
+    cur.movePosition(QTextCursor::Start);
+    cur.insertBlock();                       // 顶部开新块，回答内容整体下移
+    cur.movePosition(QTextCursor::PreviousBlock);
+    cur.setBlockFormat(QTextBlockFormat());  // 摆脱继承来的标题/代码块格式
+    cur.setCharFormat(QTextCharFormat());
+    cur.insertText(headText);                // \n 自动分块
+
+    cur.movePosition(QTextCursor::End);
+    cur.setBlockFormat(QTextBlockFormat());
+    cur.setCharFormat(QTextCharFormat());
+    cur.insertText(sourcesText);
+
     if (detailTitle_) {
         detailTitle_->setText(QStringLiteral("问答详情 · 记录 #%1").arg(record.id));
     }
-    detailArea_->setPlainText(text);
 }
 
 void HistoryPage::clearDetails() {
