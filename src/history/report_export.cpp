@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QPrinter>
+#include <QRegularExpression>
 #include <QTextDocument>
 #include <QTextDocumentWriter>
 #include <QTextStream>
@@ -13,6 +14,17 @@ namespace {
 QString toQ(const std::string& s) { return QString::fromStdString(s); }
 
 constexpr int kScoreDigits = 3;
+
+/// 报告为打印文档：把模型输出里的 Markdown 标记（** 加粗、行首 # 标题）
+/// 剥离后再排版——与 T13 前检索页的显示语义一致。
+/// 原始 Markdown 仍完整保存在历史库与 .md 导出中，此处只影响报告观感。
+QString plainAnswer(const std::string& raw) {
+    QString out = toQ(raw);
+    out.remove(QStringLiteral("**"));
+    out.replace(QRegularExpression(QStringLiteral("(^|\\n)#{1,6}\\s+")),
+                QStringLiteral("\\1"));
+    return out;
+}
 
 /// HTML 转义 + 折叠换行（QTextDocument 的 <p> 不渲染裸换行）。
 /// 顺序关键：先转义再插 <br/>，否则标签会被转成 &lt;br/&gt; 显示出来
@@ -130,7 +142,7 @@ std::string toReportHtml(const HistoryRecord& record) {
     if (record.answer.empty()) {
         out << QStringLiteral("<p>（无回答内容）</p>");
     } else {
-        out << QStringLiteral("<p>%1</p>").arg(escText(record.answer));
+        out << QStringLiteral("<p>%1</p>").arg(escText(plainAnswer(record.answer).toStdString()));
     }
 
     // 尾注

@@ -542,8 +542,9 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
                                            -> FakeTransport::Reply {
             FakeTransport::Reply r;
             if (url.path().contains(QStringLiteral("chat/completions"))) {
+                // T13：回答携带 Markdown 语法——验证渲染去符号 + 落库存原文
                 r.chunks = {
-                    QByteArray("data: {\"choices\":[{\"delta\":{\"content\":\"交付凭证\"}}]}\n\n"),
+                    QByteArray("data: {\"choices\":[{\"delta\":{\"content\":\"## 结论\\n\\n**交付凭证**\"}}]}\n\n"),
                     QByteArray("data: {\"choices\":[{\"delta\":{\"content\":\"应当结合转账记录与收条综合认定。\"}}]}\n\n"),
                     QByteArray("data: [DONE]\n\n"),
                 };
@@ -653,6 +654,34 @@ int runHistoryE2E(const QString& corpusDir, const QString& outDir) {
                   QStringLiteral("「停止」中断回合被标记为未完成（真实取消链路）"));
             check(hasComplete,
                   QStringLiteral("完整回合回答来自真实 SSE 流"));
+        }
+
+        // ── T13：AI 回答 Markdown 渲染（检索页回答区 + 落库原文）──
+        {
+            QTextEdit* aiAnswerT13 =
+                window.findChild<QTextEdit*>(QStringLiteral("aiAnswer"));
+            check(aiAnswerT13 != nullptr,
+                  QStringLiteral("T13：AI 回答区控件存在"));
+            const QString rendered =
+                aiAnswerT13 ? aiAnswerT13->toPlainText() : QString();
+            check(rendered.contains(QStringLiteral("结论"))
+                      && rendered.contains(QStringLiteral("交付凭证")),
+                  QStringLiteral("T13：Markdown 标题/加粗文字渲染后可读"),
+                  rendered.left(40));
+            check(!rendered.contains(QStringLiteral("##"))
+                      && !rendered.contains(QStringLiteral("**")),
+                  QStringLiteral("T13：md 符号不残留（Typora 式排版）"));
+            // 落库保存原始 Markdown（忠实模型输出，.md 导出与报告有源可溯）
+            bool rawStored = false;
+            for (const auto& rec : store->recent(10)) {
+                if (QString::fromStdString(rec.answer)
+                        .contains(QStringLiteral("## 结论"))) {
+                    rawStored = true;
+                    break;
+                }
+            }
+            check(rawStored,
+                  QStringLiteral("T13：落库保存原始 Markdown 原文"));
         }
 
         // ── 关键词搜索（命中回合 1 的查询；round 2 残卷恰好含「交付凭证」，

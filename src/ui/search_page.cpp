@@ -19,8 +19,11 @@
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QSplitter>
+#include <QTextBrowser>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include "ui/markdown_render.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -309,7 +312,7 @@ void SearchPage::setupUi() {
     answerHeader->setObjectName(QStringLiteral("cardTitle"));
     rightLayout->addWidget(answerHeader);
 
-    aiAnswerArea_ = new QTextEdit(rightCard);
+    aiAnswerArea_ = new QTextBrowser(rightCard);
     aiAnswerArea_->setObjectName(QStringLiteral("aiAnswer"));
     aiAnswerArea_->setReadOnly(true);
     aiAnswerArea_->setPlaceholderText(
@@ -612,16 +615,11 @@ void SearchPage::startGeneration(std::vector<rag::SearchResult> sources,
 }
 
 void SearchPage::onGenerationDelta(const QString& text) {
-    // 剥离模型输出中的 Markdown 标记（** 加粗、行首 # 标题），
-    // 纯文本区不渲染这些符号
-    QString cleaned = text;
-    cleaned.remove(QStringLiteral("**"));
-    cleaned.replace(QRegularExpression(QStringLiteral("(^|\\n)#{1,6}\\s+")),
-                    QStringLiteral("\\1"));
-    answerBuffer_ += cleaned;
-    aiAnswerArea_->moveCursor(QTextCursor::End);
-    aiAnswerArea_->insertPlainText(cleaned);
-    aiAnswerArea_->moveCursor(QTextCursor::End);
+    // T13：不再剥离 Markdown 标记——模型原始输出整段渲染成富文本
+    //（Typora 式排版，贴底跟随语义见 markdown_render.h）。
+    // answerBuffer_ 从此保存原始 Markdown：落库 / 导出 .md 均为原文。
+    answerBuffer_ += text;
+    markdown::renderMarkdown(*aiAnswerArea_, answerBuffer_);
 }
 
 void SearchPage::onGenerationFinished(bool interrupted, const QString& errorText) {
@@ -1357,10 +1355,9 @@ std::string SearchPage::buildMetadataSummary(const std::vector<rag::SearchResult
 void SearchPage::appendAiAnswer(const QString& text) {
     // 界面上显示什么，历史里就记什么 —— 失败提示语也要留痕，
     // 否则复盘时看不到"这次为什么没答出来"。
+    // 提示语为纯文本（无 md 语法），与回答原文一起整段重渲染。
     answerBuffer_ += text;
-    aiAnswerArea_->moveCursor(QTextCursor::End);
-    aiAnswerArea_->insertPlainText(text);
-    aiAnswerArea_->moveCursor(QTextCursor::End);
+    markdown::renderMarkdown(*aiAnswerArea_, answerBuffer_);
 }
 
 history::HistoryRecord SearchPage::buildHistoryRecord(

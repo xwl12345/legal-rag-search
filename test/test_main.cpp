@@ -1704,6 +1704,15 @@ void test_t12_report_html_assembly() {
     noSrc.sources.clear();
     const std::string emptyHtml = history::toReportHtml(noSrc);
     CHECK(emptyHtml.find("本次回答没有引用任何文本块") != std::string::npos);
+    // T13 联动：回答含原始 Markdown 时，报告（打印文档）剥离标记、内容保留
+    history::HistoryRecord mdRec = makeSampleRecord(
+        "Markdown 回答报告测试？", "## 结论\n\n**加粗依据**正文。");
+    mdRec.id = 9;
+    const std::string mdHtml = history::toReportHtml(mdRec);
+    CHECK(mdHtml.find("## ") == std::string::npos);
+    CHECK(mdHtml.find("**") == std::string::npos);
+    CHECK(mdHtml.find("结论") != std::string::npos);
+    CHECK(mdHtml.find("加粗依据") != std::string::npos);
     PASS();
 }
 
