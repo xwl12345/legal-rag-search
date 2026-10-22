@@ -315,6 +315,7 @@ void SearchPage::setupUi() {
     aiAnswerArea_ = new QTextBrowser(rightCard);
     aiAnswerArea_->setObjectName(QStringLiteral("aiAnswer"));
     aiAnswerArea_->setReadOnly(true);
+    static_cast<QTextBrowser*>(aiAnswerArea_)->setOpenLinks(false);  // 链接一律不导航（内锚/file:// 均不加载，无 anchorClicked 消费者）
     aiAnswerArea_->setPlaceholderText(
         QStringLiteral("AI 生成的答案将在这里实时显示..."));
     rightLayout->addWidget(aiAnswerArea_, 1);

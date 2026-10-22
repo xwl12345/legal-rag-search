@@ -182,6 +182,7 @@ void HistoryPage::setupUi() {
     detailArea_ = new QTextBrowser(rightCard);
     detailArea_->setObjectName(QStringLiteral("historyDetail"));
     detailArea_->setReadOnly(true);
+    static_cast<QTextBrowser*>(detailArea_)->setOpenLinks(false);  // 与 aiAnswerArea_ 同策略：链接一律不导航
     detailArea_->setPlaceholderText(
         QStringLiteral("选中左侧任意一行，这里显示完整的问题、回答与命中来源…"));
     rightLayout->addWidget(detailArea_, 1);
