@@ -15,12 +15,53 @@ QString toQ(const std::string& s) { return QString::fromStdString(s); }
 
 constexpr int kScoreDigits = 3;
 
-/// 报告为打印文档：把模型输出里的 Markdown 标记（** 加粗、行首 # 标题）
-/// 剥离后再排版——与 T13 前检索页的显示语义一致。
+/// 报告为打印文档：把模型输出里的 Markdown 标记剥离后再排版——与 T13 前检索页
+/// 的显示语义一致（T14-S5 起覆盖常用全套：表格、行内代码、链接/图片、加粗/斜体、
+/// 无序列表、引用、行首 # 标题）。
+/// 处理策略：
+///   - 表格分隔线行 / 水平线（仅由 | : - 和空白组成且含 ≥3 个 -）整行删除；
+///     数据行的 | 转为空格（方案 a：表格降级为可读段落，不做 HTML 表格）；
+///   - 链接 [文本](URL) / 图片 ![替代](URL) 只留可见文本——打印文档里 URL 不可点；
+///   - 无序列表标记 - / * / + 转圆点（保留缩进）；有序列表 1. 本就可读，不动；
+///   - 已知限制：不成对的 * 与单个 _ 一律不剥——保护正文标识符（如 case_admin_001）
+///     与算式符号；表格内若真有此类字符同样保留。
 /// 原始 Markdown 仍完整保存在历史库与 .md 导出中，此处只影响报告观感。
 QString plainAnswer(const std::string& raw) {
     QString out = toQ(raw);
+    out.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    out.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+
+    // 逐行块级处理：分隔线/水平线删除、竖线转空格、列表与引用标记
+    static const QRegularExpression kDividerLine(
+        QStringLiteral("^[|:\t \\-]+$"));
+    static const QRegularExpression kUnorderedList(
+        QStringLiteral("^([ \\t]*)[-*+][ \\t]+"));
+    static const QRegularExpression kBlockQuote(
+        QStringLiteral("^([ \\t]*)>[ \\t]?"));
+    QStringList lines = out.split(QLatin1Char('\n'));
+    for (QString& line : lines) {
+        if (line.contains(kDividerLine) && line.count(QLatin1Char('-')) >= 3) {
+            line.clear();  // 表格分隔线（|---|---|）或水平线（---）：整行删
+            continue;
+        }
+        line.replace(QLatin1Char('|'), QStringLiteral("  "));
+        line.replace(kUnorderedList, QStringLiteral("\\1• "));
+        line.replace(kBlockQuote, QStringLiteral("\\1"));
+    }
+    out = lines.join(QLatin1Char('\n'));
+
+    // 行内标记：图片先于链接（否则链接规则会吃掉 [alt](url) 留下孤立 !）
+    out.replace(QRegularExpression(QStringLiteral("!\\[([^\\]]*)\\]\\([^)]*\\)")),
+                QStringLiteral("\\1"));
+    out.replace(QRegularExpression(QStringLiteral("\\[([^\\]]+)\\]\\([^)]*\\)")),
+                QStringLiteral("\\1"));
     out.remove(QStringLiteral("**"));
+    out.replace(QRegularExpression(QStringLiteral("__([^_\n]+)__")),
+                QStringLiteral("\\1"));
+    out.replace(QRegularExpression(QStringLiteral("\\*([^*\n]+)\\*")),
+                QStringLiteral("\\1"));
+    out.replace(QRegularExpression(QStringLiteral("`([^`\n]*)`")),
+                QStringLiteral("\\1"));
     out.replace(QRegularExpression(QStringLiteral("(^|\\n)#{1,6}\\s+")),
                 QStringLiteral("\\1"));
     return out;

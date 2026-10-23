@@ -1716,6 +1716,55 @@ void test_t12_report_html_assembly() {
     PASS();
 }
 
+// T14-S5：报告打印版 plainAnswer 常用全套剥离（R2 💭② 修复）——
+// 经 toReportHtml 输出断言：表格降级可读、链接只留文本、列表转圆点、
+// 单下划线标识符（case_admin_001 等）与不成对 * 不受影响。
+void test_t14_s5_report_plain_answer() {
+    TEST("T14-S5：报告 plainAnswer 全套剥离——表格/链接/代码/列表/保护规则");
+    const std::string md =
+        "## 一、结论\n"
+        "见 [官方条文](https://flk.npc.gov.cn/detail2?id=82) 与 ![示意图](img.png)。\n"
+        "---\n"
+        "| 项目 | 金额 |\n"
+        "|------|------|\n"
+        "| 二倍工资 | 88000 元 |\n"
+        "- 项甲\n"
+        "  - 项乙\n"
+        "> 引用句：参照 __重点条款__ 与*强调内容*及`引用条文`。\n"
+        "保护 case_admin_001 标识符与不成对 * 星号。";
+    history::HistoryRecord rec = makeSampleRecord("报告剥离测试？", md);
+    rec.id = 11;
+    const std::string html = history::toReportHtml(rec);
+
+    // 表格方案 a：分隔线整行删、竖线转空格、内容保留
+    CHECK(html.find("|") == std::string::npos);
+    CHECK(html.find("----") == std::string::npos);
+    CHECK(html.find("二倍工资") != std::string::npos);
+    CHECK(html.find("88000 元") != std::string::npos);
+    // 链接/图片：URL 与语法剥净，只留可见文本
+    CHECK(html.find("https://") == std::string::npos);
+    CHECK(html.find("官方条文") != std::string::npos);
+    CHECK(html.find("![") == std::string::npos);
+    CHECK(html.find("示意图") != std::string::npos);
+    // 行内代码反引号剥净
+    CHECK(html.find("`") == std::string::npos);
+    CHECK(html.find("引用条文") != std::string::npos);
+    // 无序列表转圆点（缩进保留）；有序/引用/粗斜体/斜体
+    CHECK(html.find("• 项甲") != std::string::npos);
+    CHECK(html.find("• 项乙") != std::string::npos);
+    CHECK(html.find("&gt; 引用句") == std::string::npos);
+    CHECK(html.find("引用句") != std::string::npos);
+    CHECK(html.find("__") == std::string::npos);
+    CHECK(html.find("重点条款") != std::string::npos);
+    CHECK(html.find("*强调*") == std::string::npos);
+    CHECK(html.find("强调内容") != std::string::npos);
+    // 保护规则：单下划线标识符原样保留；标题 # 剥净
+    CHECK(html.find("case_admin_001") != std::string::npos);
+    CHECK(html.find("## ") == std::string::npos);
+    CHECK(html.find("一、结论") != std::string::npos);
+    PASS();
+}
+
 void test_t12_report_odt_export() {
     TEST("T12：报告导出 ODT——ZIP 容器正确 / 失败路径如实上报");
     const auto record = makeSampleRecord(
@@ -3646,6 +3695,7 @@ void run_all_tests() {
 
     std::cout << "\n── T12: 检索报告导出 ──" << std::endl;
     test_t12_report_html_assembly();
+    test_t14_s5_report_plain_answer();
     test_t12_report_odt_export();
     test_t12_report_pdf_export();
 
