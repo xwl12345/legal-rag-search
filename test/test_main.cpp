@@ -50,6 +50,7 @@
 #include "rag/retriever.h"
 #include "rag/generator.h"
 #include "rag/eval_metrics.h"
+#include "rag/synonym.h"
 #include "history/history_store.h"
 #include "history/report_export.h"
 #include "law/law_store.h"
@@ -1887,6 +1888,114 @@ void test_t13_markdown_render_edge_cases() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// 测试 17a: T7 —— 同义词归一化（查询扩展核心层）
+// ═══════════════════════════════════════════════════════════════
+
+void test_t7_synonym_expand() {
+    TEST("T7：expandTerms 命中扩展 / 去重 / 未命中零追加 / 空输入");
+    const auto map = rag::synonym::SynonymMap::defaults();
+    CHECK(!map.entries.empty());
+    CHECK(map.find("电信诈骗") != nullptr);
+    CHECK(map.find("不存在的口语词") == nullptr);
+
+    // 核心场景：qrels 失败查询命中「电信诈骗」条
+    std::vector<std::string> terms = {"电信", "诈骗", "数额", "较大", "怎么", "判刑"};
+    const int added = rag::synonym::expandTerms(
+        "电信诈骗数额较大怎么判刑", terms, map);
+    CHECK(added == 1);                       // 「骗取」追加（「诈骗」已存在不重复）
+    CHECK(terms.size() == 7);
+    CHECK(terms.back() == "骗取");
+
+    // 未命中：零追加
+    std::vector<std::string> noHit = {"劳动", "仲裁"};
+    CHECK(rag::synonym::expandTerms("劳动仲裁时效是多久", noHit, map) == 0);
+    CHECK(noHit.size() == 2);
+
+    // 空 query / 空 terms 基线
+    std::vector<std::string> empty;
+    CHECK(rag::synonym::expandTerms("", empty, map) == 0);
+    CHECK(empty.empty());
+
+    // 轮内去重：两条映射带同一术语只加一次（2 + 1 = 3）
+    rag::synonym::SynonymMap dupMap;
+    dupMap.entries = {{"甲词", {"共词", "甲专"}}, {"乙词", {"共词", "乙专"}}};
+    std::vector<std::string> dupTerms;
+    CHECK(rag::synonym::expandTerms("甲词乙词", dupTerms, dupMap) == 3);
+    CHECK(dupTerms.size() == 3);
+    int commonCount = 0;
+    for (const auto& t : dupTerms) {
+        if (t == "共词") ++commonCount;
+    }
+    CHECK(commonCount == 1);
+    PASS();
+}
+
+void test_t7_synonym_json_roundtrip() {
+    TEST("T7：synonyms.json 往返一致 / 容错回落 / 单条损坏跳过");
+    const std::string path = "build/test_synonyms.json";
+    QFile::remove(QString::fromStdString(path));
+
+    // 文件不存在：load 返回 false 且回落默认（首次运行语义）
+    rag::synonym::SynonymMap map;
+    CHECK(!rag::synonym::load(path, map));
+    CHECK(map.entries.size() == rag::synonym::SynonymMap::defaults().entries.size());
+
+    // save → load 往返一致
+    rag::synonym::SynonymMap custom;
+    custom.entries = {{"口语甲", {"术语一", "术语二"}}, {"口语乙", {"术语三"}}};
+    std::string diag;
+    CHECK(rag::synonym::save(path, custom, &diag));
+    CHECK(diag.empty());
+    CHECK(rag::synonym::load(path, map));
+    CHECK(map.entries.size() == 2);
+    CHECK(map.entries[0].first == "口语甲");
+    CHECK(map.entries[0].second.size() == 2);
+    CHECK(map.entries[0].second[1] == "术语二");
+
+    // JSON 损坏：回落默认
+    {
+        QFile bad(QString::fromStdString(path));
+        bad.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        bad.write("{这不是合法 JSON");
+    }
+    CHECK(!rag::synonym::load(path, map));
+    CHECK(map.entries.size() == rag::synonym::SynonymMap::defaults().entries.size());
+
+    // mappings 字段类型不对：回落默认
+    {
+        QFile wrongType(QString::fromStdString(path));
+        wrongType.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        wrongType.write("{\"mappings\": \"不是数组\"}");
+    }
+    CHECK(!rag::synonym::load(path, map));
+    CHECK(!map.entries.empty());
+
+    // 单条损坏（spoken 缺失 / terms 空数组）跳过，合法条目照常生效
+    {
+        QFile partial(QString::fromStdString(path));
+        partial.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        partial.write(
+            "{\"mappings\":["
+            "{\"terms\":[\"术语\"]},"                       // 缺 spoken → 跳过
+            "{\"spoken\":\"口语丙\",\"terms\":[]},"          // terms 空 → 跳过
+            "{\"spoken\":\"口语丁\",\"terms\":[\"术语四\"]}" // 合法 → 生效
+            "]}");
+    }
+    CHECK(rag::synonym::load(path, map));
+    CHECK(map.entries.size() == 1);
+    CHECK(map.entries[0].first == "口语丁");
+    CHECK(map.entries[0].second[0] == "术语四");
+
+    // 空路径保存失败如实上报
+    CHECK(!rag::synonym::save("", custom, &diag));
+    CHECK(!diag.empty());
+
+    QFile::remove(QString::fromStdString(path));
+    PASS();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
 // 测试 17: T3 —— 检索参数配置中心
 // ═══════════════════════════════════════════════════════════════
 namespace {
@@ -3703,6 +3812,10 @@ void run_all_tests() {
     test_t13_markdown_render_structured();
     test_t13_markdown_render_plain_passthrough();
     test_t13_markdown_render_edge_cases();
+
+    std::cout << "\n── T7: 同义词归一化 ──" << std::endl;
+    test_t7_synonym_expand();
+    test_t7_synonym_json_roundtrip();
 
     std::cout << "\n── T3: 检索参数配置中心 ──" << std::endl;
     test_settings_roundtrip();

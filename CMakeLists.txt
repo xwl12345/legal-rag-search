@@ -62,6 +62,8 @@ set(SRC_ENGINE
     # RAG pipeline
     src/rag/retriever.cpp
     src/rag/generator.cpp
+    # Synonym expansion（T7：查询侧同义词归一化，纯函数无 UI 依赖）
+    src/rag/synonym.cpp
 
     # Network transport abstraction（P2：HTTP 出口可注入）
     src/net/qt_transport.cpp
@@ -125,6 +127,7 @@ set(HEADERS
     include/rag/generator.h
     include/rag/eval_metrics.h
     include/rag/golden_queries.h
+    include/rag/synonym.h
     include/net/transport.h
     include/net/qt_transport.h
     include/ui/main_window.h
