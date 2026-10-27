@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "config/app_settings.h"
+#include "rag/synonym.h"
 
 class QLabel;
 class QStackedWidget;
@@ -89,6 +90,8 @@ private slots:
     void onAnswerRecorded(const history::HistoryRecord& record);
     /// 设置页保存并生效（T3）：写盘已由页面完成，这里转发给引擎与各页
     void onSettingsChanged(const config::AppSettings& settings);
+    /// 同义词表保存成功（T7）：队列化转发引擎热更新（写盘已由页面完成）
+    void onSynonymsChanged(rag::synonym::SynonymMap map);
 
 private:
     void setupUi();

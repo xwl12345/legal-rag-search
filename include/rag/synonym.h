@@ -3,6 +3,8 @@
 #include <utility>
 #include <vector>
 
+#include <QMetaType>
+
 namespace rag {
 namespace synonym {
 
@@ -46,3 +48,6 @@ bool save(const std::string& filePath, const SynonymMap& data,
 
 } // namespace synonym
 } // namespace rag
+
+// 跨线程队列化信号参数需要元类型（MainWindow → EngineWorker::setSynonymMap）
+Q_DECLARE_METATYPE(rag::synonym::SynonymMap)

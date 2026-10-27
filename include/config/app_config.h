@@ -25,6 +25,9 @@ constexpr const char* FAVORITE_DB = "favorites.db";
 /// 检索参数配置（T3）：JSON 可手工编辑；因可含 API Key，绝不入库
 constexpr const char* SETTINGS_FILE = "rag_settings.json";
 
+/// 同义词映射（T7）：口语→规范术语映射表，设置页可编辑；运行副本不入库
+constexpr const char* SYNONYMS_FILE = "synonyms.json";
+
 /// 法条库 SQLite（T9）：由 tools/build_law_db.py 从 data/law_corpus/*.json
 /// 构建后随程序分发；运行期只读，不入 .gitignore
 constexpr const char* LAW_DB = "law_corpus.db";

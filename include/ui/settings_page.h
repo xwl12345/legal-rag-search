@@ -2,12 +2,14 @@
 #include <QWidget>
 
 #include "config/app_settings.h"
+#include "rag/synonym.h"
 
 class QDoubleSpinBox;
 class QSpinBox;
 class QLineEdit;
 class QLabel;
 class QPushButton;
+class QTableWidget;
 
 namespace config {
 class AppSettings;
@@ -30,18 +32,28 @@ public:
     /// 把一组配置回填进表单（启动时 / 恢复默认后）
     void populate(const config::AppSettings& settings);
 
+    /// 回填同义词映射表（T7：启动时由 MainWindow 注入已加载的映射）
+    void populateSynonyms(const rag::synonym::SynonymMap& map);
+
 signals:
-    /// 用户点击「保存并生效」且写盘成功后发出；MainWindow 负责转发给引擎与各页
+    /// 用户点击「保存并生效」且写盘成功后发出；MainWindow 负责转发给引擎与需要的页面
     void settingsChanged(const config::AppSettings& settings);
+
+    /// 同义词表保存成功后发出（T7）；MainWindow 队列化转发引擎热更新
+    void synonymsChanged(rag::synonym::SynonymMap map);
 
 private slots:
     void onSave();
     void onRestoreDefaults();
+    void onAddSynonymRow();      // T7：同义词表增删行
+    void onRemoveSynonymRow();
 
 private:
     void setupUi();
     /// 从表单收集当前值（控件范围已兜底非法输入；overlap 会钳到 < chunkSize）
     config::AppSettings valuesFromForm() const;
+    /// 从同义词表格收集映射（空口语词或空术语行跳过；术语按中文/英文逗号切分）
+    rag::synonym::SynonymMap synonymsFromTable() const;
 
     // ── 检索参数（查询期，保存后立即生效）──
     QDoubleSpinBox* k1Spin_ = nullptr;
@@ -63,6 +75,11 @@ private:
     QLineEdit* embedUrlEdit_ = nullptr;
     QLineEdit* embedModelEdit_ = nullptr;
     QLineEdit* embedKeyEdit_ = nullptr;
+
+    // ── 同义词归一化（T7：口语 → 规范术语映射，扩展而非替换）──
+    QTableWidget* synonymTable_ = nullptr;
+    QPushButton* synonymAddBtn_ = nullptr;
+    QPushButton* synonymRemoveBtn_ = nullptr;
 
     QPushButton* saveBtn_ = nullptr;
     QPushButton* defaultsBtn_ = nullptr;

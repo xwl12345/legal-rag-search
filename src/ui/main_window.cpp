@@ -228,6 +228,20 @@ void MainWindow::buildPages() {
     pageStack_->addWidget(settingsPage_);
     connect(settingsPage_, &SettingsPage::settingsChanged,
             this, &MainWindow::onSettingsChanged);
+    // T7：同义词表热更新（设置页保存成功后队列化下发引擎）
+    connect(settingsPage_, &SettingsPage::synonymsChanged,
+            this, &MainWindow::onSynonymsChanged);
+
+    // T7 启动加载：synonyms.json（缺文件/损坏 → 引擎保持构造时的内置默认映射），
+    // 无论加载成功与否都回填表格——表格始终反映引擎当前生效的映射。
+    {
+        rag::synonym::SynonymMap synonyms;
+        if (!rag::synonym::load(config::dataFilePath(config::SYNONYMS_FILE), synonyms)) {
+            synonyms = rag::synonym::SynonymMap::defaults();   // 引擎构造时已用 defaults，此处对齐回填
+        }
+        settingsPage_->populateSynonyms(synonyms);
+        onSynonymsChanged(std::move(synonyms));   // 与引擎构造值对齐（幂等）
+    }
 
     // 引擎配置应用完成后刷新状态栏服务区（Embedding 可能刚配上 Key）
     connect(engineWorker_, &EngineWorker::settingsApplied,
@@ -430,6 +444,17 @@ void MainWindow::onSettingsChanged(const config::AppSettings& settings) {
     if (qualityPage_) {
         qualityPage_->refreshServiceHint();
     }
+}
+
+// ── T7 同义词归一化 ──
+
+void MainWindow::onSynonymsChanged(rag::synonym::SynonymMap map) {
+    if (!engineWorker_) {
+        return;
+    }
+    // P1：与配置热更新同款——队列化到引擎线程，与检索任务串行
+    QMetaObject::invokeMethod(engineWorker_, "setSynonymMap", Qt::QueuedConnection,
+                              Q_ARG(rag::synonym::SynonymMap, map));
 }
 
 // ── P0-2 跨页忙碌互斥 ──

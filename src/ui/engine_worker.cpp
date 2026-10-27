@@ -25,6 +25,7 @@ EngineWorker::EngineWorker(QObject* parent)
     qRegisterMetaType<ui_engine::ImportSummary>("ui_engine::ImportSummary");
     qRegisterMetaType<ui_engine::CompareResult>("ui_engine::CompareResult");
     qRegisterMetaType<config::AppSettings>("config::AppSettings");
+    qRegisterMetaType<rag::synonym::SynonymMap>("rag::synonym::SynonymMap");   // T7
 }
 
 void EngineWorker::search(const QString& query, int topK) {
@@ -169,4 +170,8 @@ void EngineWorker::applySettings(config::AppSettings settings) {
 void EngineWorker::setLlmApiKey(const QString& key) {
     llmKey_ = key;
     generator_.setApiKey(llmKey_.toStdString());
+}
+
+void EngineWorker::setSynonymMap(rag::synonym::SynonymMap map) {
+    retriever_.setSynonymMap(std::move(map));   // T7：队列化到引擎线程，与检索串行
 }

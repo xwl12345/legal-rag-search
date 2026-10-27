@@ -88,6 +88,7 @@ public slots:
     void cancelGeneration();          // 与 generateAnswer 同线程，直接 abort
     void applySettings(config::AppSettings settings);
     void setLlmApiKey(const QString& key);
+    void setSynonymMap(rag::synonym::SynonymMap map);   // T7：同义词热更新
 
 signals:
     // ── 结果回传（队列化到 UI 线程）──

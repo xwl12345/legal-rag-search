@@ -36,6 +36,8 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QTableWidget>
 #include <QTextBrowser>
 #include <QTextEdit>
@@ -1161,6 +1163,103 @@ int runSettingsE2E(const QString& corpusDir) {
         check(std::fabs(reloaded.k1 - 1.5) < 1e-9 && reloaded.topK == 20,
               QStringLiteral("恢复默认并保存后配置回到 k1=1.5 / TopK=20"),
               QStringLiteral("k1=%1 topK=%2").arg(reloaded.k1).arg(reloaded.topK));
+    }
+
+    // ── 会话 3：T7 同义词——表格默认 3 行 → 添加映射 → 保存落盘 → 重启回填 ──
+    {
+        const QString synonymsPath =
+            QString::fromStdString(config::dataFilePath(config::SYNONYMS_FILE));
+        // 会话 2 保存时已按默认 3 行写出 synonyms.json；起点断言 + 异常残留先清
+        const bool hadSynonyms = QFile::exists(synonymsPath);
+        const QString synonymsBackup = synonymsPath + QStringLiteral(".e2e_backup");
+        if (hadSynonyms) {
+            check(QFile::copy(synonymsPath, synonymsBackup),
+                  QStringLiteral("T7：既有 synonyms.json 已备份"));
+        }
+        QFile::remove(synonymsPath);
+
+        MainWindow window;
+        window.resize(1180, 720);
+        window.show();
+        QApplication::processEvents();
+
+        QTableWidget* synTable =
+            window.findChild<QTableWidget*>("settingsSynonymTable");
+        QPushButton* synAdd = window.findChild<QPushButton*>("settingsSynonymAdd");
+        QPushButton* saveBtn = window.findChild<QPushButton*>("settingsSaveBtn");
+        QListWidget* navList = window.findChild<QListWidget*>("navList");
+        if (!synTable || !synAdd || !saveBtn || !navList) {
+            check(false, QStringLiteral("T7：同义词编辑器控件齐全"));
+            return g_failures;
+        }
+
+        // 起点无文件 → 回填内置默认 3 条映射
+        clickNavItem(navList, 6);
+        QApplication::processEvents();
+        check(synTable->rowCount() == 3,
+              QStringLiteral("T7：无文件时表格回填内置默认 3 条映射"),
+              QStringLiteral("实际 %1 行").arg(synTable->rowCount()));
+        check(synTable->item(0, 0)->text() == QStringLiteral("电信诈骗"),
+              QStringLiteral("T7：默认首条为「电信诈骗」映射"));
+
+        // 添加一行并填入：口语词 + 逗号分隔术语
+        synAdd->click();
+        QApplication::processEvents();
+        check(synTable->rowCount() == 4, QStringLiteral("T7：添加映射后表格 4 行"));
+        synTable->setItem(3, 0, new QTableWidgetItem(QStringLiteral("测试口语")));
+        synTable->setItem(3, 1, new QTableWidgetItem(QStringLiteral("测试术语，测试二")));
+
+        // 保存：写盘 + 信号链路（emit → 队列化引擎热更新，不崩即链路通）
+        saveBtn->click();
+        pump(300);
+        check(QFile::exists(synonymsPath), QStringLiteral("T7：保存后 synonyms.json 落盘"));
+        {
+            QFile file(synonymsPath);
+            file.open(QIODevice::ReadOnly);
+            const QByteArray raw = file.readAll();
+            file.close();
+            check(raw.contains("测试口语") && raw.contains("测试术语"),
+                  QStringLiteral("T7：synonyms.json 含新增映射"),
+                  QString::fromUtf8(raw.right(120)));
+        }
+
+        // 重启：从文件回填 4 行（持久化 + 启动加载链路）
+        {
+            MainWindow window2;
+            window2.resize(1180, 720);
+            window2.show();
+            QApplication::processEvents();
+            QTableWidget* synTable2 =
+                window2.findChild<QTableWidget*>("settingsSynonymTable");
+            QListWidget* navList2 = window2.findChild<QListWidget*>("navList");
+            if (!synTable2 || !navList2) {
+                check(false, QStringLiteral("T7：重启后同义词表格存在"));
+                return g_failures;
+            }
+            clickNavItem(navList2, 6);
+            QApplication::processEvents();
+            check(synTable2->rowCount() == 4,
+                  QStringLiteral("T7：重启后表格回填 4 行（持久化生效）"),
+                  QStringLiteral("实际 %1 行").arg(synTable2->rowCount()));
+            if (synTable2->rowCount() == 4 && synTable2->item(3, 0)) {
+                check(synTable2->item(3, 0)->text() == QStringLiteral("测试口语"),
+                      QStringLiteral("T7：重启后新增映射内容保留"),
+                      synTable2->item(3, 0)->text());
+            }
+            // 证据截图：滚动到同义词卡片再拍（T7 新证据，22-synonyms-settings）
+            if (auto* sc = window2.findChild<QScrollArea*>(QStringLiteral("settingsScroll"))) {
+                sc->verticalScrollBar()->setValue(sc->verticalScrollBar()->maximum());
+                QApplication::processEvents();
+            }
+            window2.grab().save(QStringLiteral("docs/screenshots/22-synonyms-settings.png"));
+        }
+
+        // 收尾：删工作文件，还原既有 synonyms.json（如有）
+        QFile::remove(synonymsPath);
+        if (hadSynonyms && QFile::exists(synonymsBackup)) {
+            QFile::copy(synonymsBackup, synonymsPath);
+            QFile::remove(synonymsBackup);
+        }
     }
 
     // 收尾：删掉测试期间写出的工作配置，还原用户自己的配置（如有）

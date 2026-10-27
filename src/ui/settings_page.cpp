@@ -5,11 +5,14 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QRegularExpression>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QTableWidget>
 #include <QVBoxLayout>
 
 #include "config/app_config.h"
@@ -203,6 +206,39 @@ void SettingsPage::setupUi() {
         QStringLiteral("Key 留空 = 沿用检索页 / DEEPSEEK_API_KEY 环境变量的既有流程；")
             + QStringLiteral("填写后以此处为准。Key 保存在本地配置文件（rag_settings.json，已加入 .gitignore）。")));
 
+    // ── 卡片五：同义词归一化（T7：口语 → 规范术语，BM25 查询扩展）──
+    QFormLayout* formSyn = nullptr;
+    makeCard(this, contentLayout,
+             QStringLiteral("同义词归一化（口语查询 → 规范术语，保存后立即生效）"), formSyn);
+
+    synonymTable_ = new QTableWidget(0, 2, this);
+    synonymTable_->setObjectName(QStringLiteral("settingsSynonymTable"));
+    synonymTable_->setHorizontalHeaderLabels({QStringLiteral("口语词（查询中包含即扩展）"),
+                                              QStringLiteral("规范术语（多个用逗号分隔）")});
+    synonymTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    synonymTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    synonymTable_->verticalHeader()->setVisible(false);
+    synonymTable_->setMinimumHeight(140);
+    formSyn->addRow(synonymTable_);
+
+    auto* synButtons = new QHBoxLayout();
+    synonymAddBtn_ = new QPushButton(QStringLiteral("＋ 添加映射"), this);
+    synonymAddBtn_->setObjectName(QStringLiteral("settingsSynonymAdd"));
+    synonymRemoveBtn_ = new QPushButton(QStringLiteral("－ 删除选中行"), this);
+    synonymRemoveBtn_->setObjectName(QStringLiteral("settingsSynonymRemove"));
+    synButtons->addWidget(synonymAddBtn_);
+    synButtons->addWidget(synonymRemoveBtn_);
+    synButtons->addStretch();
+    formSyn->addRow(synButtons);
+    formSyn->addRow(makeHint(this,
+        QStringLiteral("检索时若查询包含某口语词，会把对应规范术语追加进 BM25 词项（扩展而非替换，")
+            + QStringLiteral("原词保留）；向量语义检索不受影响。例：电信诈骗 → 诈骗,骗取。")));
+
+    connect(synonymAddBtn_, &QPushButton::clicked,
+            this, &SettingsPage::onAddSynonymRow);
+    connect(synonymRemoveBtn_, &QPushButton::clicked,
+            this, &SettingsPage::onRemoveSynonymRow);
+
     // ── 操作行 ──
     auto* actions = new QHBoxLayout();
     actions->setSpacing(10);
@@ -271,13 +307,93 @@ void SettingsPage::onSave() {
             QString::fromStdString(error)));
         return;
     }
+
+    // T7：同义词随「保存并生效」一并落盘 + 热更新（空表=关闭扩展，如实保存）
+    const rag::synonym::SynonymMap synonyms = synonymsFromTable();
+    if (!rag::synonym::save(config::dataFilePath(config::SYNONYMS_FILE), synonyms, &error)) {
+        statusLabel_->setText(QStringLiteral("同义词保存失败：%1").arg(
+            QString::fromStdString(error)));
+        return;
+    }
+
     statusLabel_->setText(QStringLiteral("已保存并生效（%1）").arg(
         QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss"))));
     emit settingsChanged(settings);
+    emit synonymsChanged(synonyms);
 }
 
 void SettingsPage::onRestoreDefaults() {
     populate(config::AppSettings::defaults());
     statusLabel_->setText(
         QStringLiteral("已回填默认值——点击「保存并生效」后应用"));
+}
+
+// ── T7：同义词映射表 ──
+
+void SettingsPage::populateSynonyms(const rag::synonym::SynonymMap& map) {
+    synonymTable_->setRowCount(static_cast<int>(map.entries.size()));
+    for (int row = 0; row < static_cast<int>(map.entries.size()); ++row) {
+        const auto& [spoken, terms] = map.entries[static_cast<size_t>(row)];
+        synonymTable_->setItem(row, 0, new QTableWidgetItem(
+            QString::fromStdString(spoken)));
+        QStringList termList;
+        for (const auto& term : terms) {
+            termList << QString::fromStdString(term);
+        }
+        synonymTable_->setItem(row, 1, new QTableWidgetItem(termList.join(QStringLiteral(", "))));
+    }
+}
+
+rag::synonym::SynonymMap SettingsPage::synonymsFromTable() const {
+    rag::synonym::SynonymMap map;
+    for (int row = 0; row < synonymTable_->rowCount(); ++row) {
+        const auto spokenItem = synonymTable_->item(row, 0);
+        const auto termItem = synonymTable_->item(row, 1);
+        if (!spokenItem || !termItem) {
+            continue;
+        }
+        const std::string spoken = spokenItem->text().trimmed().toStdString();
+        if (spoken.empty()) {
+            continue;
+        }
+        // 术语按中英文逗号切分，去空段
+        QStringList rawTerms = termItem->text().split(
+            QRegularExpression(QStringLiteral("[,，]")), Qt::SkipEmptyParts);
+        std::vector<std::string> terms;
+        for (const QString& raw : rawTerms) {
+            const std::string term = raw.trimmed().toStdString();
+            if (!term.empty()) {
+                terms.push_back(term);
+            }
+        }
+        if (terms.empty()) {
+            continue;
+        }
+        // 重复口语词：后行覆盖前行（与 load 语义一致）
+        bool replaced = false;
+        for (auto& entry : map.entries) {
+            if (entry.first == spoken) {
+                entry.second = std::move(terms);
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            map.entries.emplace_back(spoken, std::move(terms));
+        }
+    }
+    return map;
+}
+
+void SettingsPage::onAddSynonymRow() {
+    const int row = synonymTable_->rowCount();
+    synonymTable_->insertRow(row);
+    synonymTable_->setCurrentCell(row, 0);
+}
+
+void SettingsPage::onRemoveSynonymRow() {
+    const int row = synonymTable_->currentRow();
+    if (row >= 0) {
+        synonymTable_->removeRow(row);
+    }
 }

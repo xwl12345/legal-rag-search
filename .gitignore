@@ -71,6 +71,9 @@ test_favorites.db
 # ── 用户手动导出的检索报告（T12 历史页导出入口，个人资产不入库）──
 /history/
 
+# ── 同义词映射（T7）：exe 目录运行副本，用户可编辑资产不入库 ──
+synonyms.json
+
 # ── T2 导出的 Markdown（本地临时产物）──
 docs/screenshots/*.md
 
