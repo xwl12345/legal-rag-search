@@ -47,7 +47,8 @@ std::string chunkKey(const std::string& docId, int chunkIndex) {
 namespace rag {
 
 Retriever::Retriever()
-    : store_(std::make_unique<index_store::IndexStore>()) {}
+    : store_(std::make_unique<index_store::IndexStore>()),
+      synonymMap_(synonym::SynonymMap::defaults()) {}   // T7：默认映射开箱即用，应用启动后可 load 覆盖
 
 void Retriever::setApiKey(const std::string& key) {
     {
@@ -78,6 +79,16 @@ void Retriever::setChunkParams(int maxSize, int overlap) {
     std::lock_guard<std::mutex> lock(mutex_);
     chunkMaxSize_ = maxSize;
     chunkOverlap_ = overlap;
+}
+
+void Retriever::setSynonymMap(rag::synonym::SynonymMap map) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    synonymMap_ = std::move(map);
+}
+
+size_t Retriever::synonymEntryCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return synonymMap_.entries.size();
 }
 
 void Retriever::setEmbeddingEndpoint(const std::string& baseUrl, const std::string& model) {
@@ -370,6 +381,9 @@ std::vector<SearchResult> Retriever::searchWithMode(const std::string& query, in
     auto queryTerms = tokenizer_.cutForIndex(query);
     // 法律文书通常用“住所地”等字段表达地点，补充自然语言位置问法。
     expandLegalLocationTerms(query, queryTerms);
+    // T7 同义词归一化：口语词 → 规范术语扩展（可编辑映射，扩展而非替换）。
+    // synonymMap_ 与查询期参数同线程语义（引擎线程内写读），此处不加锁。
+    synonym::expandTerms(query, queryTerms, synonymMap_);
     const int width = std::max(topK * 2, 10);
     std::decay_t<decltype(bm25_.search(queryTerms, index_, width))> bm25Results{};
     if (mode != SearchMode::VectorOnly) {

@@ -8,6 +8,7 @@
 #include "document/parser.h"
 #include "document/metadata.h"
 #include "net/transport.h"
+#include "rag/synonym.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -161,6 +162,12 @@ public:
     std::string embeddingHost() const;
     std::string embeddingModel() const;
 
+    /// 同义词映射（T7 查询扩展）：替换整张映射表，改后下一次 search 即生效
+    void setSynonymMap(rag::synonym::SynonymMap map);
+
+    /// 当前同义词映射条数（供设置页回显 / 测试观察）
+    size_t synonymEntryCount() const;
+
     /// 向量缓存条数（P0-4 诊断口：换端点/Key 后应为 0，首次向量检索后 = 文本块数）
     size_t vectorCacheSize() const;
 
@@ -253,6 +260,10 @@ private:
     search_index::BM25Ranker bm25_;
     vector_engine::EmbeddingService embedding_;
     vector_engine::SimilarityEngine similarity_;
+
+    // 同义词映射（T7 查询扩展；与查询期参数同语义：引擎线程内写读，
+    // setter 持锁保护跨线程调用场景）
+    rag::synonym::SynonymMap synonymMap_;
 
     // 存储所有文本块，按 (docId, chunkIndex) 索引
     std::unordered_map<std::string, std::string> chunkStore_;
