@@ -51,6 +51,7 @@
 #include "rag/generator.h"
 #include "rag/eval_metrics.h"
 #include "rag/synonym.h"
+#include "log/run_log.h"
 #include "history/history_store.h"
 #include "history/report_export.h"
 #include "law/law_store.h"
@@ -1994,6 +1995,51 @@ void test_t7_synonym_json_roundtrip() {
     PASS();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 测试 17b: T8 —— 运行流水环形缓冲
+// ═══════════════════════════════════════════════════════════════
+
+void test_t8_run_log() {
+    TEST("T8：RunLog 正序快照 / 环形截断 / 清空 / 文本导出");
+    runlog::RunLog log;
+    CHECK(log.count() == 0);
+    CHECK(log.toPlainText().isEmpty());   // 空日志导出不崩、返回空串
+
+    log.append(QStringLiteral("信息"), QStringLiteral("第一条"));
+    log.append(QString(), QStringLiteral("默认级别"));
+    log.append(QStringLiteral("警告"), QStringLiteral("第三条"));
+
+    const auto snapshot = log.entries();
+    CHECK(snapshot.size() == 3);
+    CHECK(snapshot[0].message == QStringLiteral("第一条"));   // 正序：旧在前
+    CHECK(snapshot[2].message == QStringLiteral("第三条"));
+    CHECK(snapshot[1].level == QStringLiteral("信息"));       // 空 level 回落「信息」
+    CHECK(snapshot[0].timestamp.contains(QStringLiteral(":")));   // 时间戳格式
+
+    // 环形截断：超过上限只留最新 500 条，且仍是正序
+    // （先有 3 条，再批量 520 条 = 523 条，丢最旧 23 条 → 剩「批量 20」…「批量 519」）
+    for (int i = 0; i < runlog::RunLog::kMaxEntries + 20; ++i) {
+        log.append(QStringLiteral("信息"), QStringLiteral("批量 %1").arg(i));
+    }
+    CHECK(log.count() == runlog::RunLog::kMaxEntries);
+    const auto trimmed = log.entries();
+    CHECK(trimmed.front().message == QStringLiteral("批量 20"));   // 最旧被丢
+    CHECK(trimmed.back().message ==
+          QStringLiteral("批量 %1").arg(runlog::RunLog::kMaxEntries + 19));  // 最新在尾
+
+    // 文本导出：行格式与条数一致
+    const QString text = log.toPlainText();
+    const QStringList lines = text.trimmed().split(QLatin1Char('\n'));
+    CHECK(lines.size() == runlog::RunLog::kMaxEntries);
+    CHECK(lines.first().startsWith(QStringLiteral("[")));
+
+    // 清空归零
+    log.clear();
+    CHECK(log.count() == 0);
+    CHECK(log.toPlainText().isEmpty());
+    PASS();
+}
+
 
 // ═══════════════════════════════════════════════════════════════
 // 测试 17: T3 —— 检索参数配置中心
@@ -3816,6 +3862,9 @@ void run_all_tests() {
     std::cout << "\n── T7: 同义词归一化 ──" << std::endl;
     test_t7_synonym_expand();
     test_t7_synonym_json_roundtrip();
+
+    std::cout << "\n── T8: 运行流水日志 ──" << std::endl;
+    test_t8_run_log();
 
     std::cout << "\n── T3: 检索参数配置中心 ──" << std::endl;
     test_settings_roundtrip();

@@ -82,6 +82,8 @@ set(SRC_STORE
 set(SRC_CONFIG
     src/config/app_settings.cpp
     src/config/data_paths.cpp
+    # 运行流水日志（T8：环形缓冲纯数据类，UI 线程独占无锁）
+    src/log/run_log.cpp
 )
 
 # Qt UI 层（T0 起统一由此三块组成：主题 / 组件 / 页面；P1 增引擎线程宿主）
@@ -128,6 +130,7 @@ set(HEADERS
     include/rag/eval_metrics.h
     include/rag/golden_queries.h
     include/rag/synonym.h
+    include/log/run_log.h
     include/net/transport.h
     include/net/qt_transport.h
     include/ui/main_window.h
