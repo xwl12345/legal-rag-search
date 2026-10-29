@@ -184,6 +184,13 @@ void MainWindow::buildPages() {
     pageStack_->addWidget(libraryPage_);
     connect(libraryPage_, &LibraryPage::libraryChanged,
             this, &MainWindow::onLibraryChanged);
+    // T13 知识库管理：切换/另存/删除请求经 MainWindow 中转（页面不碰引擎线程）
+    connect(libraryPage_, &LibraryPage::kbSwitchRequested,
+            this, &MainWindow::switchKb);
+    connect(libraryPage_, &LibraryPage::kbSaveAsRequested,
+            this, &MainWindow::onKbSaveAsRequested);
+    connect(libraryPage_, &LibraryPage::kbDeleteRequested,
+            this, &MainWindow::onKbDeleteRequested);
 
     // ── 第 3 页：问答历史（T2）──
     // 同样是插件式接入：只注入存储层指针，本页不知道回答是谁产生的，
@@ -300,6 +307,9 @@ void MainWindow::restoreIndexOnStartup() {
         if (QFile::exists(QString::fromStdString(remembered))) {
             retriever_->setIndexFilePath(remembered);
             currentKbRel_ = QString::fromStdString(appSettings_.currentIndexFile);
+            if (libraryPage_) {
+                libraryPage_->setCurrentKb(currentKbRel_);   // 下拉选中记忆库
+            }
         }
         // 文件不存在（被手删/换机器）：静默回落主库，状态栏如实显示
     }
@@ -599,6 +609,7 @@ void MainWindow::onIndexSwitched(int docCount, int chunkCount, qint64 loadMs,
     }
     // 联动刷新：文档库列表（裸指针直读 retriever，内容已换）、状态页统计
     if (libraryPage_) {
+        libraryPage_->setCurrentKb(currentKbRel_);   // 先同步当前库再刷新
         libraryPage_->refresh();
     }
     refreshStatusPage();
@@ -609,9 +620,51 @@ void MainWindow::onIndexSaved(bool ok, const QString& path,
     if (ok) {
         appendRunLog(QStringLiteral("信息"),
                      QStringLiteral("已另存知识库：%1").arg(path));
+        if (libraryPage_) {
+            libraryPage_->refresh();   // 另存成功 → 下拉立即出现新库
+        }
     } else {
         appendRunLog(QStringLiteral("警告"),
                      QStringLiteral("另存知识库失败：%1（%2）").arg(path, diagnostic));
+    }
+}
+
+void MainWindow::onKbSaveAsRequested(const QString& relPath) {
+    if (!engineWorker_ || engineBusy()) {
+        appendRunLog(QStringLiteral("警告"),
+                     QStringLiteral("引擎任务进行中，另存请求已忽略"));
+        return;
+    }
+    const QString absPath = QString::fromStdString(
+        config::dataFilePath(relPath.toStdString().c_str()));
+    QMetaObject::invokeMethod(engineWorker_, "saveIndexAs", Qt::QueuedConnection,
+                              Q_ARG(QString, absPath));
+}
+
+void MainWindow::onKbDeleteRequested(const QString& relPath) {
+    if (relPath.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("删除知识库"),
+                             QStringLiteral("默认主库不可删除"));
+        return;
+    }
+    if (relPath == currentKbRel_) {
+        QMessageBox::warning(
+            this, QStringLiteral("删除知识库"),
+            QStringLiteral("该库正在使用中——先切换到其他库再删除"));
+        return;
+    }
+    const QString absPath = QString::fromStdString(
+        config::dataFilePath(relPath.toStdString().c_str()));
+    if (!QFile::remove(absPath)) {
+        QMessageBox::warning(this, QStringLiteral("删除知识库"),
+                             QStringLiteral("删除失败（文件被占用或不存在）：\n%1")
+                                 .arg(absPath));
+        return;
+    }
+    appendRunLog(QStringLiteral("信息"),
+                 QStringLiteral("已删除知识库：%1").arg(relPath));
+    if (libraryPage_) {
+        libraryPage_->refresh();   // 重建下拉列表
     }
 }
 

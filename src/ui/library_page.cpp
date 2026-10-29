@@ -2,17 +2,23 @@
 #include "ui/app_theme.h"
 
 #include <QAbstractItemView>
+#include <QComboBox>
+#include <QDir>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegExp>
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTextEdit>
 #include <QVBoxLayout>
+
+#include "config/app_config.h"
 
 #include "favorite/favorite_store.h"
 
@@ -107,6 +113,37 @@ void LibraryPage::setupUi() {
     toolbar->addWidget(hint_);
     root->addLayout(toolbar);
 
+    // ── T13 知识库卡：当前库下拉 + 加载/另存/删除 ──
+    auto* kbCard = new QFrame(this);
+    kbCard->setObjectName(QStringLiteral("card"));
+    auto* kbLayout = new QHBoxLayout(kbCard);
+    kbLayout->setContentsMargins(12, 8, 12, 8);
+    kbLayout->setSpacing(10);
+    auto* kbTitle = new QLabel(QStringLiteral("知识库"), kbCard);
+    kbTitle->setObjectName(QStringLiteral("cardTitle"));
+    kbCombo_ = new QComboBox(kbCard);
+    kbCombo_->setObjectName(QStringLiteral("kbCombo"));
+    kbCombo_->setMinimumContentsLength(28);
+    kbLoadBtn_ = new QPushButton(QStringLiteral("加载选中库"), kbCard);
+    kbLoadBtn_->setObjectName(QStringLiteral("kbLoadBtn"));
+    kbSaveBtn_ = new QPushButton(QStringLiteral("另存当前…"), kbCard);
+    kbSaveBtn_->setObjectName(QStringLiteral("kbSaveBtn"));
+    kbDeleteBtn_ = new QPushButton(QStringLiteral("删除选中库"), kbCard);
+    kbDeleteBtn_->setObjectName(QStringLiteral("kbDeleteBtn"));
+    AppTheme::setButtonRole(kbDeleteBtn_, "danger");
+    auto* kbHint = new QLabel(
+        QStringLiteral("另存的库保存在程序目录 indexes/ 下，重启后自动恢复上次使用的库"),
+        kbCard);
+    kbHint->setObjectName(QStringLiteral("hint"));
+    kbLayout->addWidget(kbTitle);
+    kbLayout->addWidget(kbCombo_, 1);
+    kbLayout->addWidget(kbLoadBtn_);
+    kbLayout->addWidget(kbSaveBtn_);
+    kbLayout->addWidget(kbDeleteBtn_);
+    kbLayout->addStretch();
+    kbLayout->addWidget(kbHint);
+    root->addWidget(kbCard);
+
     // ── 主体：左表格 + 右详情 ──
     auto* split = new QSplitter(Qt::Horizontal, this);
     split->setChildrenCollapsible(false);
@@ -172,6 +209,9 @@ void LibraryPage::setupUi() {
     connect(refreshBtn_, &QPushButton::clicked, this, &LibraryPage::refresh);
     connect(removeBtn_, &QPushButton::clicked, this, &LibraryPage::onRemoveSelected);
     connect(clearBtn_, &QPushButton::clicked, this, &LibraryPage::onClearAll);
+    connect(kbLoadBtn_, &QPushButton::clicked, this, &LibraryPage::onLoadKbClicked);
+    connect(kbSaveBtn_, &QPushButton::clicked, this, &LibraryPage::onSaveKbClicked);
+    connect(kbDeleteBtn_, &QPushButton::clicked, this, &LibraryPage::onDeleteKbClicked);
     connect(table_, &QTableWidget::itemSelectionChanged,
             this, &LibraryPage::onSelectionChanged);
     connect(table_, &QTableWidget::cellDoubleClicked,
@@ -183,6 +223,7 @@ void LibraryPage::refresh() {
     rebuildTable();
     updateSummary();
     clearDetails();
+    refreshKbCombo();   // T13：库目录可能被本页/外部改动，刷新下拉
 }
 
 void LibraryPage::rebuildTable() {
@@ -562,4 +603,98 @@ void LibraryPage::onClearAll() {
     }
     emit libraryChanged();
     endEngineTask();
+}
+
+// ── T13 多知识库 ──
+
+void LibraryPage::refreshKbCombo() {
+    if (!kbCombo_) return;
+    kbCombo_->blockSignals(true);   // 纯刷新，不触发任何动作
+    kbCombo_->clear();
+    // 主库恒在首位（地位独立，不入 indexes/）
+    kbCombo_->addItem(QStringLiteral("默认主库（rag_index.dat）"), QString());
+    QDir kbDir(QString::fromStdString(config::dataFilePath(config::KB_DIR)));
+    const auto dats = kbDir.entryList({QStringLiteral("*.dat")}, QDir::Files,
+                                      QDir::Name);
+    for (const QString& f : dats) {
+        kbCombo_->addItem(f.left(f.size() - 4),   // 去掉 .dat
+                          config::KB_DIR + QStringLiteral("/") + f);
+    }
+    const int idx = kbCombo_->findData(currentKbRel_);
+    kbCombo_->setCurrentIndex(idx < 0 ? 0 : idx);
+    kbCombo_->blockSignals(false);
+}
+
+void LibraryPage::setCurrentKb(const QString& relPath) {
+    currentKbRel_ = relPath;
+    refreshKbCombo();
+}
+
+bool LibraryPage::requestSwitchKb(const QString& relPath) {
+    emit kbSwitchRequested(relPath);
+    return true;
+}
+
+bool LibraryPage::requestSaveKbAs(const QString& name, bool confirm) {
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("另存知识库"),
+                                 QStringLiteral("请输入知识库名称"));
+        return false;
+    }
+    static const QRegExp illegal(QStringLiteral(R"([\\/:*?"<>|])"));
+    if (illegal.indexIn(trimmed) >= 0) {
+        QMessageBox::warning(this, QStringLiteral("另存知识库"),
+                             QStringLiteral("名称不能包含 \\ / : * ? \" < > | 等字符"));
+        return false;
+    }
+    if (!retriever_ || retriever_->documentCount() == 0) {
+        QMessageBox::information(this, QStringLiteral("另存知识库"),
+                                 QStringLiteral("当前索引没有文档，无可另存内容"));
+        return false;
+    }
+    const QString relPath = config::KB_DIR + QStringLiteral("/") + trimmed
+                            + QStringLiteral(".dat");
+    const QString absPath =
+        QString::fromStdString(config::dataFilePath(relPath.toStdString().c_str()));
+    if (QFileInfo::exists(absPath) && !confirm) {
+        const auto choice = QMessageBox::question(
+            this, QStringLiteral("另存知识库"),
+            QStringLiteral("库「%1」已存在，覆盖它？").arg(trimmed));
+        if (choice != QMessageBox::Yes) {
+            return false;
+        }
+    }
+    emit kbSaveAsRequested(relPath);
+    return true;
+}
+
+bool LibraryPage::requestDeleteKb(const QString& relPath) {
+    emit kbDeleteRequested(relPath);
+    return true;
+}
+
+void LibraryPage::onLoadKbClicked() {
+    const QString relPath = kbCombo_->currentData().toString();
+    if (relPath == currentKbRel_) {
+        hint_->setText(QStringLiteral("选中的就是当前使用的库"));
+        return;
+    }
+    requestSwitchKb(relPath);
+}
+
+void LibraryPage::onSaveKbClicked() {
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("另存当前知识库"),
+        QStringLiteral("知识库名称（保存到 indexes/ 目录）："),
+        QLineEdit::Normal, {}, &ok);
+    if (ok) {
+        requestSaveKbAs(name);
+    }
+}
+
+void LibraryPage::onDeleteKbClicked() {
+    const QString relPath = kbCombo_->currentData().toString();
+    requestDeleteKb(relPath);
 }

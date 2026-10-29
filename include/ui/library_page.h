@@ -11,6 +11,7 @@ class QPushButton;
 class QTableWidget;
 class QTextEdit;
 class QLineEdit;
+class QComboBox;
 
 namespace favorite {
 class FavoriteStore;
@@ -64,6 +65,17 @@ public slots:
         }
     }
 
+    // ── T13 多知识库 ──
+    /// 主窗口通知当前库已变化（启动恢复 / 切换成功后调用），刷新下拉选中项
+    void setCurrentKb(const QString& relPath);
+    /// 请求另存当前索引为命名库（含校验与覆盖确认；confirm=true 供测试
+    /// 绕过弹窗直接覆盖）。@return 校验通过并已发出请求
+    bool requestSaveKbAs(const QString& name, bool confirm = false);
+    /// 请求加载指定库（relPath 空 = 默认主库）。@return 已发出请求
+    bool requestSwitchKb(const QString& relPath);
+    /// 请求删除指定库文件。@return 已发出请求
+    bool requestDeleteKb(const QString& relPath);
+
 signals:
     /// 文档集合发生变化（增删/清空），供主窗口刷新状态栏与检索页
     void libraryChanged();
@@ -71,11 +83,23 @@ signals:
     /// 引擎任务开始/结束（P0-2）：MainWindow 据此让其他页面禁用引擎动作
     void engineBusyChanged(bool busy);
 
+    // ── T13 多知识库（页面不碰引擎线程，全部经 MainWindow 队列化中转）──
+    /// 请求切换知识库（relPath 相对 exe 目录，空 = 默认主库）
+    void kbSwitchRequested(const QString& relPath);
+    /// 请求另存当前索引（relPath 形如 indexes/<名称>.dat）
+    void kbSaveAsRequested(const QString& relPath);
+    /// 请求删除库文件（relPath 形如 indexes/<名称>.dat；主库 MainWindow 侧拒绝）
+    void kbDeleteRequested(const QString& relPath);
+
 private slots:
     void onRemoveSelected();
     void onClearAll();
     void onSelectionChanged();
     void onRowActivated(int row, int column);
+    /// T13：知识库下拉/按钮动作入口
+    void onLoadKbClicked();
+    void onSaveKbClicked();
+    void onDeleteKbClicked();
 
 private:
     void setupUi();
@@ -104,6 +128,9 @@ private:
     /// 清空右侧详情区
     void clearDetails();
 
+    /// T13：扫描 indexes/ 目录重建下拉项（当前项按 currentKbRel_ 选中）
+    void refreshKbCombo();
+
     /// T11：把指定文档的收藏项标记为「原文已删除」。
     /// @return 状态翻转的收藏条数；收藏库不可用返回 -1
     int markFavoritesInvalid(const QStringList& docIds);
@@ -121,6 +148,13 @@ private:
     QPushButton* removeBtn_ = nullptr;
     QPushButton* clearBtn_ = nullptr;
     QPushButton* refreshBtn_ = nullptr;
+
+    // ── T13 知识库卡 ──
+    QString currentKbRel_;          // 空 = 默认主库
+    QComboBox* kbCombo_ = nullptr;
+    QPushButton* kbLoadBtn_ = nullptr;
+    QPushButton* kbSaveBtn_ = nullptr;
+    QPushButton* kbDeleteBtn_ = nullptr;
 
     // 右侧详情
     QTextEdit* detailArea_ = nullptr;

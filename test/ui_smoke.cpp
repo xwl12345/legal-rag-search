@@ -1348,6 +1348,152 @@ int runStatusE2E(const QString& corpusDir, const QString& outDirPath) {
     return g_failures;
 }
 
+// ── T13 多知识库 E2E：另存落盘 → 内容切换双向 → 删除非占用库 → 当前库记忆 ──
+// 占用库删除拒绝走 QMessageBox 弹窗，E2E 无弹窗处理先例，留人工手测。
+int runKbE2E(const QString& corpusDir) {
+    Q_UNUSED(corpusDir);
+    MainWindow window;
+    window.resize(1180, 760);
+    window.show();
+    QApplication::processEvents();
+
+    LibraryPage* libPage = window.findChild<LibraryPage*>();
+    QListWidget* navList = window.findChild<QListWidget*>("navList");
+    if (!libPage || !navList) {
+        check(false, QStringLiteral("T13：文档库页/导航存在"));
+        return g_failures;
+    }
+    clickNavItem(navList, 1);   // 文档库页
+    QApplication::processEvents();
+    pump(300);
+
+    // 清掉上次运行的 e2e 测试库残留（异常退出时末尾清理不会执行）
+    const QDir kbDirObj(QCoreApplication::applicationDirPath()
+                        + QStringLiteral("/indexes"));
+    const QStringList e2eResidue =
+        kbDirObj.entryList({QStringLiteral("e2e*.dat")}, QDir::Files);
+    for (const QString& f : e2eResidue) {
+        QFile::remove(kbDirObj.filePath(f));
+    }
+
+    // 前一组 runOverwriteE2E 空库起步且删过套件索引——本组自建语料状态，
+    // 不依赖启动恢复（rowCount 断言才有确定前提）
+    if (libPage->rowCount() == 0) {
+        SearchPage* page = window.findChild<SearchPage*>();
+        if (!page) {
+            check(false, QStringLiteral("T13：检索页就绪（自建语料用）"));
+            return g_failures;
+        }
+        page->importPaths(collectCorpus(corpusDir));
+        waitUntil([&] { return !page->isBusy(); });
+        QApplication::processEvents();
+        libPage->refresh();
+        QApplication::processEvents();
+    }
+
+    QComboBox* kbCombo = window.findChild<QComboBox*>("kbCombo");
+    if (!kbCombo) {
+        check(false, QStringLiteral("T13：知识库下拉存在"));
+        return g_failures;
+    }
+    check(kbCombo->count() == 1 && kbCombo->currentData().toString().isEmpty(),
+          QStringLiteral("T13：初始仅主库且选中"),
+          QStringLiteral("%1 项").arg(kbCombo->count()));
+
+    // ── 另存当前库（21 篇）→ indexes/ 出文件 + 下拉出现新项 ──
+    const QString kbDir =
+        QCoreApplication::applicationDirPath() + QStringLiteral("/indexes");
+    const QString backupPath = kbDir + QStringLiteral("/e2e备份.dat");
+    QFile::remove(backupPath);   // 上次运行的残留清掉
+    check(libPage->requestSaveKbAs(QStringLiteral("e2e备份"), /*confirm=*/true),
+          QStringLiteral("T13：另存请求已受理"));
+    waitUntil([&] { return QFile::exists(backupPath); });
+    check(QFile::exists(backupPath),
+          QStringLiteral("T13：另存落盘 indexes/e2e备份.dat"));
+    pump(200);
+    check(kbCombo->count() == 2,
+          QStringLiteral("T13：另存后下拉出现新库"),
+          QStringLiteral("%1 项").arg(kbCombo->count()));
+
+    // ── 删 1 篇（内存 20）→ 另存 20 篇库 → 两个库行数可区分，切换才可证 ──
+    QTableWidget* libTable = window.findChild<QTableWidget*>("libraryTable");
+    if (!libTable || libTable->rowCount() == 0) {
+        check(false, QStringLiteral("T13：文档库表格存在且有行"));
+        return g_failures;
+    }
+    check(libPage->rowCount() == 21,
+          QStringLiteral("T13：自建语料 21 篇"),
+          QStringLiteral("%1 行").arg(libPage->rowCount()));
+    check(libPage->removeDocumentById(libTable->item(0, 0)->text(),
+                                      /*confirm=*/false),
+          QStringLiteral("T13：删除 1 篇成功"));
+    QApplication::processEvents();
+    check(libPage->rowCount() == 20,
+          QStringLiteral("T13：删后内存 20 篇"),
+          QStringLiteral("%1 行").arg(libPage->rowCount()));
+    check(libPage->requestSaveKbAs(QStringLiteral("e2e20库"), /*confirm=*/true),
+          QStringLiteral("T13：20 篇库另存请求受理"));
+    waitUntil([&] {
+        return QFile::exists(kbDir + QStringLiteral("/e2e20库.dat"));
+    });
+    pump(400);   // indexSaved 回调 → combo 刷新
+
+    const QString backupRel = QStringLiteral("indexes/e2e备份.dat");
+    const QString kb20Rel = QStringLiteral("indexes/e2e20库.dat");
+    check(kbCombo->count() == 3,
+          QStringLiteral("T13：另存两库后下拉 3 项"),
+          QStringLiteral("%1 项").arg(kbCombo->count()));
+
+    // ── 切备份库（21 篇）→ 切 20 篇库 → 内容真切换 ──
+    libPage->requestSwitchKb(backupRel);
+    waitUntil([&] { return libPage->rowCount() == 21; });
+    check(libPage->rowCount() == 21 && kbCombo->currentData().toString() == backupRel,
+          QStringLiteral("T13：切到备份库恢复 21 篇且选中正确"),
+          QStringLiteral("%1 行 / %2").arg(libPage->rowCount())
+              .arg(kbCombo->currentData().toString()));
+    libPage->requestSwitchKb(kb20Rel);
+    waitUntil([&] { return libPage->rowCount() == 20; });
+    check(libPage->rowCount() == 20 && kbCombo->currentData().toString() == kb20Rel,
+          QStringLiteral("T13：切到 20 篇库内容真切换"),
+          QStringLiteral("%1 行 / %2").arg(libPage->rowCount())
+              .arg(kbCombo->currentData().toString()));
+
+    // ── 删除非占用库 → 文件消失 + 下拉回收 ──
+    check(libPage->requestDeleteKb(backupRel),
+          QStringLiteral("T13：删除请求已受理"));
+    waitUntil([&] { return !QFile::exists(backupPath); });
+    check(!QFile::exists(backupPath),
+          QStringLiteral("T13：非占用库文件已删除"));
+    pump(400);
+    check(kbCombo->count() == 2,
+          QStringLiteral("T13：删除后下拉剩 2 项"),
+          QStringLiteral("%1 项").arg(kbCombo->count()));
+
+    // ── 当前库记忆：当前正用 20 篇库 → rag_settings.json currentIndexFile ──
+    pump(500);   // onIndexSwitched 落 UI + AppSettings::save 写盘收尾
+    QFile settingsFile(QCoreApplication::applicationDirPath()
+                       + QStringLiteral("/rag_settings.json"));
+    QString remembered;
+    if (settingsFile.open(QIODevice::ReadOnly)) {
+        const auto obj = QJsonDocument::fromJson(settingsFile.readAll()).object();
+        remembered = obj.value(QStringLiteral("currentIndexFile")).toString();
+    }
+    check(remembered == kb20Rel,
+          QStringLiteral("T13：当前库已写入配置记忆"),
+          remembered);
+
+    // 清理测试库文件（下次运行 combo 回到干净状态）
+    QFile::remove(kbDir + QStringLiteral("/e2e20库.dat"));
+
+    // 截图留证
+    clickNavItem(navList, 1);
+    QApplication::processEvents();
+    window.grab().save(QCoreApplication::applicationDirPath()
+                       + QStringLiteral("/../docs/screenshots/24-kb-manager.png"));
+
+    return g_failures;
+}
+
 /// T4 质量分析 E2E：四路并列对比 → 降级语义（无 Key）→ 批量评测出表。
 /// 无 Key 环境下全量断言（确定性）；有 Key 时本组只做真实调用的冒烟
 /// （向量列非空即过），批量评测不做数值断言——避免消耗大量代金券。
@@ -2128,6 +2274,10 @@ int main(int argc, char* argv[]) {
 
         qInfo().noquote() << QStringLiteral("── P0 同名覆盖确认 E2E（覆盖 / 跳过 / 取消 + 内容一致）──");
         runOverwriteE2E();
+
+        // T13 放最末：本组会真删 1 篇主库文档，不污染前面组的篇数断言
+        qInfo().noquote() << QStringLiteral("── 多知识库 E2E（T13：另存 → 切换 → 删除 → 记忆）──");
+        runKbE2E(parser.value(e2eOption));
     }
 
     // 套件级收尾：还原用户配置 + 清掉隔离索引文件

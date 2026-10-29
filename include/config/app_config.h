@@ -28,6 +28,10 @@ constexpr const char* SETTINGS_FILE = "rag_settings.json";
 /// 同义词映射（T7）：口语→规范术语映射表，设置页可编辑；运行副本不入库
 constexpr const char* SYNONYMS_FILE = "synonyms.json";
 
+/// 另存知识库目录（T13 多知识库）：用户另存的索引 .dat 集中存放，
+/// 文件名即库名；默认主库 rag_index.dat 不在其中（主库地位独立）
+constexpr const char* KB_DIR = "indexes";
+
 /// 法条库 SQLite（T9）：由 tools/build_law_db.py 从 data/law_corpus/*.json
 /// 构建后随程序分发；运行期只读，不入 .gitignore
 constexpr const char* LAW_DB = "law_corpus.db";

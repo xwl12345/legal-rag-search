@@ -102,6 +102,10 @@ private slots:
                          const QString& path);
     /// T13：另存当前库完成回调（写盘在引擎线程，结果经信号回传）
     void onIndexSaved(bool ok, const QString& path, const QString& diagnostic);
+    /// T13：文档库页请求另存（relPath 相对路径）→ 队列化引擎线程写盘
+    void onKbSaveAsRequested(const QString& relPath);
+    /// T13：文档库页请求删库——主库与当前占用库在此拒绝，其余删文件
+    void onKbDeleteRequested(const QString& relPath);
 
 private:
     void setupUi();
