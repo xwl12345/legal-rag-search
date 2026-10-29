@@ -51,6 +51,12 @@ struct AppSettings {
     // 留空 = 沿用检索页 / DEEPSEEK_API_KEY 环境变量的既有流程；非空时覆盖。
     std::string embeddingApiKey;
 
+    // ── 多知识库（T13）──
+    // 当前知识库的相对路径（相对 exe 目录，如 "indexes/案例库A.dat"）。
+    // 空 = 默认主库 rag_index.dat（老用户零感知）。启动路径优先级：
+    // RAG_SMOKE_INDEX_FILE（E2E 隔离）> 本字段 > 默认主库。
+    std::string currentIndexFile;
+
     /// 默认值实例（P3 起是全部检索/服务参数的唯一事实来源）
     static AppSettings defaults();
 

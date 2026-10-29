@@ -107,6 +107,7 @@ bool AppSettings::load(const std::string& filePath, AppSettings& out) {
     out.embeddingBaseUrl = readString(obj, "embeddingBaseUrl", out.embeddingBaseUrl);
     out.embeddingModel = readString(obj, "embeddingModel", out.embeddingModel);
     out.embeddingApiKey = readString(obj, "embeddingApiKey", out.embeddingApiKey);
+    out.currentIndexFile = readString(obj, "currentIndexFile", out.currentIndexFile);
 
     // P3：读到的任何越界/非法值在此统一钳制（与保存路径同一套规则）
     out.sanitize();
@@ -138,6 +139,8 @@ bool AppSettings::save(const std::string& filePath, const AppSettings& data,
                QString::fromStdString(sanitized.embeddingModel));
     obj.insert(QStringLiteral("embeddingApiKey"),
                QString::fromStdString(sanitized.embeddingApiKey));
+    obj.insert(QStringLiteral("currentIndexFile"),
+               QString::fromStdString(sanitized.currentIndexFile));
 
     const QJsonDocument doc(obj);
     QFile file(QString::fromStdString(filePath));

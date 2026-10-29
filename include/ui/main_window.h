@@ -94,6 +94,14 @@ private slots:
     void onSettingsChanged(const config::AppSettings& settings);
     /// 同义词表保存成功（T7）：队列化转发引擎热更新（写盘已由页面完成）
     void onSynonymsChanged(rag::synonym::SynonymMap map);
+    /// T13：请求切换知识库（relPath 相对 exe 目录，空串 = 默认主库）。
+    /// 队列化到引擎线程与检索/导入串行；成功与否经 onIndexSwitched 回调。
+    void switchKb(const QString& relPath);
+    /// T13：引擎切换完成回调——成功则持久化记忆并联动刷新，失败回滚提示
+    void onIndexSwitched(int docCount, int chunkCount, qint64 loadMs,
+                         const QString& path);
+    /// T13：另存当前库完成回调（写盘在引擎线程，结果经信号回传）
+    void onIndexSaved(bool ok, const QString& path, const QString& diagnostic);
 
 private:
     void setupUi();
@@ -167,6 +175,8 @@ private:
     SettingsPage* settingsPage_ = nullptr;
     StatusPage* statusPage_ = nullptr;
     runlog::RunLog runLog_;   // T8：操作流水（UI 线程独占）
+    QString currentKbRel_;    // T13：当前知识库相对路径，空 = 默认主库
+    QString pendingKbRel_;    // T13：切换意图（发起时记录，回调成功后落为 currentKbRel_）
 
     // ── 检索参数配置（T3：启动时从 rag_settings.json 加载，设置页保存后更新）──
     config::AppSettings appSettings_;

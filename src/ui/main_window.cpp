@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QFile>
 #include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
@@ -256,6 +257,12 @@ void MainWindow::buildPages() {
     connect(engineWorker_, &EngineWorker::settingsApplied,
             this, &MainWindow::refreshServiceStatus);
 
+    // ── T13 多知识库：切换/另存结果回传（写盘与加载在引擎线程）──
+    connect(engineWorker_, &EngineWorker::indexSwitched,
+            this, &MainWindow::onIndexSwitched);
+    connect(engineWorker_, &EngineWorker::indexSaved,
+            this, &MainWindow::onIndexSaved);
+
     // ── P0-2 跨页忙碌互斥：任一页面开始引擎任务 → 其余页面禁用引擎动作 ──
     // 页面之间零互相引用，广播经本窗口中转（与 answerFinished 同款模式）。
     connect(searchPage_, &SearchPage::engineBusyChanged,
@@ -285,6 +292,16 @@ void MainWindow::restoreIndexOnStartup() {
         if (isolated[0] != '\0') {
             retriever_->setIndexFilePath(isolated);
         }
+    } else if (!appSettings_.currentIndexFile.empty()) {
+        // T13 多知识库：恢复上次使用的库（相对 exe 目录）。
+        // 优先级最低：E2E 隔离通道 > 该记忆 > 默认主库（老用户零感知）。
+        const std::string remembered =
+            config::dataFilePath(appSettings_.currentIndexFile.c_str());
+        if (QFile::exists(QString::fromStdString(remembered))) {
+            retriever_->setIndexFilePath(remembered);
+            currentKbRel_ = QString::fromStdString(appSettings_.currentIndexFile);
+        }
+        // 文件不存在（被手删/换机器）：静默回落主库，状态栏如实显示
     }
 
     // 只有在落盘文件存在时才有必要尝试恢复；否则直接按空库起步，
@@ -531,6 +548,71 @@ void MainWindow::onSynonymsChanged(rag::synonym::SynonymMap map) {
     appendRunLog(QStringLiteral("信息"),
                  QStringLiteral("同义词映射更新（%1 条），下一次检索生效")
                      .arg(static_cast<int>(map.entries.size())));
+}
+
+// ── T13 多知识库 ──
+
+void MainWindow::switchKb(const QString& relPath) {
+    if (!engineWorker_ || engineBusy()) {
+        return;   // 引擎任务进行中拒绝切换（按钮侧已禁用，这里兜底）
+    }
+    pendingKbRel_ = relPath;
+    const QString absPath = relPath.isEmpty()
+        ? QString::fromStdString(config::dataFilePath(config::INDEX_FILE))
+        : QString::fromStdString(config::dataFilePath(
+              relPath.toStdString().c_str()));
+    QMetaObject::invokeMethod(engineWorker_, "switchIndex", Qt::QueuedConnection,
+                              Q_ARG(QString, absPath));
+}
+
+void MainWindow::onIndexSwitched(int docCount, int chunkCount, qint64 loadMs,
+                                 const QString& path) {
+    if (docCount <= 0 && chunkCount <= 0) {
+        // 加载失败：回滚意图，状态栏与流水如实提示（引擎内部索引已清空，
+        // 伪装成功只会让后续检索静默空转——如实报失败引导用户重切）
+        pendingKbRel_.clear();
+        statusEngine_->setText(QStringLiteral("知识库切换失败（见操作流水）"));
+        appendRunLog(QStringLiteral("警告"),
+                     QStringLiteral("知识库切换失败：%1").arg(path));
+        return;
+    }
+    currentKbRel_ = pendingKbRel_;
+    pendingKbRel_.clear();
+    docCount_ = docCount;
+    chunkCount_ = chunkCount;
+    statusEngine_->setText(
+        QStringLiteral("知识库已切换 · %1 文档 / %2 块（%3 ms）")
+            .arg(docCount).arg(chunkCount).arg(loadMs));
+    appendRunLog(QStringLiteral("信息"),
+                 QStringLiteral("切换知识库：%1（%2 文档 / %3 块）")
+                     .arg(currentKbRel_.isEmpty() ? QStringLiteral("默认主库")
+                                                  : currentKbRel_)
+                     .arg(docCount).arg(chunkCount));
+    // 持久化记忆（主库记空串 = 旧行为）；写盘失败不阻断，仅流水提示
+    appSettings_.currentIndexFile = currentKbRel_.toStdString();
+    std::string error;
+    if (!config::AppSettings::save(
+            config::dataFilePath(config::SETTINGS_FILE), appSettings_, &error)) {
+        appendRunLog(QStringLiteral("警告"),
+                     QStringLiteral("知识库记忆写盘失败：%1")
+                         .arg(QString::fromStdString(error)));
+    }
+    // 联动刷新：文档库列表（裸指针直读 retriever，内容已换）、状态页统计
+    if (libraryPage_) {
+        libraryPage_->refresh();
+    }
+    refreshStatusPage();
+}
+
+void MainWindow::onIndexSaved(bool ok, const QString& path,
+                              const QString& diagnostic) {
+    if (ok) {
+        appendRunLog(QStringLiteral("信息"),
+                     QStringLiteral("已另存知识库：%1").arg(path));
+    } else {
+        appendRunLog(QStringLiteral("警告"),
+                     QStringLiteral("另存知识库失败：%1（%2）").arg(path, diagnostic));
+    }
 }
 
 // ── P0-2 跨页忙碌互斥 ──
