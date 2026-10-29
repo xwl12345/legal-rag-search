@@ -53,8 +53,11 @@ public:
     /// 指定索引文件路径（默认取 config::INDEX_FILE）
     explicit IndexStore(std::string filePath = {});
 
-    /// 写出索引；函数内部先写临时文件再原子替换，避免中途失败留下半截文件
-    SaveResult save(const std::vector<StoredDocument>& documents);
+    /// 写出索引；函数内部先写临时文件再原子替换，避免中途失败留下半截文件。
+    /// pathOverride 非空时写到指定路径（T13 多知识库另存），filePath_ 不变；
+    /// 默认 nullptr = 写 filePath_（既有行为不变）。
+    SaveResult save(const std::vector<StoredDocument>& documents,
+                    const std::string* pathOverride = nullptr);
 
     /// 读回索引
     LoadResult load(std::vector<StoredDocument>& documents) const;

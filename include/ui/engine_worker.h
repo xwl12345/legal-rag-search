@@ -89,6 +89,8 @@ public slots:
     void applySettings(config::AppSettings settings);
     void setLlmApiKey(const QString& key);
     void setSynonymMap(rag::synonym::SynonymMap map);   // T7：同义词热更新
+    void switchIndex(QString path);                     // T13：切换当前知识库
+    void saveIndexAs(QString path);                     // T13：另存当前库
 
 signals:
     // ── 结果回传（队列化到 UI 线程）──
@@ -105,6 +107,10 @@ signals:
     void generationDelta(const QString& text);
     void generationFinished(bool interrupted, const QString& errorText);
     void settingsApplied();
+    // ── T13 多知识库 ──
+    void indexSwitched(int docCount, int chunkCount, qint64 loadMs,
+                       const QString& path);
+    void indexSaved(bool ok, const QString& path, const QString& diagnostic);
 
 private:
     rag::Retriever retriever_;

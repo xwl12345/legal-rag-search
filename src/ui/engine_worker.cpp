@@ -175,3 +175,22 @@ void EngineWorker::setLlmApiKey(const QString& key) {
 void EngineWorker::setSynonymMap(rag::synonym::SynonymMap map) {
     retriever_.setSynonymMap(std::move(map));   // T7：队列化到引擎线程，与检索串行
 }
+
+// ── T13 多知识库 ──
+
+void EngineWorker::switchIndex(QString path) {
+    // 切换 = 换路径 + 重载（loadIndex 内部先清空内存索引，不删落盘文件）。
+    // 本 slot 队列化在引擎线程执行，与检索/导入天然串行，无并发窗口。
+    retriever_.setIndexFilePath(path.toStdString());
+    const auto result = retriever_.loadIndex();
+    emit indexSwitched(result.ok ? result.documentCount : 0,
+                       result.ok ? result.chunkCount : 0,
+                       retriever_.lastLoadMs(),
+                       path);
+}
+
+void EngineWorker::saveIndexAs(QString path) {
+    const auto result = retriever_.saveIndexAs(path.toStdString());
+    emit indexSaved(result.ok, path,
+                    QString::fromStdString(result.diagnostic));
+}

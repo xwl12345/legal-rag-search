@@ -179,7 +179,8 @@ bool IndexStore::remove() const {
     return QFile::remove(path);
 }
 
-IndexStore::SaveResult IndexStore::save(const std::vector<StoredDocument>& documents) {
+IndexStore::SaveResult IndexStore::save(const std::vector<StoredDocument>& documents,
+                                        const std::string* pathOverride) {
     SaveResult result;
 
     Writer w;
@@ -224,7 +225,9 @@ IndexStore::SaveResult IndexStore::save(const std::vector<StoredDocument>& docum
     const std::uint32_t checksum = crc32(payload.data(), payload.size());
 
     // 先写临时文件，flush + 原子替换：中途断电/磁盘满都不会破坏已有索引
-    const QString target = QString::fromStdString(filePath_);
+    // T13：pathOverride 非空 = 另存到指定路径（filePath_ 不变）
+    const QString target = QString::fromStdString(
+        pathOverride ? *pathOverride : filePath_);
     const QFileInfo targetInfo(target);
     if (!targetInfo.absoluteDir().exists()) {
         QDir().mkpath(targetInfo.absolutePath());

@@ -1240,6 +1240,33 @@ void test_persistence_roundtrip() {
     CHECK(saveResult.bytes > 0);
     CHECK(writer.hasPersistedIndex());
 
+    // ── T13：saveIndexAs 另存——目标文件可回读，当前路径与内存索引不受影响 ──
+    const std::string asidePath = "build/test_rag_index_aside.dat";
+    {
+        const auto aside = writer.saveIndexAs(asidePath);
+        CHECK(aside.ok);
+        CHECK_EQ(aside.documentCount, 21);
+        CHECK_EQ(aside.chunkCount, 118);
+        CHECK(aside.bytes > 0);
+        // 当前路径不变：主索引文件仍在，内存索引照常可检索
+        CHECK(writer.hasPersistedIndex());
+        CHECK_EQ(writer.documentCount(), 21);
+        // 另存文件可被全新实例回读，内容与主库一致
+        rag::Retriever asideReader;
+        asideReader.setIndexFilePath(asidePath);
+        const auto asideLoad = asideReader.loadIndex();
+        CHECK(asideLoad.ok);
+        CHECK_EQ(asideLoad.documentCount, 21);
+        CHECK_EQ(asideLoad.chunkCount, 118);
+        // 写失败路径：空路径 → 如实上报不崩溃
+        // （目录不存在会被 save 内 mkpath 自愈，属既有设计，不算失败）
+        rag::Retriever failWriter;
+        failWriter.setIndexFilePath(indexPath);
+        const auto fail = failWriter.saveIndexAs("");
+        CHECK(!fail.ok);
+        CHECK(!fail.diagnostic.empty());
+    }
+
     // 落盘前后检索结果必须一致（证明索引没被写坏）
     auto beforeHits = writer.search("民间借贷 交付凭证", 5);
     CHECK(beforeHits.size() >= 1);

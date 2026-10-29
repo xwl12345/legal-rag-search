@@ -228,6 +228,10 @@ public:
     /// 把当前索引落盘
     PersistResult saveIndex() const;
 
+    /// 另存当前索引到任意路径（T13 多知识库）；当前 indexFilePath_ 不变，
+    /// 内存索引不受影响——纯导出语义
+    PersistResult saveIndexAs(const std::string& filePath) const;
+
     /// 从落盘文件恢复索引（内部会先清空内存索引，不删除落盘文件）
     PersistResult loadIndex();
 
@@ -250,6 +254,9 @@ private:
     /// 把一篇文档的全部内容写入内存索引（导入与落盘恢复共用）。
     /// ⚠️ 约定：调用方必须已持有 mutex_（短临界区，内部不再加锁）。
     void indexDocument(const StoredDocument& doc);
+
+    /// saveIndex / saveIndexAs 共用内核：pathOverride 空 = 写 indexFilePath_
+    PersistResult saveIndexTo(const std::string* pathOverride) const;
 
     /// removeDocument / clearAll 的无锁内核（调用方持锁）
     int removeDocumentUnlocked(const std::string& docId);

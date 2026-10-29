@@ -840,7 +840,7 @@ void Retriever::clearAllUnlocked(bool alsoDeletePersistedFile) {
 // 持久化
 // ────────────────────────────────────────────────────────────────
 
-PersistResult Retriever::saveIndex() const {
+PersistResult Retriever::saveIndexTo(const std::string* pathOverride) const {
     PersistResult result;
 
     if (!store_) {
@@ -883,7 +883,7 @@ PersistResult Retriever::saveIndex() const {
         }
     }
 
-    auto saveResult = store_->save(records);
+    auto saveResult = store_->save(records, pathOverride);
     result.ok = saveResult.ok;
     result.bytes = saveResult.bytesWritten;
     result.diagnostic = saveResult.diagnostic;
@@ -896,6 +896,14 @@ PersistResult Retriever::saveIndex() const {
     result.chunkCount = chunks;
 
     return result;
+}
+
+PersistResult Retriever::saveIndex() const {
+    return saveIndexTo(nullptr);
+}
+
+PersistResult Retriever::saveIndexAs(const std::string& filePath) const {
+    return saveIndexTo(&filePath);
 }
 
 PersistResult Retriever::loadIndex() {
