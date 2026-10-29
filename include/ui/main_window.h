@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "config/app_settings.h"
+#include "log/run_log.h"
 #include "rag/synonym.h"
 
 class QLabel;
@@ -22,6 +23,7 @@ class QualityPage;
 class LawPage;
 class FavoritesPage;
 class SettingsPage;
+class StatusPage;
 
 namespace rag {
 class Retriever;
@@ -115,6 +117,14 @@ private:
     /// 状态圆点着色（P0-8）：至少一路 AI 服务就绪 = 绿，否则灰（QSS statusDotOff）
     void setStatusDot(bool ok);
 
+    /// ── T8 运行状态页 ──
+    /// 操作流水统一入口：写 runLog_ 并同步到状态页（UI 线程独占，无锁）
+    void appendRunLog(const QString& level, const QString& message);
+    /// 组合根收集统计与服务状态 → 注入状态页（打开页 / 统计变化时调用）
+    void refreshStatusPage();
+    /// 状态页请求清空日志（clearLogRequested 信号中转）
+    void onClearRunLog();
+
     /// 启动时尝试从磁盘恢复索引，并把结果写进状态栏
     void restoreIndexOnStartup();
 
@@ -155,6 +165,8 @@ private:
     FavoritesPage* favoritesPage_ = nullptr;
     LawPage* lawPage_ = nullptr;
     SettingsPage* settingsPage_ = nullptr;
+    StatusPage* statusPage_ = nullptr;
+    runlog::RunLog runLog_;   // T8：操作流水（UI 线程独占）
 
     // ── 检索参数配置（T3：启动时从 rag_settings.json 加载，设置页保存后更新）──
     config::AppSettings appSettings_;

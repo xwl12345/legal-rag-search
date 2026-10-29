@@ -127,7 +127,7 @@ void waitUntil(const std::function<bool()>& done, int maxMs = 60000) {
 }
 
 const char* const kPageNames[] = {
-    "01-search", "02-library", "03-history", "04-eval", "05-favorites", "06-law", "07-settings"
+    "01-search", "02-library", "03-history", "04-eval", "05-favorites", "06-law", "07-status", "08-settings"
 };
 
 /// 采集语料目录下的全部可导入文件（按文件名排序，保证可复现）
@@ -1097,7 +1097,7 @@ int runSettingsE2E(const QString& corpusDir) {
 
         // 改 k1 1.5 → 4.0 并保存（走完整链路：写盘 → 信号 → 引擎热更新）
         k1Spin->setValue(4.0);
-        clickNavItem(navList, 6);   // T11 后设置页在导航第 6 行（第 7 页）
+        clickNavItem(navList, 7);   // T11 后设置页在导航第 6 行（第 7 页）
         QApplication::processEvents();
         saveBtn->click();
         QApplication::processEvents();
@@ -1123,7 +1123,7 @@ int runSettingsE2E(const QString& corpusDir) {
               QStringLiteral("%1 → %2").arg(scoreBefore).arg(scoreAfter));
 
         // 截图留证（T3 新证据）
-        clickNavItem(navList, 6);
+        clickNavItem(navList, 7);
         QApplication::processEvents();
         window.grab().save(QStringLiteral("docs/screenshots/13-settings-modified.png"));
     }
@@ -1151,7 +1151,7 @@ int runSettingsE2E(const QString& corpusDir) {
               QStringLiteral("实际 %1").arg(k1Spin->value()));
 
         // 恢复默认值 → 保存 → 文件回到 1.5（防误触设计：先回填再保存）
-        clickNavItem(navList, 6);
+        clickNavItem(navList, 7);
         QApplication::processEvents();
         defaultsBtn->click();
         QApplication::processEvents();
@@ -1194,7 +1194,7 @@ int runSettingsE2E(const QString& corpusDir) {
         }
 
         // 起点无文件 → 回填内置默认 3 条映射
-        clickNavItem(navList, 6);
+        clickNavItem(navList, 7);
         QApplication::processEvents();
         check(synTable->rowCount() == 3,
               QStringLiteral("T7：无文件时表格回填内置默认 3 条映射"),
@@ -1236,7 +1236,7 @@ int runSettingsE2E(const QString& corpusDir) {
                 check(false, QStringLiteral("T7：重启后同义词表格存在"));
                 return g_failures;
             }
-            clickNavItem(navList2, 6);
+            clickNavItem(navList2, 7);
             QApplication::processEvents();
             check(synTable2->rowCount() == 4,
                   QStringLiteral("T7：重启后表格回填 4 行（持久化生效）"),
@@ -1268,6 +1268,83 @@ int runSettingsE2E(const QString& corpusDir) {
         QFile::copy(backupPath, settingsPath);
         QFile::remove(backupPath);
     }
+    return g_failures;
+}
+
+/// T8 运行状态页 E2E：统计注入 → 操作流水记录 → 清空 → 截图留证。
+/// 页面不持引擎：全部数据经 MainWindow 注入，这里验证组合根链路。
+int runStatusE2E(const QString& corpusDir, const QString& outDirPath) {
+    Q_UNUSED(corpusDir);
+    MainWindow window;
+    window.resize(1180, 760);
+    window.show();
+    QApplication::processEvents();
+
+    QListWidget* navList = window.findChild<QListWidget*>("navList");
+    QStackedWidget* stack = window.findChild<QStackedWidget*>();
+    QTableWidget* libraryTable = window.findChild<QTableWidget*>("libraryTable");
+    if (!navList || !stack || !libraryTable) {
+        check(false, QStringLiteral("T8：导航/页面栈/文档库表存在"));
+        return g_failures;
+    }
+
+    // 切到「运行状态」页（导航第 6 项；插在法条速查后、设置前，设置移至第 7 位）
+    clickNavItem(navList, 6);
+    QApplication::processEvents();
+    check(stack->currentIndex() == 6,
+          QStringLiteral("T8：导航第 6 项 → 运行状态页"),
+          QStringLiteral("stack=%1").arg(stack->currentIndex()));
+
+    // 统计卡：文档库行含「文档库：」且块数非零（套件共享引擎已导入语料）
+    QLabel* statsLine = window.findChild<QLabel*>("statusStatsLine");
+    if (!statsLine) {
+        check(false, QStringLiteral("T8：统计行控件存在"));
+        return g_failures;
+    }
+    check(statsLine->text().contains(QStringLiteral("文档库：")),
+          QStringLiteral("T8：统计行已注入"),
+          statsLine->text());
+
+    // 服务状态卡：Embedding/LLM 行非空（同状态栏口径）
+    QLabel* embedLabel = window.findChild<QLabel*>("statusEmbedding");
+    QLabel* llmLabel = window.findChild<QLabel*>("statusLlm");
+    check(embedLabel && !embedLabel->text().isEmpty(),
+          QStringLiteral("T8：Embedding 状态行非空"),
+          embedLabel ? embedLabel->text() : QStringLiteral("控件缺失"));
+    check(llmLabel && !llmLabel->text().isEmpty(),
+          QStringLiteral("T8：LLM 状态行非空"),
+          llmLabel ? llmLabel->text() : QStringLiteral("控件缺失"));
+
+    // 操作流水：启动 + 导入阶段应已积累「文档库更新」条目
+    QPlainTextEdit* logView = window.findChild<QPlainTextEdit*>("statusLogView");
+    if (!logView) {
+        check(false, QStringLiteral("T8：日志视图存在"));
+        return g_failures;
+    }
+    pump(300);   // 引擎任务完成信号（busy=false）落流水
+    check(!logView->toPlainText().isEmpty(),
+          QStringLiteral("T8：操作流水非空（启动+导入阶段已积累）"));
+    check(logView->toPlainText().contains(QStringLiteral("文档库更新")),
+          QStringLiteral("T8：流水含「文档库更新」条目"));
+
+    // 清空：只剩一条「操作流水已清空」
+    QPushButton* clearBtn = window.findChild<QPushButton*>("statusClearBtn");
+    if (!clearBtn) {
+        check(false, QStringLiteral("T8：清空按钮存在"));
+        return g_failures;
+    }
+    clearBtn->click();
+    QApplication::processEvents();
+    check(logView->toPlainText().count(QLatin1Char('\n')) == 1
+              && logView->toPlainText().contains(QStringLiteral("操作流水已清空")),
+          QStringLiteral("T8：清空后仅剩一条确认流水"),
+          logView->toPlainText().trimmed());
+
+    // 截图留证（新证据，单独文件）
+    clickNavItem(navList, 6);
+    QApplication::processEvents();
+    window.grab().save(outDirPath + QStringLiteral("/23-status-page.png"));
+
     return g_failures;
 }
 
@@ -2033,6 +2110,9 @@ int main(int argc, char* argv[]) {
 
         qInfo().noquote() << QStringLiteral("── 设置 E2E（改参数 → 保存 → 得分变化 → 重启保留 → 恢复默认）──");
         runSettingsE2E(parser.value(e2eOption));
+
+        qInfo().noquote() << QStringLiteral("── 运行状态 E2E（T8：统计注入 → 流水记录 → 清空）──");
+        runStatusE2E(parser.value(e2eOption), outDirPath);
 
         qInfo().noquote() << QStringLiteral("── 质量分析 E2E（四路对比 → 降级语义 → 批量评测）──");
         runQualityE2E(parser.value(e2eOption));

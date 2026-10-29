@@ -23,6 +23,7 @@
 #include "ui/favorites_page.h"
 #include "ui/law_page.h"
 #include "ui/settings_page.h"
+#include "ui/status_page.h"
 #include "config/app_config.h"
 #include "history/history_store.h"
 #include "law/law_store.h"
@@ -221,7 +222,15 @@ void MainWindow::buildPages() {
     lawPage_ = new LawPage(lawStore_.get(), lawRetriever_.get(), pageStack_);
     pageStack_->addWidget(lawPage_);
 
-    // ── 第 7 页：设置（T3）──
+    // ── 第 7 页：运行状态（T8）──
+    // 插件式接入：本页不持引擎——统计/服务状态由组合根经 refreshStatusPage
+    // 注入，操作流水由本窗口在各信号点 appendRunLog 后全量下发快照。
+    statusPage_ = new StatusPage(pageStack_);
+    pageStack_->addWidget(statusPage_);
+    connect(statusPage_, &StatusPage::clearLogRequested,
+            this, &MainWindow::onClearRunLog);
+
+    // ── 第 8 页：设置（T3）──
     // 插件式接入：本页只读写配置层，不碰 Retriever——保存后发 settingsChanged，
     // 由本窗口中转给引擎（热更新）与检索页（检索宽度/温度），两页互不引用。
     settingsPage_ = new SettingsPage(appSettings_, pageStack_);   // P3：注入启动配置
@@ -282,6 +291,8 @@ void MainWindow::restoreIndexOnStartup() {
     // 免得在状态栏留下一条"恢复失败"的噪音。
     if (!retriever_->hasPersistedIndex()) {
         refreshEngineStats();
+        appendRunLog(QStringLiteral("信息"),
+                     QStringLiteral("无落盘索引，按空库启动"));
         return;
     }
 
@@ -294,6 +305,11 @@ void MainWindow::restoreIndexOnStartup() {
                 .arg(retriever_->lastLoadMs()));
         docCount_ = retriever_->documentCount();
         chunkCount_ = retriever_->chunkCount();
+        appendRunLog(QStringLiteral("信息"),
+                     QStringLiteral("索引已从落盘恢复：%1 篇 / %2 块（%3 ms）")
+                         .arg(docCount_)
+                         .arg(chunkCount_)
+                         .arg(retriever_->lastLoadMs()));
     } else {
         // 恢复失败：如实说明，并提示已按空索引启动（不静默吞掉）
         refreshEngineStats();
@@ -352,6 +368,51 @@ void MainWindow::onNavIndexChanged(int index) {
         return;
     }
     pageStack_->setCurrentIndex(index);
+    // T8：切到「运行状态」页时按需刷新（导航第 7 项），保证看到最新快照
+    if (index == pageStack_->indexOf(statusPage_)) {
+        refreshStatusPage();
+        statusPage_->refreshLog(runLog_.entries());
+    }
+}
+
+// ── T8 运行状态页 ──
+
+void MainWindow::appendRunLog(const QString& level, const QString& message) {
+    runLog_.append(level, message);
+    if (statusPage_) {
+        statusPage_->refreshLog(runLog_.entries());
+    }
+}
+
+void MainWindow::refreshStatusPage() {
+    if (!statusPage_) {
+        return;
+    }
+    StatusPage::Stats stats;
+    stats.documents = docCount_;
+    stats.chunks = chunkCount_;
+    stats.historyCount = historyStore_ ? historyStore_->count() : 0;
+    stats.favoriteCount = favoriteStore_ ? favoriteStore_->caseCount() : 0;
+    stats.indexLoadMs = retriever_ ? retriever_->lastLoadMs() : -1;
+    stats.configLine = QStringLiteral(
+        "BM25 k1=%1 / b=%2，融合权重 %3（BM25）: %4（向量），TopK=%5")
+                           .arg(appSettings_.k1)
+                           .arg(appSettings_.b)
+                           .arg(appSettings_.bm25Weight)
+                           .arg(appSettings_.vectorWeight)
+                           .arg(appSettings_.topK);
+    stats.embeddingStatus = statusEmbedding_ ? statusEmbedding_->text()
+                                             : QStringLiteral("未知");
+    stats.llmStatus = statusLlm_ ? statusLlm_->text() : QStringLiteral("未知");
+    statusPage_->refreshStats(stats);
+}
+
+void MainWindow::onClearRunLog() {
+    runLog_.clear();
+    if (statusPage_) {
+        statusPage_->refreshLog(runLog_.entries());
+    }
+    appendRunLog(QStringLiteral("信息"), QStringLiteral("操作流水已清空"));
 }
 
 // ── 状态栏汇总 ──
@@ -365,6 +426,8 @@ void MainWindow::onEngineStatsChanged(int docCount, int chunkCount) {
         text += QStringLiteral("（本次启动自磁盘恢复）");
     }
     statusEngine_->setText(text);
+    appendRunLog(QStringLiteral("信息"),
+                 QStringLiteral("文档库更新：%1 篇 / %2 块").arg(docCount_).arg(chunkCount_));
 }
 
 // ── 文档库变更（删除 / 清空）──
@@ -389,6 +452,7 @@ void MainWindow::onFavoriteChanged() {
     if (favoritesPage_) {
         favoritesPage_->refresh();
     }
+    appendRunLog(QStringLiteral("信息"), QStringLiteral("案例收藏集变更"));
 }
 
 // ── 问答回合结束 → 落库（T2）──
@@ -410,6 +474,10 @@ void MainWindow::onAnswerRecorded(const history::HistoryRecord& record) {
     if (historyPage_) {
         historyPage_->refresh();
     }
+    appendRunLog(QStringLiteral("信息"),
+                 QStringLiteral("新问答记录 #%1：%2")
+                     .arg(id)
+                     .arg(QString::fromStdString(record.query).left(24)));
 }
 
 // ── T3 配置中心 ──
@@ -444,6 +512,11 @@ void MainWindow::onSettingsChanged(const config::AppSettings& settings) {
     if (qualityPage_) {
         qualityPage_->refreshServiceHint();
     }
+    appendRunLog(QStringLiteral("信息"),
+                 QStringLiteral("检索配置保存并生效（k1=%1，TopK=%2）")
+                     .arg(settings.k1)
+                     .arg(settings.topK));
+    refreshStatusPage();
 }
 
 // ── T7 同义词归一化 ──
@@ -455,6 +528,9 @@ void MainWindow::onSynonymsChanged(rag::synonym::SynonymMap map) {
     // P1：与配置热更新同款——队列化到引擎线程，与检索任务串行
     QMetaObject::invokeMethod(engineWorker_, "setSynonymMap", Qt::QueuedConnection,
                               Q_ARG(rag::synonym::SynonymMap, map));
+    appendRunLog(QStringLiteral("信息"),
+                 QStringLiteral("同义词映射更新（%1 条），下一次检索生效")
+                     .arg(static_cast<int>(map.entries.size())));
 }
 
 // ── P0-2 跨页忙碌互斥 ──
@@ -469,6 +545,12 @@ void MainWindow::forwardEngineBusy(bool busy) {
     }
     if (qualityPage_) {
         qualityPage_->setExternalBusy(busy);
+    }
+    appendRunLog(QStringLiteral("信息"), busy
+        ? QStringLiteral("引擎任务开始")
+        : QStringLiteral("引擎任务完成"));
+    if (!busy) {
+        refreshStatusPage();   // 任务结束后统计可能变化（导入/删除/历史落库）
     }
 }
 
@@ -523,6 +605,9 @@ void MainWindow::onApiKeyStateChanged(bool ready) {
     // 生成路，Embedding 的 Key 归设置页管，两条路不能再共用一个 ready。
     apiReady_ = ready;
     refreshServiceStatus();
+    appendRunLog(QStringLiteral("信息"), ready
+        ? QStringLiteral("LLM 服务 Key 已配置（生成路就绪）")
+        : QStringLiteral("LLM 服务 Key 已清除（AI 回答不可用，检索不受影响）"));
 }
 
 void MainWindow::refreshServiceStatus() {

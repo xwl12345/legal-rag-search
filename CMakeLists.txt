@@ -101,6 +101,7 @@ set(SRC_UI
     src/ui/doc_viewer_dialog.cpp
     src/ui/snippet_dialog.cpp
     src/ui/settings_page.cpp
+    src/ui/status_page.cpp
     src/ui/main_window.cpp
     src/ui/markdown_render.cpp
 )
@@ -148,6 +149,7 @@ set(HEADERS
     include/ui/doc_viewer_dialog.h
     include/ui/snippet_dialog.h
     include/ui/settings_page.h
+    include/ui/status_page.h
     include/config/app_config.h
     include/config/app_settings.h
     include/history/history_record.h
