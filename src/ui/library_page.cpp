@@ -224,6 +224,11 @@ void LibraryPage::refresh() {
     updateSummary();
     clearDetails();
     refreshKbCombo();   // T13：库目录可能被本页/外部改动，刷新下拉
+    // rebuildTable 会清掉选中行（右侧随之回到占位提示）。默认选中首行，
+    // 让详情区始终有内容——与 T11 收藏页 rebuild 后默认选中首项同款处理。
+    if (table_->rowCount() > 0) {
+        table_->selectRow(0);
+    }
 }
 
 void LibraryPage::rebuildTable() {
@@ -606,6 +611,12 @@ void LibraryPage::onClearAll() {
 }
 
 // ── T13 多知识库 ──
+
+void LibraryPage::setKbBusy(bool busy) {
+    if (kbLoadBtn_) kbLoadBtn_->setEnabled(!busy);
+    if (kbSaveBtn_) kbSaveBtn_->setEnabled(!busy);
+    if (kbDeleteBtn_) kbDeleteBtn_->setEnabled(!busy);
+}
 
 void LibraryPage::refreshKbCombo() {
     if (!kbCombo_) return;

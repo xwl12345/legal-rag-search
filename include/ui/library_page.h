@@ -65,6 +65,9 @@ public slots:
         }
     }
 
+    /// T13：切库/另存在途时禁用知识库三按钮（MainWindow 在请求受理/回调时调用）
+    void setKbBusy(bool busy);
+
     // ── T13 多知识库 ──
     /// 主窗口通知当前库已变化（启动恢复 / 切换成功后调用），刷新下拉选中项
     void setCurrentKb(const QString& relPath);

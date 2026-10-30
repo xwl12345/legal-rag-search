@@ -1457,6 +1457,12 @@ int runKbE2E(const QString& corpusDir) {
           QStringLiteral("T13：切到 20 篇库内容真切换"),
           QStringLiteral("%1 行 / %2").arg(libPage->rowCount())
               .arg(kbCombo->currentData().toString()));
+    // refresh 默认选中首行 → 详情区应有实际内容（修复"连点加载后右侧空白/点行无详情"）
+    QTextEdit* detailArea = window.findChild<QTextEdit*>("libraryDetail");
+    check(detailArea && !detailArea->toPlainText().isEmpty(),
+          QStringLiteral("T13：切库后详情区默认显示首行详情"),
+          detailArea ? detailArea->toPlainText().left(30)
+                     : QStringLiteral("控件缺失"));
 
     // ── 删除非占用库 → 文件消失 + 下拉回收 ──
     check(libPage->requestDeleteKb(backupRel),

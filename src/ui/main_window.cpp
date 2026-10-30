@@ -566,7 +566,14 @@ void MainWindow::switchKb(const QString& relPath) {
     if (!engineWorker_ || engineBusy()) {
         return;   // 引擎任务进行中拒绝切换（按钮侧已禁用，这里兜底）
     }
+    if (!pendingKbRel_.isNull()) {
+        return;   // 已有切换在途：拒绝重入。连点会向引擎线程排队多个切换，
+                  // 排队执行期间 UI 线程的刷新直读引擎内存索引 → 数据竞争
+    }
     pendingKbRel_ = relPath;
+    if (libraryPage_) {
+        libraryPage_->setKbBusy(true);   // 在途禁用知识库三按钮
+    }
     const QString absPath = relPath.isEmpty()
         ? QString::fromStdString(config::dataFilePath(config::INDEX_FILE))
         : QString::fromStdString(config::dataFilePath(
@@ -581,6 +588,9 @@ void MainWindow::onIndexSwitched(int docCount, int chunkCount, qint64 loadMs,
         // 加载失败：回滚意图，状态栏与流水如实提示（引擎内部索引已清空，
         // 伪装成功只会让后续检索静默空转——如实报失败引导用户重切）
         pendingKbRel_.clear();
+        if (libraryPage_) {
+            libraryPage_->setKbBusy(false);   // 在途结束，恢复按钮
+        }
         statusEngine_->setText(QStringLiteral("知识库切换失败（见操作流水）"));
         appendRunLog(QStringLiteral("警告"),
                      QStringLiteral("知识库切换失败：%1").arg(path));
@@ -588,6 +598,9 @@ void MainWindow::onIndexSwitched(int docCount, int chunkCount, qint64 loadMs,
     }
     currentKbRel_ = pendingKbRel_;
     pendingKbRel_.clear();
+    if (libraryPage_) {
+        libraryPage_->setKbBusy(false);   // 在途结束，恢复按钮
+    }
     docCount_ = docCount;
     chunkCount_ = chunkCount;
     statusEngine_->setText(
@@ -617,6 +630,9 @@ void MainWindow::onIndexSwitched(int docCount, int chunkCount, qint64 loadMs,
 
 void MainWindow::onIndexSaved(bool ok, const QString& path,
                               const QString& diagnostic) {
+    if (libraryPage_) {
+        libraryPage_->setKbBusy(false);   // 另存在途结束，恢复按钮
+    }
     if (ok) {
         appendRunLog(QStringLiteral("信息"),
                      QStringLiteral("已另存知识库：%1").arg(path));
@@ -630,18 +646,24 @@ void MainWindow::onIndexSaved(bool ok, const QString& path,
 }
 
 void MainWindow::onKbSaveAsRequested(const QString& relPath) {
-    if (!engineWorker_ || engineBusy()) {
+    if (!engineWorker_ || engineBusy() || !pendingKbRel_.isNull()) {
         appendRunLog(QStringLiteral("警告"),
-                     QStringLiteral("引擎任务进行中，另存请求已忽略"));
+                     QStringLiteral("引擎任务/切库进行中，另存请求已忽略"));
         return;
     }
     const QString absPath = QString::fromStdString(
         config::dataFilePath(relPath.toStdString().c_str()));
+    if (libraryPage_) {
+        libraryPage_->setKbBusy(true);
+    }
     QMetaObject::invokeMethod(engineWorker_, "saveIndexAs", Qt::QueuedConnection,
                               Q_ARG(QString, absPath));
 }
 
 void MainWindow::onKbDeleteRequested(const QString& relPath) {
+    if (!pendingKbRel_.isNull()) {
+        return;   // 切库在途，拒绝删除请求（文件可能正被引擎读取）
+    }
     if (relPath.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("删除知识库"),
                              QStringLiteral("默认主库不可删除"));
